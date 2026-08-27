@@ -142,7 +142,13 @@ import {
   ensureInit as storeInit,
   setBackend as storeSetBackend,
 } from "./token-store.js";
-import { dashboardPage, summarise } from "./dashboard.js";`,
+import { dashboardPage, summarise } from "./dashboard.js";
+import { runRemindersFromEnv } from "./reminders.js";
+import {
+  hasBeenSent as storeHasBeenSent,
+  markSent as storeMarkSent,
+  listReminders as storeListReminders,
+} from "./token-store.js";`,
 );
 
 // 2 ------------------------------------------------- collectRows: minting --
@@ -272,6 +278,64 @@ patch(
   "export quotaSummary so /admin/refresh can reuse it",
   `function quotaSummary(status) {`,
   `export function quotaSummary(status) {`,
+);
+
+// 10 ---------------------------------------------- reminders: routes ----
+patch(
+  "GET /admin/reminders (history) and POST /admin/reminders (run now)",
+  `      if (path === "/admin/links") {`,
+  `      if (path === "/admin/reminders/run") {
+        // GET so a platform cron can hit it directly (Vercel/Netlify crons
+        // issue GETs). On Cloudflare prefer the scheduled() handler instead.
+        const out = await runRemindersFromEnv(env || {}, {
+          listAll: storeList, updateRow: storeUpdate,
+          hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,
+        }, { fetchSubscription, quotaSummary });
+        return json(out);
+      }
+      if (path === "/admin/reminders") {
+        const rows = await storeListReminders(Number(url.searchParams.get("limit")) || 100);
+        return json({ count: rows.length, reminders: rows });
+      }
+      if (path === "/admin/links") {`,
+);
+
+patch(
+  "POST /admin/reminders triggers a pass immediately",
+  `        if (path === "/admin/customer") {`,
+  `        if (path === "/admin/reminders") {
+          const out = await runRemindersFromEnv(env || {}, {
+            listAll: storeList, updateRow: storeUpdate,
+            hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,
+          }, { fetchSubscription, quotaSummary });
+          return json(out);
+        }
+        if (path === "/admin/customer") {`,
+);
+
+// 11 ---------------------------------------------- reminders: cron -------
+patch(
+  "Workers cron handler (Cloudflare scheduled triggers)",
+  `    }
+  },
+};`,
+  `    }
+  },
+
+  // Cloudflare scheduled trigger. Add to wrangler.toml:
+  //   [triggers]
+  //   crons = ["0 * * * *"]
+  // On Vercel/Netlify use a cron job hitting POST /admin/reminders instead —
+  // see README → Scheduling.
+  async scheduled(event, env, ctx) {
+    if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
+    await storeInit().catch(() => {});
+    await runRemindersFromEnv(env || {}, {
+      listAll: storeList, updateRow: storeUpdate,
+      hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,
+    }, { fetchSubscription, quotaSummary });
+  },
+};`,
 );
 
 writeFileSync(FILE, src);

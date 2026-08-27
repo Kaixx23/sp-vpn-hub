@@ -167,6 +167,63 @@ revoked          INTEGER              -- 1 = link is dead
 created_at       TEXT
 ```
 
+## Reminders
+
+The reason to run any of this. A reseller doesn't lose customers to a bad VPN —
+they lose them to a subscription that quietly expired and a message that
+arrived two weeks late.
+
+`reminders.js` scans active links and tells *you* what needs attention:
+
+```
+⏳ Bao Nguyen — expires in 5 days (2026-09-01).
+Plan: 200GB / 1 month · USD 8.00
+Quota: 15.6 / 200 GB left
+Paid until: 2026-09-07
+```
+
+Six kinds: `expiry_30/14/7/3/1`, `expired`, `unpaid`, `unknown` (no expiry on
+record), `legacy` (still on a revocable-incapable base64 link).
+
+**It is idempotent**, which is the whole design. State is persisted per
+`(token, kind, day)`, so an hourly cron sends the same "7 days left" message
+**once**, not 24 times. Tomorrow it fires again — renewals don't get forgotten.
+
+A link that jumps from 20 days to 2 days between runs fires exactly **one**
+reminder, for the tightest threshold crossed.
+
+**Delivery failure never loses a reminder.** If Telegram returns 401, the pass
+records the failure, does *not* mark it sent, and keeps going — so one dead
+token can't hide your other customers' renewals, and the next run retries.
+
+Channels: `telegram`, `webhook` (POST JSON — works with Discord/Slack/ntfy), or
+`console`. Credentials are read from env, and a half-configured channel throws
+at startup rather than failing silently at 3am.
+
+### Scheduling
+
+| Platform | How |
+|---|---|
+| Cloudflare Workers | `scheduled()` handler + `crons = ["0 * * * *"]` in `wrangler.toml` (already configured) |
+| Vercel | `crons` in `vercel.json` → `GET /admin/reminders/run` (already configured) |
+| Netlify / anything | Any scheduler hitting `GET /admin/reminders/run`, or `POST /admin/reminders` |
+
+Configure:
+
+```bash
+REMINDER_CHANNEL=telegram      # or webhook | console
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+REMINDER_THRESHOLDS=30,14,7,3,1
+```
+
+Telegram setup: message [@BotFather](https://t.me/BotFather) → `/newbot`, then
+send your bot any message and get your chat id from
+`https://api.telegram.org/bot<TOKEN>/getUpdates`.
+
+Run a pass by hand: `POST /admin/reminders`. See what's been sent:
+`GET /admin/reminders`.
+
 ## Routes
 
 Everything from `sp-global` works unchanged, plus:
@@ -178,6 +235,9 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/mint` | POST | `link=` + customer fields → `{ token, oneLink }` |
 | `/admin/customer` | POST | Edit a customer's details |
 | `/admin/refresh` | GET | Pull live quota + expiry from the supplier |
+| `/admin/reminders` | GET | Reminder history (kind, date, message text) |
+| `/admin/reminders` | POST | Run a reminder pass now |
+| `/admin/reminders/run` | GET | Same, as a GET — for platform crons |
 | `/admin/links` | GET | Registry. **Never returns `supplier_url`** — host only. |
 | `/admin/link/<t>?action=revoke` | GET | Kill a link immediately |
 | `/admin/link/<t>?action=rotate` | GET | Kill + reissue, carries the customer's details |
@@ -218,6 +278,9 @@ npm test
 - `test/dashboard.test.mjs` — **42 checks**: the renewal maths in `summarise()`,
   live quota refresh, the dashboard routes, customer editing, and that no route
   ever leaks a supplier URL.
+- `test/reminders.test.mjs` — **45 checks**: day maths, which reminders are due,
+  cron idempotency (three passes in one day send once; tomorrow fires again),
+  a dead channel not losing the reminder, and the worker routes.
 - `test/leak-proof.mjs` — the before/after attack, side by side.
 - `test/bench.mjs` — the latency numbers below.
 

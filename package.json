@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "patch": "node bin/apply-patch.mjs",
-    "test": "node test/full-proof.mjs && node test/opaque-token.test.mjs && node test/dashboard.test.mjs && node test/leak-proof.mjs",
+    "test": "node test/full-proof.mjs && node test/opaque-token.test.mjs && node test/dashboard.test.mjs && node test/reminders.test.mjs && node test/leak-proof.mjs",
     "dev": "node --watch bin/server.mjs",
     "demo": "node bin/demo-supplier.mjs"
   },

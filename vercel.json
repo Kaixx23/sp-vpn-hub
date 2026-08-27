@@ -1,5 +1,14 @@
 {
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/api/index" }
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/api/index"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/admin/reminders/run",
+      "schedule": "0 * * * *"
+    }
   ]
 }

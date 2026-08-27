@@ -1,0 +1,23 @@
+# Cloudflare Workers deployment — recommended target.
+# Zero cold starts, D1 runs in-process, and `scheduled()` gives you a real cron.
+name = "sp-vpn-hub"
+main = "sp-vpn-worker.js"
+compatibility_date = "2026-01-01"
+
+# Fire the reminder pass at the top of every hour. Idempotent: the same
+# reminder will not be sent twice on the same day.
+[triggers]
+crons = ["0 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sp-vpn-hub"
+# Fill in after: wrangler d1 create sp-vpn-hub
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+[vars]
+REMINDER_CHANNEL = "console"        # console | telegram | webhook
+REMINDER_THRESHOLDS = "30,14,7,3,1"
+# TELEGRAM_BOT_TOKEN = ""           # set with: wrangler secret put TELEGRAM_BOT_TOKEN
+# TELEGRAM_CHAT_ID   = ""
+# WEBHOOK_URL        = ""

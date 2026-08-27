@@ -15,6 +15,12 @@ import {
   setBackend as storeSetBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise } from "./dashboard.js";
+import { runRemindersFromEnv } from "./reminders.js";
+import {
+  hasBeenSent as storeHasBeenSent,
+  markSent as storeMarkSent,
+  listReminders as storeListReminders,
+} from "./token-store.js";
 
 // ---------------- translation ----------------
 const INFO_PREFIX = [
@@ -780,6 +786,13 @@ export default {
           });
           return json({ token, oneLink: `${host}/all/${encodeURIComponent(brand)}?t=${token}` });
         }
+        if (path === "/admin/reminders") {
+          const out = await runRemindersFromEnv(env || {}, {
+            listAll: storeList, updateRow: storeUpdate,
+            hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,
+          }, { fetchSubscription, quotaSummary });
+          return json(out);
+        }
         if (path === "/admin/customer") {
           const patchObj = {};
           for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label"]) {
@@ -869,6 +882,19 @@ export default {
         }
         return json({ error: "action must be rotate | revoke | delete" }, 400);
       }
+      if (path === "/admin/reminders/run") {
+        // GET so a platform cron can hit it directly (Vercel/Netlify crons
+        // issue GETs). On Cloudflare prefer the scheduled() handler instead.
+        const out = await runRemindersFromEnv(env || {}, {
+          listAll: storeList, updateRow: storeUpdate,
+          hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,
+        }, { fetchSubscription, quotaSummary });
+        return json(out);
+      }
+      if (path === "/admin/reminders") {
+        const rows = await storeListReminders(Number(url.searchParams.get("limit")) || 100);
+        return json({ count: rows.length, reminders: rows });
+      }
       if (path === "/admin/links") {
         const rows = await storeList();
         return json({ count: rows.length, links: rows.map(redact) });
@@ -935,5 +961,19 @@ export default {
       }
       return html(errorPage("Couldn't read that link — it may be invalid or expired.<br>(" + String(e.message).replace(/</g, "&lt;") + ")"));
     }
+  },
+
+  // Cloudflare scheduled trigger. Add to wrangler.toml:
+  //   [triggers]
+  //   crons = ["0 * * * *"]
+  // On Vercel/Netlify use a cron job hitting POST /admin/reminders instead —
+  // see README → Scheduling.
+  async scheduled(event, env, ctx) {
+    if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
+    await storeInit().catch(() => {});
+    await runRemindersFromEnv(env || {}, {
+      listAll: storeList, updateRow: storeUpdate,
+      hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,
+    }, { fetchSubscription, quotaSummary });
   },
 };

@@ -61,6 +61,17 @@ export const COLUMNS = [
 ];
 const SELECT = `SELECT ${COLUMNS.join(", ")} FROM links`;
 
+// Reminder de-duplication state. One row per (token, kind, day) — this is what
+// lets an hourly cron run without re-sending the same "7 days left" message.
+export const REMINDERS_DDL = `CREATE TABLE IF NOT EXISTS reminders (
+  token    TEXT NOT NULL,
+  kind     TEXT NOT NULL,
+  date     TEXT NOT NULL,
+  sent_at  TEXT NOT NULL,
+  text     TEXT,
+  PRIMARY KEY (token, kind, date)
+)`;
+
 /** Add any missing columns. Safe to run on every boot. */
 async function migrate(db, kind) {
   let existing = new Set();
@@ -111,9 +122,21 @@ export function clearCache() {
 export class MemoryBackend {
   constructor() {
     this.map = new Map();
+    this.reminders = new Set();
+    this.reminderRows = [];
     this.name = "memory";
   }
   async init() {}
+  async hasBeenSent(token, kind, date) {
+    return this.reminders.has(`${token}|${kind}|${date}`);
+  }
+  async markSent(token, kind, date, text = null) {
+    this.reminders.add(`${token}|${kind}|${date}`);
+    this.reminderRows.push({ token, kind, date, sent_at: new Date().toISOString(), text });
+  }
+  async listReminders(limit = 100) {
+    return this.reminderRows.slice().reverse().slice(0, limit);
+  }
   async get(token) {
     return norm(this.map.get(token));
   }
@@ -151,6 +174,27 @@ export class LibsqlBackend {
     this.db = createClient({ url: this.url, authToken: this.authToken });
     await this.db.execute(LINKS_DDL);
     await migrate(this.db, "libsql");
+    await this.db.execute(REMINDERS_DDL);
+  }
+  async hasBeenSent(token, kind, date) {
+    const r = await this.db.execute({
+      sql: "SELECT 1 AS x FROM reminders WHERE token=? AND kind=? AND date=?",
+      args: [token, kind, date],
+    });
+    return r.rows.length > 0;
+  }
+  async markSent(token, kind, date, text = null) {
+    await this.db.execute({
+      sql: "INSERT OR IGNORE INTO reminders (token, kind, date, sent_at, text) VALUES (?,?,?,?,?)",
+      args: [token, kind, date, new Date().toISOString(), text],
+    });
+  }
+  async listReminders(limit = 100) {
+    const r = await this.db.execute({
+      sql: "SELECT token, kind, date, sent_at, text FROM reminders ORDER BY sent_at DESC LIMIT ?",
+      args: [Number(limit) || 100],
+    });
+    return r.rows;
   }
   async get(token) {
     const r = await this.db.execute({ sql: `${SELECT} WHERE token = ?`, args: [token] });
@@ -196,6 +240,24 @@ export class D1Backend {
   async init() {
     await this.db.prepare(LINKS_DDL).run();
     await migrate(this.db, "d1");
+    await this.db.prepare(REMINDERS_DDL).run();
+  }
+  async hasBeenSent(token, kind, date) {
+    const row = await this.db
+      .prepare("SELECT 1 AS x FROM reminders WHERE token=? AND kind=? AND date=?")
+      .bind(token, kind, date).first();
+    return !!row;
+  }
+  async markSent(token, kind, date, text = null) {
+    await this.db
+      .prepare("INSERT OR IGNORE INTO reminders (token, kind, date, sent_at, text) VALUES (?,?,?,?,?)")
+      .bind(token, kind, date, new Date().toISOString(), text).run();
+  }
+  async listReminders(limit = 100) {
+    const { results } = await this.db
+      .prepare("SELECT token, kind, date, sent_at, text FROM reminders ORDER BY sent_at DESC LIMIT ?")
+      .bind(Number(limit) || 100).all();
+    return results || [];
   }
   async get(token) {
     return norm(await this.db.prepare(`${SELECT} WHERE token = ?`).bind(token).first());
@@ -362,6 +424,20 @@ export async function updateRow(token, patch) {
   if (r) _cache.set(token, { t: Date.now(), v: r });
   return r;
 }
+/** Has this (token, kind) already been sent today? Powers cron idempotency. */
+export async function hasBeenSent(token, kind, date) {
+  await ensureInit();
+  return backend().hasBeenSent(token, kind, date);
+}
+export async function markSent(token, kind, date, text = null) {
+  await ensureInit();
+  return backend().markSent(token, kind, date, text);
+}
+export async function listReminders(limit = 100) {
+  await ensureInit();
+  return backend().listReminders(limit);
+}
+
 export async function removeRow(token) {
   await ensureInit();
   invalidate(token);
