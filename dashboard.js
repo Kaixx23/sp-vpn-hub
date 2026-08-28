@@ -140,7 +140,7 @@ export function dashboardPage(host = "") {
 </div>
 
 <div id="toast" class="toast" hidden></div>
-<script>${esc(CLIENT)}</script>
+<script>${CLIENT.replace(/<\/script/gi, "<\\/script")}</script>
 </body></html>`;
 }
 
@@ -315,10 +315,17 @@ function renderStats(s) {
 }
 
 async function load() {
-  const r = await fetch("/admin/dashboard.json");
-  const j = await r.json();
-  DATA = j.customers || [];
-  renderStats(j.stats); render();
+  const cell = $("#rows");
+  try {
+    const r = await fetch("/admin/dashboard.json");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    DATA = j.customers || [];
+    renderStats(j.stats); render();
+  } catch (err) {
+    cell.innerHTML = '<tr><td colspan="7" class="dim loading">Could not load data — ' +
+      esc(err.message) + '. <a href="/admin" style="color:var(--blue)">Reload</a></td></tr>';
+  }
 }
 
 $("#q").addEventListener("input", (e) => { Q = e.target.value; render(); });
@@ -341,9 +348,12 @@ function openModal(row) {
   f.token.value = row ? row.token : "";
   f.link.disabled = !!row;
   $("#save").textContent = row ? "Save changes" : "Create link";
-  if (row) for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label"])
-    if (row[k] != null && f[k]) f[k].value = row[k];
-  else f.link.disabled = false;
+  if (row) {
+    for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label"])
+      if (row[k] != null && f[k]) f[k].value = row[k];
+  } else {
+    f.link.disabled = false;
+  }
   $("#modal").hidden = false;
 }
 $("#add").addEventListener("click", () => openModal(null));

@@ -13,6 +13,7 @@ import {
   removeRow as storeRemove,
   ensureInit as storeInit,
   setBackend as storeSetBackend,
+  backend as storeBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise } from "./dashboard.js";
 import { runRemindersFromEnv } from "./reminders.js";
@@ -825,7 +826,11 @@ export default {
       }
       if (path === "/admin/dashboard.json") {
         const rows = await storeList();
-        return json({ generated: new Date().toISOString(), stats: summarise(rows), customers: rows.map(redact) });
+        // `store` names the active backend ("turso" | "sqlite-file" | "memory" |
+        // "d1") so a misconfigured deploy is visible from the dashboard itself:
+        // "memory" means TOKEN_STORE_URL was NOT picked up and links will not
+        // survive a cold start.
+        return json({ generated: new Date().toISOString(), store: storeBackend().name, stats: summarise(rows), customers: rows.map(redact) });
       }
       if (path === "/admin/refresh") {
         const rows = (await storeList()).filter((r) => !r.revoked);
