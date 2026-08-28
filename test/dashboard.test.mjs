@@ -24,6 +24,10 @@ const PANELS = {
     "vless://22222222-2222-4222-8222-222222222222@sg1.example.com:443?encryption=none&security=reality&sni=b.com&fp=chrome&pbk=X%3D&sid=6a&type=tcp&flow=xtls-rprx-vision#" + enc("新加坡•电信01")].join("\n"),
   expired: ["STATUS=↑:0.00GB,↓:200.00GB,TOT:200GB Expires:" + day(-3),
     "vless://33333333-3333-4333-8333-333333333333@jp1.example.com:443?encryption=none&security=reality&sni=c.com&fp=chrome&pbk=X%3D&sid=6a&type=tcp&flow=xtls-rprx-vision#" + enc("日本•移联01")].join("\n"),
+  big: ["STATUS=↑:12.00GB,↓:8.28GB,TOT:512GB Expires:" + day(30),
+    "vless://55555555-5555-4555-8555-555555555555@hk5.example.com:443?encryption=none&security=reality&sni=e.com&fp=chrome&pbk=X%3D&sid=6a&type=tcp&flow=xtls-rprx-vision#" + enc("香港•移联02")].join("\n"),
+  huge: ["STATUS=↑:150.90GB,↓:300.20GB,TOT:1024GB Expires:" + day(60),
+    "vless://66666666-6666-4666-8666-666666666666@sg6.example.com:443?encryption=none&security=reality&sni=f.com&fp=chrome&pbk=X%3D&sid=6a&type=tcp&flow=xtls-rprx-vision#" + enc("新加坡•移联02")].join("\n"),
 };
 globalThis.fetch = async (u) => {
   const s = String(u);
@@ -159,6 +163,17 @@ console.log("\n[8] /admin/inspect — auto-detect details from a pasted link");
   ok(j.nodes === 1, `node count detected (${j.nodes})`);
   const body = JSON.stringify(j);
   ok(!body.includes("panel.example"), "inspect response never echoes the supplier URL");
+  const big = await post("/admin/inspect", { link: "https://panel.example/sub?who=big" });
+  const bj = JSON.parse(await big.text());
+  ok(bj.ok === true && bj.total_gb === 512, `512GB plan detected (${bj.total_gb} GB)`);
+  ok(bj.pricing && bj.pricing.price === 12 && bj.pricing.currency === "RMB" && bj.pricing.billing_cycle === "monthly",
+    `512GB auto-priced 12 RMB monthly (got ${JSON.stringify(bj.pricing)})`);
+  const huge = await post("/admin/inspect", { link: "https://panel.example/sub?who=huge" });
+  const hj = JSON.parse(await huge.text());
+  ok(hj.ok === true && hj.total_gb === 1024, `1024GB plan detected (${hj.total_gb} GB)`);
+  ok(hj.pricing && hj.pricing.price === 16 && hj.pricing.currency === "RMB",
+    `1024GB auto-priced 16 RMB (got ${JSON.stringify(hj.pricing)})`);
+  ok(j.pricing === null || j.pricing === undefined, "unknown quota (200GB) gets no auto-price");
   const direct = await post("/admin/inspect", { link: PANELS.healthy.split("\n")[1] });
   const dj = JSON.parse(await direct.text());
   ok(direct.status === 200 && dj.ok === true && dj.direct === true && dj.nodes === 1,

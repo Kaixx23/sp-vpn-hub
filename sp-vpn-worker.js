@@ -23,6 +23,15 @@ import {
   listReminders as storeListReminders,
 } from "./token-store.js";
 
+// ---------------- pricing catalogue ----------------
+// The reseller's plan prices, keyed by the quota (GB) the supplier reports.
+// /admin/inspect matches the detected quota against this table so the
+// Add-customer form prices known plans automatically. Update prices here.
+const PLAN_CATALOG = {
+  512: { price: 12, currency: "RMB", billing_cycle: "monthly" },
+  1024: { price: 16, currency: "RMB", billing_cycle: "monthly" },
+};
+
 // ---------------- translation ----------------
 const INFO_PREFIX = [
   ["距离下次重置剩余", "Reset in"],
@@ -795,6 +804,9 @@ export default {
               used_gb: used,
               left_gb: s ? Math.round(s.left * 100) / 100 : null,
               used_pct: s && s.tot ? Math.round(((s.up + s.down) / s.tot) * 1000) / 10 : null,
+              // Matched plan price from the catalogue (null when the quota
+              // is not a known plan) so the form can auto-fill pricing.
+              pricing: s && PLAN_CATALOG[s.tot] ? PLAN_CATALOG[s.tot] : null,
             });
           } catch (e) {
             return json({ ok: false, error: String(e.message || e) }, 502);

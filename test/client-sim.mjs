@@ -65,20 +65,24 @@ ok(els.mtitle.textContent === "Add customer", "modal title set");
 ok(els.form.link.disabled === false, "supplier link editable in add mode");
 
 // ---- paste a link, wait for the debounced auto-detect -------------------------
-els.form.link.value = "http://localhost:9911/?who=ali";
+els.form.link.value = "http://localhost:9911/?who=riz";
 fire("form.link", "input");
 ok(els.peek.hidden === true || els.peek.textContent === "", "peek quiet before debounce fires");
 await sleep(2600); // debounce 700ms + supplier fetch
 const peekText = els.peek.textContent;
 ok(els.peek.hidden === false, "peek line became visible after detect");
-ok(peekText.includes("200 GB total") && peekText.includes("53.6 GB used"), `peek shows quota ("${peekText}")`);
-ok(peekText.includes("expires 2026-10-19"), "peek shows expiry");
+ok(peekText.includes("512 GB total") && peekText.includes("20.28 GB used"), `peek shows quota ("${peekText}")`);
+ok(peekText.includes("expires 2026-09-27"), "peek shows expiry");
 ok(peekText.includes("4 nodes"), "peek shows node count");
-ok(els.form.supplier_expires.value === "2026-10-19", `hidden supplier_expires filled (${els.form.supplier_expires.value})`);
-ok(String(els.form.total_gb.value) === "200", `hidden total_gb filled (${els.form.total_gb.value})`);
-ok(String(els.form.used_gb.value) === "53.6", `hidden used_gb filled (${els.form.used_gb.value})`);
-ok(els.form.paid_until.value === "2026-10-19", "paid_until auto-prefilled from detected expiry");
-ok(els.form.plan.value === "200GB", "plan auto-prefilled from detected quota");
+ok(peekText.includes("12 RMB / monthly"), "peek shows the auto-matched plan price");
+ok(els.form.supplier_expires.value === "2026-09-27", `hidden supplier_expires filled (${els.form.supplier_expires.value})`);
+ok(String(els.form.total_gb.value) === "512", `hidden total_gb filled (${els.form.total_gb.value})`);
+ok(String(els.form.used_gb.value) === "20.28", `hidden used_gb filled (${els.form.used_gb.value})`);
+ok(els.form.paid_until.value === "2026-09-27", "paid_until auto-prefilled from detected expiry");
+ok(els.form.plan.value === "512GB", "plan auto-prefilled from detected quota");
+ok(String(els.form.price.value) === "12", `price auto-filled from catalogue (${els.form.price.value})`);
+ok(els.form.currency.value === "RMB", `currency auto-filled (${els.form.currency.value})`);
+ok(els.form.billing_cycle.value === "monthly", `billing cycle auto-filled (${els.form.billing_cycle.value})`);
 
 // user fills the rest
 els.form.customer.value = "Sim Client";
@@ -89,14 +93,31 @@ const before = await (await fetch(BASE + "/admin/dashboard.json")).json();
 fire("form", "submit", { target: els.form, preventDefault() {} });
 await sleep(900); // mint + reload
 ok(els.result.className.includes("ok"), "submit reported success");
-ok(els.result.textContent.includes("Created"), "submit shows the one-link message");
+ok(els.result.innerHTML.includes("Created ✓"), "submit shows the created message");
+ok(els.result.innerHTML.includes("onelink"), "one-link box rendered");
+ok(els.result.innerHTML.includes("data-copy="), "copy button rendered next to the link");
+ok(els.modal.hidden === false, "modal STAYS OPEN after create (time to copy)");
+ok(els.save.disabled === true, "save disabled after create (no double-mint)");
+ok(els.cancel.textContent === "Close", "cancel became Close");
 const after = await (await fetch(BASE + "/admin/dashboard.json")).json();
 ok(after.customers.length === before.customers.length + 1, "customer count grew by 1");
 const row = after.customers.find((r) => r.customer === "Sim Client");
 ok(!!row, "new customer present in dashboard.json");
-ok(row && row.supplier_expires === "2026-10-19", `expiry stored from detect (${row && row.supplier_expires})`);
-ok(row && row.total_gb === 200 && row.used_gb === 53.6, `quota stored from detect (${row && row.total_gb}/${row && row.used_gb})`);
+ok(row && row.supplier_expires === "2026-09-27", `expiry stored from detect (${row && row.supplier_expires})`);
+ok(row && row.total_gb === 512 && row.used_gb === 20.28, `quota stored from detect (${row && row.total_gb}/${row && row.used_gb})`);
+ok(row && row.price === 12 && row.currency === "RMB" && row.billing_cycle === "monthly", `catalogue pricing stored (${row && row.price} ${row && row.currency} ${row && row.billing_cycle})`);
 ok(after.stats.expiring30 >= 1, "new row lands in the expiring-30d bucket immediately");
+
+// ---- copy button in the result box --------------------------------------------
+{
+  let copied = null;
+  Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async (t) => { copied = t; } } }, configurable: true });
+  fire("result", "click", { target: { closest: (sel) => sel === "button[data-copy]" ? { dataset: { copy: row && oneLinkText() } } : null } });
+  await sleep(150);
+  ok(typeof copied === "string" && copied.includes("/all/") && copied.includes("?t="), `copy button put the one-link on the clipboard (${copied})`);
+  ok(els.toast.textContent.includes("copied"), "copy confirmed with a toast");
+  function oneLinkText() { const m = els.result.innerHTML.match(/data-copy="([^"]+)"/); return m ? m[1].replace(/&amp;/g, "&") : ""; }
+}
 
 // ---- bad link: detect fails, form stays usable --------------------------------
 fire("add", "click");

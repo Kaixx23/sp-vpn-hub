@@ -214,6 +214,9 @@ color:var(--text);border-radius:9px;padding:9px 11px;font-size:13px;outline:none
 .result.ok{color:var(--green)} .result.err{color:var(--red)}
 .peek{font-size:12px;margin:-3px 0 11px;color:var(--dim);line-height:1.6;word-break:break-word}
 .peek.ok{color:var(--green)} .peek.err{color:var(--red)}
+.onelink{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--blue);background:var(--card2);
+border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin:8px 0;word-break:break-all;
+user-select:all;-webkit-user-select:all;cursor:text}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1b2740;
 border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-size:13px;z-index:60;
 box-shadow:0 12px 30px rgba(0,0,0,.5)}
@@ -233,6 +236,7 @@ const daysTo = (d) => {
   return isNaN(t) ? null : Math.round((t - Date.parse(new Date().toISOString().slice(0,10) + "T00:00:00Z")) / 864e5);
 };
 const money = (r) => r.price == null ? "" : (r.currency || "") + " " + Number(r.price).toFixed(2);
+const oneLinkOf = (r) => location.origin + "/all/" + encodeURIComponent(r.label || "SP VPN") + "?t=" + r.token;
 
 function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.hidden = false;
@@ -288,7 +292,7 @@ function render() {
   $("#meta").textContent = rs.length + " of " + DATA.length + " links";
   $("#rows").innerHTML = rs.length ? rs.map((r) => {
     const name = r.customer || r.label || "—";
-    const one = location.origin + "/all/" + encodeURIComponent(r.label || "SP VPN") + "?t=" + r.token;
+    const one = oneLinkOf(r);
     return '<tr class="' + (r.revoked ? "revoked" : "") + '">' +
       '<td><div class="nm">' + esc(name) + '</div>' +
         '<div class="sub">' + esc(r.token.slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + '</div></td>' +
@@ -383,12 +387,18 @@ async function peek(link) {
       bits.push(j.total_gb + " GB total · " + (j.used_gb || 0) + " GB used" +
         (j.used_pct != null ? " (" + j.used_pct + "%)" : ""));
     if (j.expires) bits.push("expires " + j.expires);
+    if (j.pricing) bits.push(j.pricing.price + " " + j.pricing.currency + " / " + j.pricing.billing_cycle);
     if (j.nodes) bits.push(j.nodes + " node" + (j.nodes === 1 ? "" : "s"));
     peekSay(bits.length ? "✓ " + bits.join(" · ") : "✓ link readable, but it carries no quota/expiry info", "ok");
     // Pre-fill only what the user hasn't typed themselves.
     if (!f.link.disabled) {
       if (j.expires && !f.paid_until.value) f.paid_until.value = j.expires;
       if (j.total_gb > 0 && !f.plan.value) f.plan.value = j.total_gb + "GB";
+      if (j.pricing) {
+        if (!f.price.value) f.price.value = j.pricing.price;
+        if (!f.currency.value) f.currency.value = j.pricing.currency;
+        if (!f.billing_cycle.value) f.billing_cycle.value = j.pricing.billing_cycle;
+      }
     }
   } catch (err) {
     if (myReq !== peekReq) return;
@@ -419,7 +429,9 @@ function openModal(row) {
   $("#mtitle").textContent = row ? "Edit " + (row.customer || row.label || "customer") : "Add customer";
   f.token.value = row ? row.token : "";
   f.link.disabled = !!row;
+  $("#save").disabled = false;
   $("#save").textContent = row ? "Save changes" : "Create link";
+  $("#cancel").textContent = "Cancel";
   if (row) {
     for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label"])
       if (row[k] != null && f[k]) f[k].value = row[k];
@@ -452,10 +464,29 @@ $("#form").addEventListener("submit", async (e) => {
     const j = await r.json();
     if (!r.ok) { res.className = "result err"; res.textContent = j.error || ("HTTP " + r.status); return; }
     res.className = "result ok";
-    res.textContent = editing ? "Saved." : "Created. Send this to the customer:  " + j.oneLink;
-    if (!editing) { await load(); setTimeout(() => ($("#modal").hidden = true), 1400); }
-    else { await load(); $("#modal").hidden = true; toast("Saved"); }
+    // Keep the modal open and show the customer's one-link with a copy
+    // button — auto-closing left no time to copy anything.
+    const link = editing ? oneLinkOf({ label: d.label, token: d.token }) : j.oneLink;
+    res.innerHTML = (editing ? "Saved ✓ — the customer's one-link" : "Created ✓ — send this one-link to the customer") +
+      ':<div class="onelink">' + esc(link) + '</div>' +
+      '<button class="btn" data-copy="' + esc(link) + '">📋 Copy one-link</button>';
+    await load();
+    if (!editing) { $("#save").disabled = true; $("#save").textContent = "Created ✓"; }
+    $("#cancel").textContent = "Close";
   } catch (err) { res.className = "result err"; res.textContent = err.message; }
+});
+
+$("#result").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-copy]");
+  if (!b) return;
+  try {
+    await navigator.clipboard.writeText(b.dataset.copy);
+    toast("One-link copied — paste it to the customer");
+    b.textContent = "✓ Copied";
+    setTimeout(() => (b.textContent = "📋 Copy one-link"), 1600);
+  } catch (err) {
+    toast("Copy blocked — click the link text to select it, then copy");
+  }
 });
 
 $("#rows").addEventListener("click", async (e) => {
