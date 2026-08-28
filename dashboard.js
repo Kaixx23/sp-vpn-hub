@@ -80,6 +80,7 @@ export function dashboardPage(host = "") {
   <div class="wrap">
     <h1>SP VPN <span>reseller dashboard</span></h1>
     <div class="acts">
+      <button id="healthpill" class="pillbtn" title="System health — click for details">🩺 checking…</button>
       <button id="refresh" class="btn ghost" title="Fetch live quota &amp; expiry from the supplier">⟳ Refresh quota</button>
       <button id="add" class="btn">＋ Add customer</button>
     </div>
@@ -156,6 +157,17 @@ export function dashboardPage(host = "") {
   </div>
 </div>
 
+<div id="healthmodal" class="modal" hidden>
+  <div class="sheet">
+    <h2>🩺 System health</h2>
+    <div id="healthbody"><div class="dim loading">Checking…</div></div>
+    <div class="macts" style="margin-top:14px">
+      <button type="button" id="healthre" class="btn ghost">⟳ Re-check now</button>
+      <button type="button" id="healthclose" class="btn">Close</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden></div>
 <script>${CLIENT.replace(/<\/script/gi, "<\\/script")}</script>
 </body></html>`;
@@ -227,6 +239,17 @@ color:var(--text);border-radius:9px;padding:9px 11px;font-size:13px;outline:none
 .result.ok{color:var(--green)} .result.err{color:var(--red)}
 .peek{font-size:12px;margin:-3px 0 11px;color:var(--dim);line-height:1.6;word-break:break-word}
 .peek.ok{color:var(--green)} .peek.err{color:var(--red)}
+.pillbtn{background:#1b2740;border:1px solid var(--line);color:var(--dim);border-radius:20px;
+padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.pillbtn.ok{border-color:var(--green);color:var(--green)}
+.pillbtn.warn{border-color:var(--amber);color:var(--amber)}
+.pillbtn.bad{border-color:var(--red);color:var(--red)}
+.hrow{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.5}
+.hrow:last-child{border-bottom:0}
+.hdot{width:9px;height:9px;border-radius:50%;margin-top:5px;flex:none;background:var(--dim)}
+.hdot.ok{background:var(--green)} .hdot.bad{background:var(--red)}
+.hname{font-weight:700;min-width:104px}
+.hdetail{color:var(--dim);flex:1}
 .onelink{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--blue);background:var(--card2);
 border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin:8px 0;word-break:break-all;
 user-select:all;-webkit-user-select:all;cursor:text}
@@ -539,5 +562,71 @@ $("#rows").addEventListener("click", async (e) => {
   }
 });
 
+// ---- live health: store -> supplier -> converter end-to-end -------------------
+let HEALTH = null;
+
+function renderHealth() {
+  const b = $("#healthbody");
+  if (!HEALTH) { b.innerHTML = '<div class="dim loading">Checking…</div>'; return; }
+  const row = (ok, name, detail) =>
+    '<div class="hrow"><div class="hdot ' + (ok ? "ok" : "bad") + '"></div>' +
+    '<div class="hname">' + esc(name) + '</div><div class="hdetail">' + detail + "</div></div>";
+  let h = "";
+  const st = HEALTH.checks.store;
+  if (st) h += row(st.ok, "Token store",
+    st.ok ? esc(st.backend) + " · " + st.customers + " customers (" + st.active + " active) · " + st.ms + " ms"
+          : esc(st.error || "failed"));
+  const sup = HEALTH.checks.supplier;
+  if (sup) {
+    const hosts = Object.entries(sup.hosts || {});
+    for (const [host, d] of hosts) {
+      h += row(d.ok, "Supplier", d.ok
+        ? esc(host) + " · " + d.nodes + " nodes · " + (d.quota_parsed ? "quota OK" : "no quota info") +
+          (d.expires ? " · expires " + esc(d.expires) : "") + " · " + d.ms + " ms"
+        : esc(host) + " — " + esc(d.error || "failed"));
+    }
+  }
+  const cv = HEALTH.checks.converter;
+  if (cv) h += row(cv.ok, "Converter",
+    cv.ok ? (cv.skipped ? esc(cv.skipped) : "one-link served " + cv.nodes + " nodes" +
+      (cv.quota_parsed ? " with quota header" : "") + " · " + cv.ms + " ms")
+          : esc(cv.error || "failed"));
+  h += '<div class="dim" style="padding:10px 0 0">' + esc(HEALTH.note || "") + "<br>Checked " +
+    esc(HEALTH.generated) + (HEALTH.cached ? " (cached " + Math.round((HEALTH.age_ms || 0) / 1000) + "s ago)" : "") + "</div>";
+  b.innerHTML = h;
+}
+
+async function loadHealth(force) {
+  const pill = $("#healthpill");
+  try {
+    const r = await fetch("/admin/health" + (force ? "?force=1" : ""));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    HEALTH = await r.json();
+    const lvl = HEALTH.level || (HEALTH.ok ? "ok" : "down");
+    pill.className = "pillbtn " + (lvl === "ok" ? "ok" : lvl === "degraded" ? "warn" : "bad");
+    pill.textContent = lvl === "ok" ? "● all systems healthy"
+      : lvl === "degraded" ? "● supplier issue — serving cached"
+      : "● system down";
+    renderHealth();
+  } catch (err) {
+    pill.className = "pillbtn bad";
+    pill.textContent = "● health unknown";
+  }
+}
+
+$("#healthpill").addEventListener("click", () => {
+  renderHealth();
+  $("#healthmodal").hidden = false;
+  if (!HEALTH || HEALTH.cached) loadHealth(false);
+});
+$("#healthclose").addEventListener("click", () => ($("#healthmodal").hidden = true));
+$("#healthre").addEventListener("click", async (e) => {
+  e.target.disabled = true; e.target.textContent = "⟳ Checking…";
+  await loadHealth(true);
+  e.target.disabled = false; e.target.textContent = "⟳ Re-check now";
+});
+
 load();
+loadHealth(false);
+setInterval(() => loadHealth(false), 300000);
 `;

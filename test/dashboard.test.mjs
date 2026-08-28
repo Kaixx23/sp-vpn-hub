@@ -31,6 +31,9 @@ const PANELS = {
 };
 globalThis.fetch = async (u) => {
   const s = String(u);
+  if (s.includes("/all/")) return new Response(Buffer.from(
+    `STATUS=↑:1.00GB,↓:9.00GB,TOT:200GB Expires:${day(45)}\nvless://99999999-9999-4999-8999-999999999999@hk9.example.com:443?encryption=none&security=reality&sni=z.com&fp=chrome&pbk=X%3D&sid=6a&type=tcp#${enc("香港•移联01")}`
+  ).toString("base64"));
   for (const [k, v] of Object.entries(PANELS)) if (s.includes("who=" + k)) return new Response(v);
   return new Response("nope", { status: 500 });
 };
@@ -244,6 +247,27 @@ console.log("\n[10] panel account fields + profit on the API");
   ok(uj.account_email === "zhang.new@gmail.com", `account email editable (${uj.account_email})`);
   const dr = await post("/admin/customer", { token: "0".repeat(48), account_email: "x@x.com" });
   ok(dr.status === 404, `unknown token still 404 (got ${dr.status})`);
+}
+
+console.log("\n[11] /admin/health — live pipeline health");
+{
+  const r = await get("/admin/health?force=1");
+  ok(r.status === 200, `health returned 200 (got ${r.status})`);
+  const j = JSON.parse(await r.text());
+  ok(j.checks.store && j.checks.store.ok === true, `store check ok (${j.checks.store && j.checks.store.backend}, ${j.checks.store && j.checks.store.ms} ms)`);
+  ok(j.checks.store && j.checks.store.customers >= 5, `store counted customers (${j.checks.store && j.checks.store.customers})`);
+  ok(j.checks.supplier && j.checks.supplier.ok === true, "supplier check ok");
+  const hosts = Object.entries(j.checks.supplier.hosts || {});
+  ok(hosts.length === 1 && hosts[0][0] === "panel.example", `one representative host per supplier (${hosts.map((h) => h[0]).join(", ")})`);
+  ok(hosts[0][1].ok === true && hosts[0][1].nodes === 1 && hosts[0][1].quota_parsed === true, `supplier host detail ok (${JSON.stringify(hosts[0][1])})`);
+  ok(j.checks.converter && j.checks.converter.ok === true, `converter end-to-end ok (${j.checks.converter && j.checks.converter.ms} ms)`);
+  ok(j.checks.converter && j.checks.converter.nodes === 1 && j.checks.converter.quota_parsed === true, "converter served nodes with quota parsed");
+  ok(j.ok === true && j.level === "ok", `overall verdict ok (got ${j.level})`);
+  const r2 = await get("/admin/health");
+  const j2 = JSON.parse(await r2.text());
+  ok(j2.cached === true, `second call served from cache (age ${Math.round((j2.age_ms || 0) / 1000)}s)`);
+  const fresh = await get("/admin/health?force=1");
+  ok(JSON.parse(await fresh.text()).cached === undefined, "?force=1 bypasses the cache");
 }
 
 console.log("\n" + "─".repeat(70));

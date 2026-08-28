@@ -656,6 +656,11 @@ async function collectRows(brand, linksText, host) {
 const _cache = new Map();
 const TTL = 300000;
 
+// Health-report cache: an open dashboard polls /admin/health, and the report
+// itself fetches the supplier — cache it so polling cannot hammer the panel.
+const HEALTH_TTL_MS = 120000;
+let _healthCache = { t: 0, report: null };
+
 async function getDecoded(tok) {
   // Token state is resolved on EVERY request so revocation takes effect
   // immediately; only the expensive supplier fetch is memoised below.
@@ -888,6 +893,77 @@ export default {
         // "memory" means TOKEN_STORE_URL was NOT picked up and links will not
         // survive a cold start.
         return json({ generated: new Date().toISOString(), store: storeBackend().name, stats: summarise(rows), customers: rows.map(redact) });
+      }
+      if (path === "/admin/health") {
+        // Live health of the whole pipeline: token store -> supplier -> the
+        // converter itself (end-to-end, fetched like a customer's app would).
+        // Cached 2 minutes so a polling dashboard cannot hammer the supplier.
+        // ?force=1 bypasses the cache.
+        const force = url.searchParams.get("force") === "1";
+        if (_healthCache.report && !force && Date.now() - _healthCache.t < HEALTH_TTL_MS) {
+          return json({ ..._healthCache.report, cached: true, age_ms: Date.now() - _healthCache.t });
+        }
+        const report = { generated: new Date().toISOString(), checks: {} };
+        let rows = [];
+        try {
+          const t0 = Date.now();
+          rows = await storeList();
+          report.checks.store = {
+            ok: true, ms: Date.now() - t0, backend: storeBackend().name,
+            customers: rows.length, active: rows.filter((r) => !r.revoked).length,
+          };
+        } catch (e) {
+          report.checks.store = { ok: false, error: String(e.message || e) };
+        }
+        if (report.checks.store.ok) {
+          const active = rows.filter((r) => !r.revoked);
+          // One representative supplier link per unique supplier host.
+          const byHost = new Map();
+          for (const r of active) {
+            try { const h = new URL(r.supplier_url).host; if (!byHost.has(h)) byHost.set(h, r); } catch (e) {}
+          }
+          report.checks.supplier = { ok: true, hosts: {} };
+          await Promise.all([...byHost.entries()].slice(0, 5).map(async ([h, r]) => {
+            const t0 = Date.now();
+            try {
+              const { status, links } = await fetchSubscription(r.supplier_url);
+              const s = quotaSummary(status);
+              report.checks.supplier.hosts[h] = {
+                ok: true, ms: Date.now() - t0, nodes: links.length,
+                quota_parsed: !!s, expires: s ? s.exp : null,
+              };
+            } catch (e) {
+              report.checks.supplier.ok = false;
+              report.checks.supplier.hosts[h] = { ok: false, ms: Date.now() - t0, error: String(e.message || e) };
+            }
+          }));
+          // Converter end-to-end: fetch our own one-link exactly like a
+          // customer's VPN app does — exercises worker -> supplier -> cache ->
+          // transform -> base64, the full path.
+          const target = active[0];
+          if (target) {
+            const t0 = Date.now();
+            try {
+              const one = `${host}/all/${encodeURIComponent(target.label || "SP VPN")}?t=${encodeURIComponent(target.token)}`;
+              const { status, links } = await fetchSubscription(one);
+              report.checks.converter = {
+                ok: true, ms: Date.now() - t0, nodes: links.length,
+                quota_parsed: !!quotaSummary(status),
+              };
+            } catch (e) {
+              report.checks.converter = { ok: false, ms: Date.now() - t0, error: String(e.message || e) };
+            }
+          } else {
+            report.checks.converter = { ok: true, skipped: "no active customers yet" };
+          }
+        }
+        const c = report.checks;
+        report.ok = !!(c.store && c.store.ok && c.supplier && c.supplier.ok && c.converter && c.converter.ok);
+        report.level = !(c.store && c.store.ok) || !(c.converter && c.converter.ok) ? "down"
+          : !(c.supplier && c.supplier.ok) ? "degraded" : "ok";
+        report.note = "Supplier and converter checks run from our server — they prove the pipeline works end-to-end. They cannot measure China-to-node latency: VPN traffic never flows through this server.";
+        _healthCache = { t: Date.now(), report };
+        return json(report);
       }
       if (path === "/admin/compare") {
         // Diagnostics — byte-diff the ORIGINAL supplier subscription against two

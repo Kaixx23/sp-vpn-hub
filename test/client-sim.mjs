@@ -25,7 +25,7 @@ function el(id, props = {}) {
   return e;
 }
 const els = {};
-for (const id of ["q", "filter", "sort", "refresh", "add", "rows", "stats", "meta", "modal", "result", "mtitle", "toast", "peek", "save", "cancel"])
+for (const id of ["q", "filter", "sort", "refresh", "add", "rows", "stats", "meta", "modal", "result", "mtitle", "toast", "peek", "save", "cancel", "healthpill", "healthmodal", "healthbody", "healthre", "healthclose"])
   els[id] = el(id);
 els.form = el("form", {
   reset: () => { for (const f of FORM_FIELDS) els.form[f].value = els.form[f].defaultValue ?? ""; },
@@ -44,6 +44,7 @@ globalThis.FormData = class FormData {
   entries() { return Object.entries(this.d); }
   [Symbol.iterator]() { return this.entries()[Symbol.iterator](); }
 };
+globalThis.setInterval = () => 0; // the client polls health on an interval; keep the sim exitable
 const realFetch = globalThis.fetch.bind(globalThis);
 globalThis.fetch = (url, opts) => realFetch(url.startsWith("/") ? BASE + url : url, opts);
 const fire = (id, ev, arg) => { for (const fn of listeners[id + ":" + ev] || []) fn(arg || { target: els[id], preventDefault() {} }); };
@@ -66,9 +67,17 @@ for (const m of html.matchAll(/<input[^>]*name="([a-z_]+)"[^>]*>/g)) {
 const js = html.match(/<script>([\s\S]*)<\/script>/)[1];
 new Function(js)(); // executes: wires listeners + load()
 
-await sleep(300); // let load() finish
+await sleep(1200); // let load() + loadHealth() finish
 ok(els.rows.innerHTML.includes("of ") || els.rows.innerHTML.length > 0, "load() rendered rows into #rows");
 ok(els.stats.innerHTML.length > 0, "renderStats() filled #stats");
+
+// ---- live health pill + panel -----------------------------------------------
+ok(els.healthpill.className.includes("ok"), `health pill went green ("${els.healthpill.textContent}")`);
+fire("healthpill", "click");
+ok(els.healthmodal.hidden === false, "health panel opens from the pill");
+ok(els.healthbody.innerHTML.includes("Token store"), "health panel shows the store row");
+ok(els.healthbody.innerHTML.includes("Converter"), "health panel shows the converter row");
+els.healthmodal.hidden = true;
 
 // ---- open the Add-customer modal ---------------------------------------------
 fire("add", "click");
@@ -126,6 +135,17 @@ ok(row && row.profit === 8, `per-row profit computed by the API (${row && row.pr
 ok(els.stats.innerHTML.includes("profit"), "stats show the profit card");
 ok(els.rows.innerHTML.includes("sim.client@gmail.com"), "table shows the panel account email");
 ok(els.rows.innerHTML.includes("+8 net"), "table shows the +8 net profit badge");
+
+// ---- health re-check with a customer in the store -------------------------------
+{
+  fire("healthpill", "click");
+  fire("healthre", "click");
+  await sleep(2500); // force=1 re-check fetches supplier + converter end-to-end
+  ok(els.healthbody.innerHTML.includes("nodes"), "health re-check shows supplier/converter node counts");
+  ok(els.healthbody.innerHTML.includes("Converter"), "health detail lists the converter check");
+  els.healthclose && fire("healthclose", "click");
+  ok(els.healthmodal.hidden === true, "health panel closes");
+}
 ok(after.stats.expiring30 >= 1, "new row lands in the expiring-30d bucket immediately");
 
 // ---- copy button in the result box --------------------------------------------
