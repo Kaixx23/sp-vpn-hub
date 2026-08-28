@@ -148,6 +148,7 @@ const CSS = `
 :root{--bg:#0b1220;--card:#141d31;--card2:#0e1626;--line:rgba(148,163,184,.14);--text:#e8eef8;
 --dim:#8ea0ba;--green:#34d399;--red:#f87171;--amber:#fbbf24;--blue:#60a5fa}
 *{box-sizing:border-box}
+[hidden]{display:none !important}
 body{margin:0;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text)}
 .wrap{max-width:1200px;margin:0 auto;padding:0 18px}
 header{border-bottom:1px solid var(--line);background:linear-gradient(180deg,#17233c,#121a2c);padding:16px 0}
