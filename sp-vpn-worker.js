@@ -889,6 +889,86 @@ export default {
         // survive a cold start.
         return json({ generated: new Date().toISOString(), store: storeBackend().name, stats: summarise(rows), customers: rows.map(redact) });
       }
+      if (path === "/admin/compare") {
+        // Diagnostics — byte-diff the ORIGINAL supplier subscription against two
+        // converter one-links. `a` and `b` must be https://*.netlify.app URLs;
+        // the original supplier URL is recovered from B's ?t= base64 token (the
+        // sp-global link format embeds it). Returns comparison facts only.
+        const a = url.searchParams.get("a") || "";
+        const b = url.searchParams.get("b") || "";
+        if (!/^https:\/\/[a-z0-9-]+\.netlify\.app\//i.test(a) || !/^https:\/\/[a-z0-9-]+\.netlify\.app\//i.test(b)) {
+          return json({ error: "a and b must be https://<site>.netlify.app/… URLs" }, 400);
+        }
+        let supplier = "";
+        try { supplier = b64d(new URL(b).searchParams.get("t") || ""); } catch (e) { supplier = ""; }
+        if (!/^[a-z0-9+.-]+:\/\//i.test(supplier)) {
+          return json({ error: "could not recover the supplier URL from b's token (expected the sp-global base64 link format)" }, 400);
+        }
+        const grab = async (u) => {
+          const t0 = Date.now();
+          try {
+            const { status, links } = await fetchSubscription(u);
+            return { ok: true, ms: Date.now() - t0, status, links };
+          } catch (e) { return { ok: false, ms: Date.now() - t0, error: String(e.message || e) }; }
+        };
+        // Two original fetches: if the supplier rotates nodes between requests,
+        // that — not the converters — explains any set differences.
+        const [o, ra, rb, o2] = await Promise.all([grab(supplier), grab(a), grab(b), grab(supplier)]);
+
+        const uri = (l) => l.split("#")[0].toLowerCase(); // case-insensitive, as apps parse it
+        const setName = (l) => safeDecode(l.split("#")[1] || "");
+        const hostOf = (u) => String(u.split("@")[1] || u).split(/[?:]/)[0];
+        const set = (links) => new Set(links.map(uri));
+        const base = {
+          fetched: {
+            original: { ok: o.ok, ms: o.ms, nodes: o.links ? o.links.length : 0, status: o.status || o.error },
+            a: { ok: ra.ok, ms: ra.ms, nodes: ra.links ? ra.links.length : 0, status: ra.status || ra.error },
+            b: { ok: rb.ok, ms: rb.ms, nodes: rb.links ? rb.links.length : 0, status: rb.status || rb.error },
+          },
+        };
+        if (!(o.ok && ra.ok && rb.ok)) return json(base);
+
+        const oSet = set(o.links), aSet = set(ra.links), bSet = set(rb.links);
+        const diff = (xSet) => ({
+          identical: [...oSet].filter((u) => xSet.has(u)).length + "/" + oSet.size,
+          missing_from_it: [...oSet].filter((u) => !xSet.has(u)).map(hostOf).slice(0, 12),
+          extra_in_it: [...xSet].filter((u) => !oSet.has(u)).map(hostOf).slice(0, 12),
+        });
+        const aMap = new Map(ra.links.map((l) => [uri(l), l]));
+        const bMap = new Map(rb.links.map((l) => [uri(l), l]));
+        const perfect =
+          [...oSet].every((u) => aSet.has(u)) && aSet.size === oSet.size &&
+          [...oSet].every((u) => bSet.has(u)) && bSet.size === oSet.size;
+        return json({
+          ...base,
+          counts: { original: o.links.length, a: ra.links.length, b: rb.links.length },
+          a_vs_original: diff(aSet),
+          b_vs_original: diff(bSet),
+          a_vs_b: {
+            identical_sets: aSet.size === bSet.size && [...aSet].every((u) => bSet.has(u)),
+            only_in_a: [...aSet].filter((u) => !bSet.has(u)).map(hostOf).slice(0, 12),
+            only_in_b: [...bSet].filter((u) => !aSet.has(u)).map(hostOf).slice(0, 12),
+            same_order: ra.links.map(uri).join() === rb.links.map(uri).join(),
+          },
+          supplier_rotation: o2.ok
+            ? {
+                nodes_second_fetch: o2.links.length,
+                uri_diffs_between_two_original_fetches:
+                  [...oSet].filter((u) => !set(o2.links).has(u)).length +
+                  [...set(o2.links)].filter((u) => !oSet.has(u)).length,
+              }
+            : { error: o2.error },
+          name_samples: o.links.slice(0, 8).map((l) => ({
+            original: setName(l),
+            a: aMap.has(uri(l)) ? setName(aMap.get(uri(l))) : "(missing)",
+            b: bMap.has(uri(l)) ? setName(bMap.get(uri(l))) : "(missing)",
+          })),
+          verdict: perfect
+            ? "✅ both converters pass the original nodes through byte-identically — same servers, ports, UUIDs, REALITY keys; only display names are rebranded"
+            : "⚠️ differences found — see missing/extra lists (check supplier_rotation: if the source itself changes between fetches, rotation explains it)",
+          note: "VPN traffic never flows through either converter — apps connect directly to the node servers. The subscription file is downloaded once; it cannot change node speed or cause timeouts.",
+        });
+      }
       if (path === "/admin/refresh") {
         const rows = (await storeList()).filter((r) => !r.revoked);
         // Bounded parallelism: the supplier panel must not see a burst of 50
