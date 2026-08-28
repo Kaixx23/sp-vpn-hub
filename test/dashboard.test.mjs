@@ -146,6 +146,53 @@ console.log("\n[7] the dashboard never leaks a supplier URL");
   ok(!dj.includes("who=healthy"), "supplier query string never leaves the server");
 }
 
+console.log("\n[8] /admin/inspect — auto-detect details from a pasted link");
+{
+  const r = await post("/admin/inspect", { link: "https://panel.example/sub?who=healthy" });
+  ok(r.status === 200, `inspect returned 200 (got ${r.status})`);
+  const j = JSON.parse(await r.text());
+  ok(j.ok === true, "ok: true for a readable subscription");
+  ok(j.expires === day(45), `expiry detected (${j.expires})`);
+  ok(j.total_gb === 200, `total quota detected (${j.total_gb} GB)`);
+  ok(j.used_gb === 10, `used quota detected (${j.used_gb} GB)`);
+  ok(j.left_gb === 190, `remaining quota computed (${j.left_gb} GB)`);
+  ok(j.nodes === 1, `node count detected (${j.nodes})`);
+  const body = JSON.stringify(j);
+  ok(!body.includes("panel.example"), "inspect response never echoes the supplier URL");
+  const direct = await post("/admin/inspect", { link: PANELS.healthy.split("\n")[1] });
+  const dj = JSON.parse(await direct.text());
+  ok(direct.status === 200 && dj.ok === true && dj.direct === true && dj.nodes === 1,
+    "direct node link inspected — nodes counted, no quota claimed");
+  const bad = await post("/admin/inspect", { link: "not a link at all" });
+  ok(bad.status === 400, `garbage link -> 400 (got ${bad.status})`);
+  const dead = await post("/admin/inspect", { link: "https://panel.example/sub?who=nobody" });
+  ok(dead.status === 502, `unreadable supplier -> 502 (got ${dead.status})`);
+  ok(!(await dead.text()).includes("who=nobody"), "inspect error message never echoes the supplier URL");
+}
+
+console.log("\n[9] minting with auto-detected details (no Refresh needed)");
+{
+  const r = await post("/admin/mint", {
+    link: "https://panel.example/sub?who=expiring", customer: "Dmitri", label: "Dmitri",
+    supplier_expires: day(4), total_gb: "200", used_gb: "190",
+  });
+  ok(r.status === 200, `mint with detected details returned 200 (got ${r.status})`);
+  const j = JSON.parse(await r.text());
+  const rows = JSON.parse(await (await get("/admin/dashboard.json")).text()).customers;
+  const row = rows.find((x) => x.token === j.token);
+  ok(row && row.supplier_expires === day(4), `expiry stored at creation (${row && row.supplier_expires})`);
+  ok(row && row.total_gb === 200 && row.used_gb === 190, `quota stored at creation (${row && row.total_gb}/${row && row.used_gb})`);
+  ok(row && !!row.checked_at, "checked_at stamped at creation");
+  const junk = await post("/admin/mint", {
+    link: "https://panel.example/sub?who=healthy", customer: "Junk",
+    supplier_expires: "<script>alert(1)</script>", total_gb: "-5", used_gb: "NaN",
+  });
+  const jt = JSON.parse(await junk.text()).token;
+  const jrow = JSON.parse(await (await get("/admin/dashboard.json")).text()).customers.find((x) => x.token === jt);
+  ok(jrow && jrow.supplier_expires === null && jrow.total_gb === null && jrow.used_gb === null,
+    "junk detail fields rejected and not stored");
+}
+
 console.log("\n" + "─".repeat(70));
 if (failures) { console.log(`❌ ${failures} of ${checks} checks FAILED`); process.exit(1); }
 console.log(`🎉 ALL ${checks} CHECKS PASSED`);

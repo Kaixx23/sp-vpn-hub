@@ -768,6 +768,38 @@ export default {
           if (!rows.length) return html(errorPage("No valid links found — paste the subscription URL your supplier gave you (starts with http or https)"));
           return html((path === "/tool" ? toolResults : rebrandResults)(host, brand, rows));
         }
+        if (path === "/admin/inspect") {
+          // The dashboard's "paste a link, we fill the form" helper: fetch the
+          // subscription once and return everything derivable from it — quota,
+          // expiry, node count. The supplier URL itself never goes back out.
+          const link = (data.link || "").trim();
+          if (!/^(https?:\/\/|[a-z0-9+.-]+:\/\/)/i.test(link)) {
+            return json({ ok: false, error: "link must be a subscription URL or node link" }, 400);
+          }
+          try {
+            if (!/^https?:\/\//i.test(link)) {
+              // Direct node link(s) — no panel behind them, so no quota/expiry.
+              const ns = link.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+              const proxies = ns.map(parseNode).filter(Boolean);
+              return json({ ok: true, direct: true, nodes: ns.length, validNodes: proxies.length });
+            }
+            const { status, links } = await fetchSubscription(link);
+            const s = quotaSummary(status);
+            const used = s ? Math.round((s.up + s.down) * 100) / 100 : null;
+            return json({
+              ok: true,
+              nodes: links.length,
+              validNodes: links.map(parseNode).filter(Boolean).length,
+              expires: s ? s.exp : null,
+              total_gb: s ? s.tot : null,
+              used_gb: used,
+              left_gb: s ? Math.round(s.left * 100) / 100 : null,
+              used_pct: s && s.tot ? Math.round(((s.up + s.down) / s.tot) * 1000) / 10 : null,
+            });
+          } catch (e) {
+            return json({ ok: false, error: String(e.message || e) }, 502);
+          }
+        }
         if (path === "/admin/mint") {
           const link = (data.link || "").trim();
           const label = (data.label || "").trim().slice(0, 200) || null;
@@ -776,6 +808,18 @@ export default {
           }
           const num = (v) => (v === "" || v === undefined || v === null ? null : Number(v));
           const txt = (v) => (v ? String(v).trim().slice(0, 200) : null);
+          // Details detected up front by POST /admin/inspect (the dashboard's
+          // auto-fill). Stored at creation so the row shows live quota + expiry
+          // immediately, with no separate Refresh click. Strictly validated —
+          // junk fields are dropped, never stored.
+          const dateOnly = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "").trim()) ? String(v).trim() : null);
+          const gb = (v) => { const n = num(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+          const detected = {
+            supplier_expires: dateOnly(data.supplier_expires),
+            total_gb: gb(data.total_gb),
+            used_gb: gb(data.used_gb),
+          };
+          const hasDetected = detected.supplier_expires != null || detected.total_gb != null || detected.used_gb != null;
           const token = await storeMint(link, label, {
             customer: txt(data.customer),
             plan: txt(data.plan),
@@ -784,6 +828,7 @@ export default {
             billing_cycle: txt(data.billing_cycle),
             paid_until: txt(data.paid_until),
             notes: txt(data.notes),
+            ...(hasDetected ? { ...detected, checked_at: new Date().toISOString() } : {}),
           });
           return json({ token, oneLink: `${host}/all/${encodeURIComponent(brand)}?t=${token}` });
         }

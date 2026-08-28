@@ -114,9 +114,13 @@ export function dashboardPage(host = "") {
     <h2 id="mtitle">Add customer</h2>
     <form id="form">
       <input type="hidden" name="token">
+      <input type="hidden" name="supplier_expires">
+      <input type="hidden" name="total_gb">
+      <input type="hidden" name="used_gb">
       <label>Supplier link <span class="req">*</span>
         <textarea name="link" rows="2" placeholder="https://your-supplier/api/v1/client/subscribe?token=…"></textarea>
       </label>
+      <div id="peek" class="peek" hidden></div>
       <div class="two">
         <label>Customer name <input name="customer" placeholder="Ali"></label>
         <label>Plan <input name="plan" placeholder="200GB / 3 months"></label>
@@ -208,6 +212,8 @@ color:var(--text);border-radius:9px;padding:9px 11px;font-size:13px;outline:none
 .macts{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
 .result{font-size:12px;margin:6px 0;line-height:1.6;word-break:break-all}
 .result.ok{color:var(--green)} .result.err{color:var(--red)}
+.peek{font-size:12px;margin:-3px 0 11px;color:var(--dim);line-height:1.6;word-break:break-word}
+.peek.ok{color:var(--green)} .peek.err{color:var(--red)}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1b2740;
 border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-size:13px;z-index:60;
 box-shadow:0 12px 30px rgba(0,0,0,.5)}
@@ -342,8 +348,74 @@ $("#refresh").addEventListener("click", async (e) => {
   e.target.disabled = false; e.target.textContent = "⟳ Refresh quota";
 });
 
+// ---- auto-detect: paste a supplier link, the form fills itself ------------
+let peekTimer = null, peekReq = 0, peekPromise = null;
+
+function peekSay(msg, cls) {
+  const p = $("#peek");
+  p.textContent = msg || "";
+  p.className = "peek" + (cls ? " " + cls : "");
+  p.hidden = !msg;
+}
+
+async function peek(link) {
+  const myReq = ++peekReq;
+  peekSay("⏳ Reading the link — fetching quota, expiry & nodes…");
+  const pr = (async () => {
+    const r = await fetch("/admin/inspect", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ link }).toString(),
+    });
+    const j = await r.json().catch(() => ({ ok: false, error: "HTTP " + r.status }));
+    if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+    return j;
+  })();
+  peekPromise = pr;
+  try {
+    const j = await pr;
+    if (myReq !== peekReq) return; // a newer link was pasted meanwhile
+    const f = $("#form");
+    f.supplier_expires.value = j.expires || "";
+    f.total_gb.value = j.total_gb == null ? "" : String(j.total_gb);
+    f.used_gb.value = j.used_gb == null ? "" : String(j.used_gb);
+    const bits = [];
+    if (j.total_gb != null)
+      bits.push(j.total_gb + " GB total · " + (j.used_gb || 0) + " GB used" +
+        (j.used_pct != null ? " (" + j.used_pct + "%)" : ""));
+    if (j.expires) bits.push("expires " + j.expires);
+    if (j.nodes) bits.push(j.nodes + " node" + (j.nodes === 1 ? "" : "s"));
+    peekSay(bits.length ? "✓ " + bits.join(" · ") : "✓ link readable, but it carries no quota/expiry info", "ok");
+    // Pre-fill only what the user hasn't typed themselves.
+    if (!f.link.disabled) {
+      if (j.expires && !f.paid_until.value) f.paid_until.value = j.expires;
+      if (j.total_gb > 0 && !f.plan.value) f.plan.value = j.total_gb + "GB";
+    }
+  } catch (err) {
+    if (myReq !== peekReq) return;
+    const f = $("#form");
+    f.supplier_expires.value = ""; f.total_gb.value = ""; f.used_gb.value = "";
+    peekSay("✗ " + err.message, "err");
+  } finally {
+    if (peekPromise === pr) peekPromise = null;
+  }
+}
+
+$("#form").link.addEventListener("input", () => {
+  clearTimeout(peekTimer);
+  const v = $("#form").link.value.trim();
+  if (!v || !/^[a-z0-9+.-]+:\\/\\//i.test(v)) { peekReq++; peekSay(""); return; }
+  peekTimer = setTimeout(() => peek(v), 700);
+});
+
 function openModal(row) {
   const f = $("#form"); f.reset(); $("#result").textContent = ""; $("#result").className = "result";
+  clearTimeout(peekTimer); peekReq++; peekPromise = null; peekSay("");
+  if (row && (row.supplier_expires || row.total_gb || row.used_gb != null)) {
+    const bits = [];
+    if (row.total_gb) bits.push(row.total_gb + " GB total · " + (row.used_gb || 0) + " GB used");
+    if (row.supplier_expires) bits.push("expires " + row.supplier_expires);
+    peekSay("On file: " + bits.join(" · ") + " — use ⟳ Refresh quota to update");
+  }
   $("#mtitle").textContent = row ? "Edit " + (row.customer || row.label || "customer") : "Add customer";
   f.token.value = row ? row.token : "";
   f.link.disabled = !!row;
@@ -361,9 +433,17 @@ $("#cancel").addEventListener("click", () => ($("#modal").hidden = true));
 
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const f = e.target, d = Object.fromEntries(new FormData(f));
-  const editing = !!d.token;
+  const f = e.target;
+  const editing = !!f.token.value;
   const res = $("#result");
+  // If auto-detect is still reading the pasted link, let it finish first so
+  // the detected quota/expiry are stored together with the new customer.
+  if (!editing && peekPromise) {
+    res.className = "result"; res.textContent = "Reading the link before saving…";
+    try { await peekPromise; } catch (err) {}
+    if ($("#modal").hidden) return; // user hit Cancel while we were reading
+  }
+  const d = Object.fromEntries(new FormData(f));
   try {
     const r = await fetch(editing ? "/admin/customer" : "/admin/mint", {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
