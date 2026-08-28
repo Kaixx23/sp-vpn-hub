@@ -1,3 +1,5 @@
+import { profitOf, PANEL_PASSWORD_DEFAULT } from "./plans.js";
+
 // ============================================================================
 // DASHBOARD — server-rendered shell + a vanilla-JS client.
 //
@@ -39,6 +41,12 @@ export function summarise(rows) {
     ? quotable.reduce((s, r) => s + (Number(r.used_gb) || 0) / Number(r.total_gb), 0) / quotable.length
     : null;
 
+  // Profit: what each active customer pays minus the catalogue cost of their
+  // plan (see plans.js). Rows on unknown plans contribute nothing — profit is
+  // never a guess. null when no row has a known plan at all.
+  const profits = active.map(profitOf).filter((p) => p !== null);
+  const profitMonthly = profits.length ? profits.reduce((a, b) => a + b, 0) : null;
+
   // Legacy base64 tokens cannot be revoked — worth knowing how many remain.
   const legacy = active.filter((r) => r.legacy).length;
 
@@ -52,6 +60,7 @@ export function summarise(rows) {
     unknownExpiry: unknownExp.length,
     unpaid: unpaid.length,
     mrr: Math.round(mrr * 100) / 100,
+    profitMonthly,
     avgQuotaUsedPct: avgUsed === null ? null : Math.round(avgUsed * 1000) / 10,
     legacy,
   };
@@ -130,8 +139,12 @@ export function dashboardPage(host = "") {
         <label>Currency <input name="currency" placeholder="USD"></label>
       </div>
       <div class="two">
-        <label>Billing cycle <input name="billing_cycle" placeholder="quarterly"></label>
+        <label>Billing cycle <input name="billing_cycle" placeholder="monthly"></label>
         <label>Paid until <input name="paid_until" type="date"></label>
+      </div>
+      <div class="two">
+        <label>Panel account email <input name="account_email" type="email" placeholder="customer@gmail.com" title="The login you created for this customer on the supplier panel — used to renew the account"></label>
+        <label>Panel password <input name="account_password" value="${esc(PANEL_PASSWORD_DEFAULT)}" title="Shared password for the panel accounts you create"></label>
       </div>
       <label>Notes <input name="notes" placeholder="Telegram @ali"></label>
       <div id="result" class="result"></div>
@@ -269,7 +282,7 @@ function needsAction(r) {
 function rowsToShow() {
   let rs = DATA.slice();
   const q = Q.toLowerCase();
-  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes]
+  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes, r.account_email]
     .some((v) => String(v || "").toLowerCase().includes(q)));
   if (FILTER === "action") rs = rs.filter(needsAction);
   if (FILTER === "expiring") rs = rs.filter((r) => { const d = daysTo(r.supplier_expires); return d !== null && d >= 0 && d <= 30; });
@@ -295,8 +308,10 @@ function render() {
     const one = oneLinkOf(r);
     return '<tr class="' + (r.revoked ? "revoked" : "") + '">' +
       '<td><div class="nm">' + esc(name) + '</div>' +
-        '<div class="sub">' + esc(r.token.slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + '</div></td>' +
-      '<td>' + esc(r.plan || "—") + '<div class="sub">' + esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + '</div></td>' +
+        '<div class="sub">' + esc(r.token.slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + '</div>' +
+        (r.account_email ? '<div class="sub" title="panel account (for renewals)">✉ ' + esc(r.account_email) + '</div>' : '') + '</td>' +
+      '<td>' + esc(r.plan || "—") + '<div class="sub">' + esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") +
+        (r.profit != null ? ' · <span style="color:var(--green)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : "") + '</div></td>' +
       '<td>' + expPill(r) + '<div class="sub">' + esc(r.supplier_expires || "") + '</div></td>' +
       '<td>' + quotaCell(r) + '</td>' +
       '<td>' + (r.paid_until ? esc(r.paid_until) + (daysTo(r.paid_until) < 0 ? ' <span class="pill red">unpaid</span>' : "") : '<span class="dim">—</span>') + '</td>' +
@@ -321,7 +336,9 @@ function renderStats(s) {
     card(s.overdue, "expired / overdue", s.overdue ? "bad" : "good") +
     card(s.unpaid, "unpaid", s.unpaid ? "bad" : "good") +
     card(s.unknownExpiry, "expiry unknown", s.unknownExpiry ? "warn" : "") +
-    card((s.mrr || 0).toFixed(2), "recurring revenue") +
+    card((s.mrr || 0).toFixed(2), "revenue / month (RMB)") +
+    card(s.profitMonthly == null ? "—" : s.profitMonthly.toFixed(2), "profit / month (RMB)",
+      s.profitMonthly == null ? "" : s.profitMonthly > 0 ? "good" : s.profitMonthly < 0 ? "bad" : "") +
     card(s.legacy, "legacy links", s.legacy ? "warn" : "good");
 }
 
@@ -388,7 +405,8 @@ async function peek(link) {
       bits.push(j.total_gb + " GB total · " + (j.used_gb || 0) + " GB used" +
         (j.used_pct != null ? " (" + j.used_pct + "%)" : ""));
     if (j.expires) bits.push("expires " + j.expires);
-    if (j.pricing) bits.push(j.pricing.price + " " + j.pricing.currency + " / " + j.pricing.billing_cycle);
+    if (j.pricing) bits.push(j.pricing.price + " " + j.pricing.currency + " / " + j.pricing.billing_cycle +
+      (j.pricing.cost != null ? " (cost " + j.pricing.cost + ", profit " + (j.pricing.price - j.pricing.cost) + ")" : ""));
     if (j.nodes) bits.push(j.nodes + " node" + (j.nodes === 1 ? "" : "s"));
     peekSay(bits.length ? "✓ " + bits.join(" · ") : "✓ link readable, but it carries no quota/expiry info", "ok");
     // Pre-fill only what the user hasn't typed themselves.
@@ -434,7 +452,7 @@ function openModal(row) {
   $("#save").textContent = row ? "Save changes" : "Create link";
   $("#cancel").textContent = "Cancel";
   if (row) {
-    for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label"])
+    for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password"])
       if (row[k] != null && f[k]) f[k].value = row[k];
   } else {
     f.link.disabled = false;

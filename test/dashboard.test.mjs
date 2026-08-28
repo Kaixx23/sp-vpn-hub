@@ -67,6 +67,21 @@ console.log("\n[1] summarise() — the renewal maths");
   ok(s.unpaid === 1, `unpaid = paid_until in the past (got ${s.unpaid})`);
   ok(s.mrr === 85, `MRR sums ACTIVE prices only, ignoring the revoked 99 (got ${s.mrr})`);
   ok(s.legacy === 1, `legacy links counted (got ${s.legacy})`);
+
+  // profit: catalogue cost (plans.js) vs the price actually paid
+  const ps = summarise([
+    { revoked: false, total_gb: 512, price: 12, currency: "RMB", billing_cycle: "monthly" },
+    { revoked: false, total_gb: 1024, price: 16, currency: "RMB", billing_cycle: "monthly" },
+    { revoked: false, total_gb: 512, price: 15, currency: "RMB", billing_cycle: "monthly" }, // custom price
+    { revoked: true, total_gb: 512, price: 12, currency: "RMB", billing_cycle: "monthly" },  // revoked -> no profit
+    { revoked: false, total_gb: 200, price: 10, currency: "RMB", billing_cycle: "monthly" }, // unknown plan
+    { revoked: false, total_gb: 512, price: 12, currency: "USD", billing_cycle: "monthly" }, // currency mismatch
+    { revoked: false, total_gb: 512, price: 12, currency: "RMB", billing_cycle: "quarterly" }, // cycle mismatch
+    { revoked: false, total_gb: 512, price: null, currency: "RMB", billing_cycle: "monthly" }, // no price
+  ]);
+  ok(ps.profitMonthly === 29, `profit = 8 + 10 + 11 (custom price), rest excluded (got ${ps.profitMonthly})`);
+  ok(summarise([{ revoked: false, total_gb: 200, price: 10 }]).profitMonthly === null, "no known plans -> profit null");
+  ok(summarise([]).profitMonthly === null, "empty table -> profit null");
 }
 
 console.log("\n[2] minting with customer + billing fields");
@@ -206,6 +221,29 @@ console.log("\n[9] minting with auto-detected details (no Refresh needed)");
   const jrow = JSON.parse(await (await get("/admin/dashboard.json")).text()).customers.find((x) => x.token === jt);
   ok(jrow && jrow.supplier_expires === null && jrow.total_gb === null && jrow.used_gb === null,
     "junk detail fields rejected and not stored");
+}
+
+console.log("\n[10] panel account fields + profit on the API");
+{
+  const r = await post("/admin/mint", {
+    link: "https://panel.example/sub?who=big", customer: "Zhang", label: "Zhang",
+    price: "12", currency: "RMB", billing_cycle: "monthly",
+    account_email: "zhang.renew@gmail.com", account_password: "shevinx123",
+    supplier_expires: day(30), total_gb: "512", used_gb: "20",
+  });
+  const j = JSON.parse(await r.text());
+  ok(r.status === 200, `mint with account fields returned 200 (got ${r.status})`);
+  const rows = JSON.parse(await (await get("/admin/dashboard.json")).text());
+  const row = rows.customers.find((x) => x.token === j.token);
+  ok(row && row.account_email === "zhang.renew@gmail.com", `account email stored (${row && row.account_email})`);
+  ok(row && row.account_password === "shevinx123", "account password stored");
+  ok(row && row.profit === 8, `per-row profit computed (512GB @12 - cost 4 = ${row && row.profit})`);
+  ok(rows.stats.profitMonthly != null && rows.stats.profitMonthly >= 8, `stats carry profitMonthly (${rows.stats.profitMonthly})`);
+  const upd = await post("/admin/customer", { token: j.token, account_email: "zhang.new@gmail.com" });
+  const uj = JSON.parse(await upd.text());
+  ok(uj.account_email === "zhang.new@gmail.com", `account email editable (${uj.account_email})`);
+  const dr = await post("/admin/customer", { token: "0".repeat(48), account_email: "x@x.com" });
+  ok(dr.status === 404, `unknown token still 404 (got ${dr.status})`);
 }
 
 console.log("\n" + "─".repeat(70));

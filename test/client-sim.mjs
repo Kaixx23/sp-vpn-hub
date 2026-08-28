@@ -28,9 +28,9 @@ const els = {};
 for (const id of ["q", "filter", "sort", "refresh", "add", "rows", "stats", "meta", "modal", "result", "mtitle", "toast", "peek", "save", "cancel"])
   els[id] = el(id);
 els.form = el("form", {
-  reset: () => { for (const f of FORM_FIELDS) els.form[f].value = ""; },
+  reset: () => { for (const f of FORM_FIELDS) els.form[f].value = els.form[f].defaultValue ?? ""; },
 });
-const FORM_FIELDS = ["token", "supplier_expires", "total_gb", "used_gb", "link", "customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label"];
+const FORM_FIELDS = ["token", "supplier_expires", "total_gb", "used_gb", "link", "customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password"];
 for (const f of FORM_FIELDS) els.form[f] = el("form." + f);
 
 globalThis.document = {
@@ -58,6 +58,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- load the real CLIENT script from the real rendered page ------------------
 const html = dashboardPage(BASE);
+// mirror the browser: an input's value="" attribute is its reset default
+for (const m of html.matchAll(/<input[^>]*name="([a-z_]+)"[^>]*>/g)) {
+  const v = m[0].match(/\svalue="([^"]*)"/);
+  if (v && els.form[m[1]]) els.form[m[1]].defaultValue = v[1];
+}
 const js = html.match(/<script>([\s\S]*)<\/script>/)[1];
 new Function(js)(); // executes: wires listeners + load()
 
@@ -70,6 +75,7 @@ fire("add", "click");
 ok(els.modal.hidden === false, "Add-customer modal opened");
 ok(els.mtitle.textContent === "Add customer", "modal title set");
 ok(els.form.link.disabled === false, "supplier link editable in add mode");
+ok(els.form.account_password.value === "shevinx123", `panel password pre-filled with the shared default (${els.form.account_password.value})`);
 
 // ---- paste a link, wait for the debounced auto-detect -------------------------
 els.form.link.value = "http://localhost:9911/?who=riz";
@@ -82,6 +88,7 @@ ok(peekText.includes("512 GB total") && peekText.includes("20.28 GB used"), `pee
 ok(peekText.includes("expires 2026-09-27"), "peek shows expiry");
 ok(peekText.includes("4 nodes"), "peek shows node count");
 ok(peekText.includes("12 RMB / monthly"), "peek shows the auto-matched plan price");
+ok(peekText.includes("cost 4, profit 8"), "peek shows cost + profit for the matched plan");
 ok(els.form.supplier_expires.value === "2026-09-27", `hidden supplier_expires filled (${els.form.supplier_expires.value})`);
 ok(String(els.form.total_gb.value) === "512", `hidden total_gb filled (${els.form.total_gb.value})`);
 ok(String(els.form.used_gb.value) === "20.28", `hidden used_gb filled (${els.form.used_gb.value})`);
@@ -93,7 +100,7 @@ ok(els.form.billing_cycle.value === "monthly", `billing cycle auto-filled (${els
 
 // user fills the rest
 els.form.customer.value = "Sim Client";
-els.form.price.value = "12";
+els.form.account_email.value = "sim.client@gmail.com";
 
 // ---- submit — mint with the detected details ----------------------------------
 const before = await (await fetch(BASE + "/admin/dashboard.json")).json();
@@ -113,6 +120,12 @@ ok(!!row, "new customer present in dashboard.json");
 ok(row && row.supplier_expires === "2026-09-27", `expiry stored from detect (${row && row.supplier_expires})`);
 ok(row && row.total_gb === 512 && row.used_gb === 20.28, `quota stored from detect (${row && row.total_gb}/${row && row.used_gb})`);
 ok(row && row.price === 12 && row.currency === "RMB" && row.billing_cycle === "monthly", `catalogue pricing stored (${row && row.price} ${row && row.currency} ${row && row.billing_cycle})`);
+ok(row && row.account_email === "sim.client@gmail.com", `panel account email stored (${row && row.account_email})`);
+ok(row && row.account_password === "shevinx123", "panel account password stored");
+ok(row && row.profit === 8, `per-row profit computed by the API (${row && row.profit})`);
+ok(els.stats.innerHTML.includes("profit"), "stats show the profit card");
+ok(els.rows.innerHTML.includes("sim.client@gmail.com"), "table shows the panel account email");
+ok(els.rows.innerHTML.includes("+8 net"), "table shows the +8 net profit badge");
 ok(after.stats.expiring30 >= 1, "new row lands in the expiring-30d bucket immediately");
 
 // ---- copy button in the result box --------------------------------------------
@@ -141,6 +154,8 @@ ok(els.modal.hidden === false, "edit modal opened");
 ok(els.peek.textContent.startsWith("On file:"), `edit shows stored details ("${els.peek.textContent.slice(0, 60)}…")`);
 ok(els.form.link.disabled === true, "supplier link read-only in edit mode");
 ok(els.form.customer.value === "Sim Client", "edit form prefilled from the row");
+ok(els.form.account_email.value === "sim.client@gmail.com", "edit form prefills the panel account email");
+ok(els.form.account_password.value === "shevinx123", "edit form prefills the panel password");
 els.modal.hidden = true;
 
 // ---- delete button --------------------------------------------------------------

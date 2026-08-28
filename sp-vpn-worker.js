@@ -16,21 +16,13 @@ import {
   backend as storeBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise } from "./dashboard.js";
+import { PLAN_CATALOG, profitOf } from "./plans.js";
 import { runRemindersFromEnv } from "./reminders.js";
 import {
   hasBeenSent as storeHasBeenSent,
   markSent as storeMarkSent,
   listReminders as storeListReminders,
 } from "./token-store.js";
-
-// ---------------- pricing catalogue ----------------
-// The reseller's plan prices, keyed by the quota (GB) the supplier reports.
-// /admin/inspect matches the detected quota against this table so the
-// Add-customer form prices known plans automatically. Update prices here.
-const PLAN_CATALOG = {
-  512: { price: 12, currency: "RMB", billing_cycle: "monthly" },
-  1024: { price: 16, currency: "RMB", billing_cycle: "monthly" },
-};
 
 // ---------------- translation ----------------
 const INFO_PREFIX = [
@@ -727,12 +719,18 @@ const redact = (r) => ({
   billing_cycle: r.billing_cycle || null,
   paid_until: r.paid_until || null,
   notes: r.notes || null,
+  // The reseller's login on the supplier panel for this customer — used to
+  // renew the account. Shown only on /admin routes.
+  account_email: r.account_email || null,
+  account_password: r.account_password || null,
   supplier_expires: r.supplier_expires || null,
   total_gb: r.total_gb ?? null,
   used_gb: r.used_gb ?? null,
   checked_at: r.checked_at || null,
   revoked: !!r.revoked,
   created_at: r.created_at,
+  // price - catalogue cost of the plan (null when the plan is unknown).
+  profit: profitOf(r),
   supplier_host: (() => {
     try { return new URL(r.supplier_url).host; } catch (e) { return "direct-node-list"; }
   })(),
@@ -840,6 +838,8 @@ export default {
             billing_cycle: txt(data.billing_cycle),
             paid_until: txt(data.paid_until),
             notes: txt(data.notes),
+            account_email: txt(data.account_email),
+            account_password: txt(data.account_password),
             ...(hasDetected ? { ...detected, checked_at: new Date().toISOString() } : {}),
           });
           return json({ token, oneLink: `${host}/all/${encodeURIComponent(brand)}?t=${token}` });
@@ -853,7 +853,7 @@ export default {
         }
         if (path === "/admin/customer") {
           const patchObj = {};
-          for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label"]) {
+          for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password"]) {
             if (data[k] !== undefined) patchObj[k] = data[k] ? String(data[k]).trim().slice(0, 200) : null;
           }
           if (data.price !== undefined) patchObj.price = data.price === "" ? null : Number(data.price);
