@@ -306,6 +306,7 @@ function render() {
         '<button class="mini" data-a="edit" data-t="' + r.token + '">edit</button>' +
         '<button class="mini" data-a="rotate" data-t="' + r.token + '">rotate</button>' +
         (r.revoked ? "" : '<button class="mini danger" data-a="revoke" data-t="' + r.token + '">revoke</button>') +
+        '<button class="mini danger" data-a="delete" data-t="' + r.token + '">delete</button>' +
       '</td></tr>';
   }).join("") : '<tr><td colspan="7" class="dim loading">No customers match.</td></tr>';
 }
@@ -501,6 +502,15 @@ $("#rows").addEventListener("click", async (e) => {
   if (a === "revoke") {
     if (!confirm("Revoke this link? The customer's VPN stops immediately.")) return;
     await fetch("/admin/link/" + b.dataset.t + "?action=revoke"); toast("Revoked"); await load(); return;
+  }
+  if (a === "delete") {
+    const row = DATA.find((r) => r.token === b.dataset.t);
+    const name = (row && (row.customer || row.label)) || "this customer";
+    if (!confirm('Delete "' + name + '" permanently?\\n\\nThe customer record and its link are removed for good. If you only want the link dead, use revoke instead.')) return;
+    const r = await fetch("/admin/link/" + b.dataset.t + "?action=delete");
+    const j = await r.json().catch(() => ({}));
+    toast(r.ok ? "Deleted " + name : "Delete failed: " + (j.error || ("HTTP " + r.status)));
+    await load(); return;
   }
   if (a === "rotate") {
     if (!confirm("Rotate? The old link dies and you must send the new one.")) return;

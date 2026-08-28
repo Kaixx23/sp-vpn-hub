@@ -49,6 +49,13 @@ globalThis.fetch = (url, opts) => realFetch(url.startsWith("/") ? BASE + url : u
 const fire = (id, ev, arg) => { for (const fn of listeners[id + ":" + ev] || []) fn(arg || { target: els[id], preventDefault() {} }); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---- cleanup: remove leftover Sim Client rows from previous runs -------------
+{
+  const j = await realFetch(BASE + "/admin/dashboard.json").then((r) => r.json());
+  for (const r of j.customers.filter((x) => x.customer === "Sim Client"))
+    await realFetch(BASE + "/admin/link/" + r.token + "?action=delete");
+}
+
 // ---- load the real CLIENT script from the real rendered page ------------------
 const html = dashboardPage(BASE);
 const js = html.match(/<script>([\s\S]*)<\/script>/)[1];
@@ -134,6 +141,18 @@ ok(els.modal.hidden === false, "edit modal opened");
 ok(els.peek.textContent.startsWith("On file:"), `edit shows stored details ("${els.peek.textContent.slice(0, 60)}…")`);
 ok(els.form.link.disabled === true, "supplier link read-only in edit mode");
 ok(els.form.customer.value === "Sim Client", "edit form prefilled from the row");
+els.modal.hidden = true;
+
+// ---- delete button --------------------------------------------------------------
+{
+  const before = await realFetch(BASE + "/admin/dashboard.json").then((r) => r.json());
+  ok(before.customers.some((r) => r.customer === "Sim Client"), "Sim Client exists before delete");
+  fire("rows", "click", { target: { closest: () => ({ dataset: { a: "delete", t: row.token } }) } });
+  await sleep(500);
+  const after = await realFetch(BASE + "/admin/dashboard.json").then((r) => r.json());
+  ok(!after.customers.some((r) => r.token === row.token), "Sim Client gone after delete click");
+  ok(els.toast.textContent.includes("Deleted"), `delete confirmed with a toast ("${els.toast.textContent}")`);
+}
 
 console.log("\n" + "─".repeat(70));
 if (failures.length) { console.log(`❌ ${failures.length} checks FAILED`); process.exit(1); }
