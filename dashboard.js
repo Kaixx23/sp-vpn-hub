@@ -1,3 +1,5 @@
+import { profitOf, PANEL_PASSWORD_DEFAULT } from "./plans.js";
+
 // ============================================================================
 // DASHBOARD — server-rendered shell + a vanilla-JS client.
 //
@@ -39,6 +41,11 @@ export function summarise(rows) {
     ? quotable.reduce((s, r) => s + (Number(r.used_gb) || 0) / Number(r.total_gb), 0) / quotable.length
     : null;
 
+  // Profit: what each active customer pays minus the catalogue cost of their
+  // plan (see plans.js). Unknown plans are excluded rather than guessed.
+  const profits = active.map(profitOf).filter((p) => p !== null);
+  const profitMonthly = profits.length ? profits.reduce((a, b) => a + b, 0) : null;
+
   // Legacy base64 tokens cannot be revoked — worth knowing how many remain.
   const legacy = active.filter((r) => r.legacy).length;
 
@@ -52,10 +59,14 @@ export function summarise(rows) {
     unknownExpiry: unknownExp.length,
     unpaid: unpaid.length,
     mrr: Math.round(mrr * 100) / 100,
+    profitMonthly,
     avgQuotaUsedPct: avgUsed === null ? null : Math.round(avgUsed * 1000) / 10,
     legacy,
   };
 }
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 export function dashboardPage(host = "") {
   return `<!doctype html><html lang="en"><head>
@@ -74,6 +85,7 @@ export function dashboardPage(host = "") {
       <span class="brand-copy"><h1>SP VPN</h1><span>reseller dashboard</span></span>
     </a>
     <div class="top-actions">
+      <button id="healthpill" class="pillbtn" title="System health — click for details" aria-label="System health">● checking…</button>
       <span class="live-status"><i></i><span>Live workspace</span></span>
       <button id="refresh" class="btn btn-secondary" aria-label="Refresh quota" title="Fetch live quota &amp; expiry from the supplier">
         <span class="btn-symbol" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="M16.7 8A7 7 0 0 0 4.2 5.5L3 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M3 3.5V7h3.5M3.3 12A7 7 0 0 0 15.8 14.5L17 13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 16.5V13h-3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>
@@ -157,11 +169,15 @@ export function dashboardPage(host = "") {
     </div>
     <form id="form">
       <input type="hidden" name="token">
+      <input type="hidden" name="supplier_expires">
+      <input type="hidden" name="total_gb">
+      <input type="hidden" name="used_gb">
       <div class="form-section"><p class="form-section-title">Connection</p>
         <label>Supplier link <span class="req">*</span>
           <textarea name="link" rows="2" placeholder="https://your-supplier/api/v1/client/subscribe?token=…"></textarea>
           <small class="field-hint">Stored securely on the server. It is never included in customer links.</small>
         </label>
+        <div id="peek" class="peek" hidden></div>
       </div>
       <div class="form-section"><p class="form-section-title">Customer details</p>
         <div class="two">
@@ -173,14 +189,26 @@ export function dashboardPage(host = "") {
           <label>Currency <input name="currency" placeholder="USD"></label>
         </div>
         <div class="two">
-          <label>Billing cycle <input name="billing_cycle" placeholder="quarterly"></label>
+          <label>Billing cycle <input name="billing_cycle" placeholder="monthly"></label>
           <label>Paid until <input name="paid_until" type="date"></label>
+        </div>
+        <div class="two">
+          <label>Panel account email <input name="account_email" type="email" placeholder="customer@gmail.com" title="Supplier panel login used to renew this customer"></label>
+          <label>Panel password <input name="account_password" value="${esc(PANEL_PASSWORD_DEFAULT)}" title="Shared supplier panel password"></label>
         </div>
         <label>Notes <input name="notes" placeholder="Telegram @ali"></label>
       </div>
       <div id="result" class="result" aria-live="polite"></div>
       <div class="macts"><button type="button" id="cancel" class="btn btn-secondary">Cancel</button><button type="submit" class="btn btn-primary" id="save">Create private link</button></div>
     </form>
+  </div>
+</div>
+
+<div id="healthmodal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="health-title">
+  <div class="sheet">
+    <div class="sheet-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span> SYSTEM STATUS</p><h2 id="health-title">System health</h2><p class="sheet-help">A quick end-to-end check of the store, supplier, and converter.</p></div><button type="button" id="healthclose" class="icon-button" aria-label="Close dialog">×</button></div>
+    <div id="healthbody"><div class="loading"><span class="loader"></span> Checking…</div></div>
+    <div class="macts"><button type="button" id="healthre" class="btn btn-secondary">↻ Re-check now</button><button type="button" id="healthdone" class="btn btn-primary">Done</button></div>
   </div>
 </div>
 
@@ -197,6 +225,7 @@ const CSS = `
   --blue:#78a8ff;--amber:#f7c96b;--red:#ff7d84;--shadow:0 24px 70px rgba(0,0,0,.28)
 }
 *{box-sizing:border-box}
+[hidden]{display:none !important}
 html{background:var(--bg-deep);scroll-behavior:smooth}
 body{margin:0;min-width:320px;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   color:var(--text);background:radial-gradient(900px 520px at 74% -12%,rgba(94,89,214,.17),transparent 65%),radial-gradient(700px 480px at 3% 38%,rgba(35,154,157,.07),transparent 68%),var(--bg);line-height:1.45}
@@ -215,9 +244,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .page-main{padding-top:44px;padding-bottom:88px;position:relative}.hero{min-height:224px;position:relative;display:grid;grid-template-columns:minmax(0,1fr) 360px;align-items:center;overflow:hidden;margin-bottom:27px;padding:34px 48px;border:1px solid var(--line);border-radius:24px;background:linear-gradient(110deg,rgba(16,35,57,.9),rgba(10,25,44,.7) 52%,rgba(28,27,67,.72));box-shadow:var(--shadow)}.hero:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(102,227,196,.045),transparent 34%,rgba(138,123,255,.08))}.hero-copy{position:relative;z-index:2;max-width:600px}.eyebrow{display:flex;align-items:center;gap:9px;margin:0 0 12px;color:var(--mint);font-size:10px;font-weight:800;letter-spacing:.18em}.eyebrow-line{width:22px;height:1px;background:currentColor;opacity:.75}.hero h2{margin:0;font-size:clamp(28px,4vw,45px);letter-spacing:-.045em;line-height:1.08;font-weight:780}.hero h2 em{font-style:normal;color:var(--mint)}.hero-lede{max-width:490px;margin:14px 0 19px;color:var(--muted);font-size:14px;line-height:1.65}.hero-foot{display:flex;align-items:center;gap:9px;color:var(--muted-strong);font-size:11px}.pulse-ring{display:grid;place-items:center;width:16px;height:16px}.pulse-ring i{width:6px;height:6px}.hero-art{position:absolute;right:30px;top:0;width:400px;height:100%;opacity:.95}.art-glow{position:absolute;width:280px;height:220px;right:28px;top:4px;background:radial-gradient(circle,rgba(102,227,196,.14),rgba(138,123,255,.1) 36%,transparent 69%);filter:blur(8px)}.art-orbit{position:absolute;border:1px solid rgba(143,172,220,.18);border-radius:50%;transform:rotate(-24deg)}.orbit-one{width:270px;height:132px;right:47px;top:47px}.orbit-two{width:170px;height:250px;right:95px;top:-10px;transform:rotate(43deg)}.art-core{position:absolute;display:grid;place-items:center;right:150px;top:78px;width:80px;height:80px;border:1px solid rgba(102,227,196,.38);border-radius:50%;background:radial-gradient(circle at 35% 25%,rgba(102,227,196,.27),rgba(18,34,58,.9) 66%);box-shadow:0 0 0 12px rgba(102,227,196,.035),0 0 45px rgba(102,227,196,.18)}.art-core span{font-size:15px;letter-spacing:.1em;font-weight:850;color:var(--mint)}.art-core i{position:absolute;right:10px;top:10px;width:6px;height:6px;border-radius:50%;background:var(--mint);box-shadow:0 0 10px var(--mint)}.art-node{position:absolute;width:7px;height:7px;border-radius:50%;background:var(--violet);box-shadow:0 0 14px rgba(138,123,255,.9)}.node-one{right:66px;top:66px}.node-two{right:92px;bottom:36px;background:var(--mint);box-shadow:0 0 14px rgba(102,227,196,.9)}.node-three{right:274px;top:46px;background:var(--amber);box-shadow:0 0 14px rgba(247,201,107,.9)}.art-card{position:absolute;display:flex;align-items:center;gap:9px;padding:9px 12px;border:1px solid var(--line-strong);border-radius:11px;background:rgba(12,28,47,.82);box-shadow:0 12px 25px rgba(0,0,0,.22);backdrop-filter:blur(8px)}.art-card b,.art-card small{display:block}.art-card b{font-size:10px}.art-card small{color:var(--muted);font-size:9px;margin-top:2px}.art-card-top{right:4px;top:33px}.art-card-bottom{right:39px;bottom:24px}.art-card-icon{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;color:var(--violet);background:rgba(138,123,255,.14);font-size:14px}.art-card-icon.green{color:var(--mint);background:rgba(102,227,196,.13)}
 .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:29px}.stat{position:relative;min-height:132px;overflow:hidden;padding:17px 18px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(18,34,58,.9),rgba(11,24,42,.84));box-shadow:0 12px 26px rgba(0,0,0,.1);transition:border-color .2s ease,transform .2s ease}.stat:after{content:"";position:absolute;right:-25px;bottom:-45px;width:110px;height:110px;border-radius:50%;background:var(--stat-glow,rgba(102,227,196,.07));filter:blur(4px)}.stat:hover{transform:translateY(-2px);border-color:var(--line-strong)}.stat-head{position:relative;z-index:1;display:flex;align-items:center;gap:9px}.stat-icon{display:grid;place-items:center;width:26px;height:26px;border-radius:8px;color:var(--mint);background:var(--mint-soft)}.stat-icon svg{width:14px;height:14px}.stat-kicker{color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.stat-value{position:relative;z-index:1;display:block;margin-top:17px;color:var(--text);font-size:27px;letter-spacing:-.04em;line-height:1;font-weight:790}.stat-caption{position:relative;z-index:1;display:block;margin-top:9px;color:var(--muted);font-size:11px}.stat.bad{--stat-glow:rgba(255,125,132,.1)}.stat.bad .stat-icon{color:var(--red);background:rgba(255,125,132,.11)}.stat.bad .stat-value{color:#ffabb0}.stat.warn{--stat-glow:rgba(247,201,107,.1)}.stat.warn .stat-icon{color:var(--amber);background:rgba(247,201,107,.11)}.stat.warn .stat-value{color:#f9d98d}.stat.good .stat-icon{color:var(--mint)}
 .customer-panel{padding:27px 27px 0;border:1px solid var(--line);border-radius:22px;background:linear-gradient(145deg,rgba(13,27,46,.94),rgba(8,19,34,.92));box-shadow:var(--shadow)}.panel-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:0 2px 24px}.panel-heading .eyebrow{margin-bottom:8px}.panel-heading h2{margin:0;font-size:23px;letter-spacing:-.03em}.panel-subtitle{margin:5px 0 0;color:var(--muted);font-size:12px}.dim{color:var(--muted);font-size:11px}.tracked-count{display:flex;align-items:flex-end;gap:9px;padding-bottom:2px}.tracked-count strong{font-size:24px;letter-spacing:-.04em}.tracked-count span{color:var(--muted);font-size:11px;padding-bottom:3px}.toolbar{display:flex;align-items:center;gap:9px;min-height:54px;padding:8px 10px;margin-bottom:12px;border:1px solid var(--line);border-radius:13px;background:rgba(8,19,34,.65)}.search-field{display:flex;align-items:center;gap:9px;flex:1;min-width:190px;color:var(--muted)}.search-field svg{width:17px;height:17px;flex:none}.search-field input{width:100%;min-width:0;border:0;background:transparent;color:var(--text);font-size:12px;outline:0}.search-field input::placeholder{color:#71849e}.toolbar-spacer{flex:1}.select-wrap{position:relative}.select-wrap:after{content:"⌄";position:absolute;right:11px;top:7px;color:var(--muted);font-size:14px;pointer-events:none}.toolbar select{appearance:none;min-width:144px;padding:8px 29px 8px 11px;border:1px solid var(--line);border-radius:8px;outline:0;background:var(--surface-soft);color:var(--muted-strong);font-size:11px;cursor:pointer}.toolbar select:hover{border-color:var(--line-strong);color:var(--text)}.results-meta{display:inline-block;min-width:78px;color:var(--muted);font-size:11px;text-align:right;white-space:nowrap}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:rgba(7,17,31,.48)}table{width:100%;min-width:1110px;border-collapse:collapse;font-size:12px}th{padding:13px 15px;text-align:left;border-bottom:1px solid var(--line);color:#7f94af;font-size:10px;font-weight:750;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}td{padding:15px;border-bottom:1px solid var(--line);vertical-align:middle}tbody tr:last-child td{border-bottom:0}tbody tr{transition:background .18s ease}tbody tr:hover{background:rgba(102,227,196,.035)}tr.revoked{opacity:.54}.customer-cell{display:flex;align-items:center;gap:11px;min-width:170px}.avatar{display:grid;place-items:center;flex:none;width:34px;height:34px;border-radius:11px;color:#bdf5e5;background:linear-gradient(145deg,rgba(102,227,196,.22),rgba(138,123,255,.24));font-size:11px;font-weight:850;letter-spacing:.04em}.nm{font-size:12px;font-weight:750;white-space:nowrap}.sub{display:block;margin-top:3px;color:var(--muted);font-size:10px;line-height:1.35}.plan-cell{min-width:150px;color:var(--muted-strong);font-weight:650}.renewal-cell{min-width:130px}.date{margin-top:4px;color:var(--muted);font-size:10px}.usage-cell{width:170px;min-width:170px}.usage-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;color:var(--muted-strong);font-size:10px}.usage-top b{color:var(--text);font-weight:700}.bar{height:6px;overflow:hidden;border-radius:99px;background:#07111f;box-shadow:inset 0 0 0 1px rgba(255,255,255,.035)}.bar i{display:block;height:100%;min-width:3px;border-radius:inherit;background:linear-gradient(90deg,var(--mint),#76baff);box-shadow:0 0 9px rgba(102,227,196,.25)}.bar i.hot{background:linear-gradient(90deg,var(--amber),var(--red));box-shadow:0 0 9px rgba(255,125,132,.25)}.paid-cell{min-width:130px;color:var(--muted-strong);font-size:11px;white-space:nowrap}.paid-cell .pill{margin-left:4px}.lnk{display:block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--blue);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}.link-cell{min-width:190px}.link-caption{display:flex;align-items:center;gap:5px;margin-top:4px;color:var(--muted);font-size:10px}.link-caption svg{width:11px;height:11px}.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:999px;font-size:10px;font-weight:750;white-space:nowrap}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.red{color:var(--red);background:rgba(255,125,132,.11)}.pill.amber{color:var(--amber);background:rgba(247,201,107,.11)}.pill.green{color:var(--mint);background:rgba(102,227,196,.11)}.pill.gray{color:var(--muted);background:rgba(142,162,187,.11)}.mini{display:inline-flex;align-items:center;justify-content:center;padding:6px 8px;margin:0 3px 3px 0;border:1px solid var(--line);border-radius:7px;background:rgba(18,34,58,.76);color:var(--muted-strong);font-size:10px;cursor:pointer;transition:all .18s ease}.mini:hover{border-color:rgba(102,227,196,.45);color:var(--mint);background:rgba(102,227,196,.07)}.mini.danger:hover{border-color:rgba(255,125,132,.48);color:var(--red);background:rgba(255,125,132,.07)}.actions-cell{min-width:180px;white-space:nowrap}.panel-footer{display:flex;align-items:center;gap:7px;padding:13px 2px 15px;color:var(--muted);font-size:10px}.footer-dot{width:5px;height:5px;border-radius:50%;background:var(--mint);box-shadow:0 0 8px rgba(102,227,196,.65)}.loading{text-align:center!important;padding:52px!important;color:var(--muted);font-size:12px}.loader{display:inline-block;width:13px;height:13px;margin-right:7px;vertical-align:-2px;border:2px solid rgba(102,227,196,.2);border-top-color:var(--mint);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-.modal{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:38px 18px;background:rgba(2,7,14,.76);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}.sheet{width:100%;max-width:570px;padding:27px;border:1px solid var(--line-strong);border-radius:22px;background:linear-gradient(145deg,#12243c,#0b182a);box-shadow:0 30px 90px rgba(0,0,0,.5)}.sheet-heading{display:flex;justify-content:space-between;gap:18px;margin-bottom:23px}.sheet-heading .eyebrow{margin-bottom:9px}.sheet h2{margin:0;font-size:22px;letter-spacing:-.03em}.sheet-help{margin:5px 0 0;color:var(--muted);font-size:12px}.icon-button{display:grid;place-items:center;flex:none;width:31px;height:31px;border:1px solid var(--line);border-radius:9px;background:rgba(7,17,31,.5);color:var(--muted);font-size:22px;line-height:1;cursor:pointer}.icon-button:hover{border-color:var(--line-strong);color:var(--text)}.form-section{padding-top:2px}.form-section+.form-section{margin-top:21px;padding-top:19px;border-top:1px solid var(--line)}.form-section-title{margin:0 0 13px;color:var(--muted-strong);font-size:10px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}label{display:block;margin-bottom:13px;color:var(--muted-strong);font-size:11px;font-weight:700}label input,label textarea{display:block;width:100%;margin-top:6px;padding:10px 11px;border:1px solid var(--line);border-radius:9px;outline:0;background:rgba(7,17,31,.64);color:var(--text);font-size:12px;line-height:1.35;transition:border-color .18s ease,background .18s ease}label input:hover,label textarea:hover{border-color:var(--line-strong)}label input:focus,label textarea:focus{border-color:rgba(102,227,196,.6);background:rgba(7,17,31,.85)}label textarea{resize:vertical;min-height:64px}.field-hint{display:block;margin-top:6px;color:var(--muted);font-size:10px;font-weight:400;line-height:1.5}.req{color:var(--red)}.two{display:grid;grid-template-columns:1fr 1fr;gap:13px}.result{min-height:0;margin:5px 0;color:var(--muted);font-size:11px;line-height:1.6;word-break:break-word}.result.ok{color:var(--mint)}.result.err{color:var(--red)}.macts{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}.toast{position:fixed;right:28px;bottom:27px;z-index:60;max-width:min(380px,calc(100vw - 40px));padding:12px 16px;border:1px solid var(--line-strong);border-radius:11px;background:#12243c;color:var(--text);box-shadow:0 14px 38px rgba(0,0,0,.4);font-size:12px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.modal{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:38px 18px;background:rgba(2,7,14,.76);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}.sheet{width:100%;max-width:570px;padding:27px;border:1px solid var(--line-strong);border-radius:22px;background:linear-gradient(145deg,#12243c,#0b182a);box-shadow:0 30px 90px rgba(0,0,0,.5)}.sheet-heading{display:flex;justify-content:space-between;gap:18px;margin-bottom:23px}.sheet-heading .eyebrow{margin-bottom:9px}.sheet h2{margin:0;font-size:22px;letter-spacing:-.03em}.sheet-help{margin:5px 0 0;color:var(--muted);font-size:12px}.icon-button{display:grid;place-items:center;flex:none;width:31px;height:31px;border:1px solid var(--line);border-radius:9px;background:rgba(7,17,31,.5);color:var(--muted);font-size:22px;line-height:1;cursor:pointer}.icon-button:hover{border-color:var(--line-strong);color:var(--text)}.form-section{padding-top:2px}.form-section+.form-section{margin-top:21px;padding-top:19px;border-top:1px solid var(--line)}.form-section-title{margin:0 0 13px;color:var(--muted-strong);font-size:10px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}label{display:block;margin-bottom:13px;color:var(--muted-strong);font-size:11px;font-weight:700}label input,label textarea{display:block;width:100%;margin-top:6px;padding:10px 11px;border:1px solid var(--line);border-radius:9px;outline:0;background:rgba(7,17,31,.64);color:var(--text);font-size:12px;line-height:1.35;transition:border-color .18s ease,background .18s ease}label input:hover,label textarea:hover{border-color:var(--line-strong)}label input:focus,label textarea:focus{border-color:rgba(102,227,196,.6);background:rgba(7,17,31,.85)}label textarea{resize:vertical;min-height:64px}.field-hint{display:block;margin-top:6px;color:var(--muted);font-size:10px;font-weight:400;line-height:1.5}.req{color:var(--red)}.two{display:grid;grid-template-columns:1fr 1fr;gap:13px}.result{min-height:0;margin:5px 0;color:var(--muted);font-size:11px;line-height:1.6;word-break:break-word}.result.ok{color:var(--mint)}.result.err{color:var(--red)}.macts{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}.pillbtn{display:inline-flex;align-items:center;gap:6px;padding:8px 11px;border:1px solid var(--line);border-radius:999px;background:rgba(13,26,44,.7);color:var(--muted);font-size:10px;font-weight:800;white-space:nowrap;cursor:pointer;transition:all .18s ease}.pillbtn:hover{border-color:var(--line-strong);color:var(--text)}.pillbtn.ok{border-color:rgba(102,227,196,.5);color:var(--mint);background:rgba(102,227,196,.08)}.pillbtn.warn{border-color:rgba(247,201,107,.5);color:var(--amber);background:rgba(247,201,107,.08)}.pillbtn.bad{border-color:rgba(255,125,132,.5);color:var(--red);background:rgba(255,125,132,.08)}.peek{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.55;word-break:break-word}.peek.ok{color:var(--mint)}.peek.err{color:var(--red)}.hrow{display:flex;gap:10px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--line);font-size:11px;line-height:1.5}.hrow:last-child{border-bottom:0}.hdot{width:8px;height:8px;flex:none;margin-top:4px;border-radius:50%;background:var(--muted)}.hdot.ok{background:var(--mint);box-shadow:0 0 8px rgba(102,227,196,.7)}.hdot.bad{background:var(--red);box-shadow:0 0 8px rgba(255,125,132,.6)}.hname{min-width:100px;color:var(--muted-strong);font-weight:750}.hdetail{flex:1;color:var(--muted)}.onelink{padding:9px 11px;margin:8px 0;border:1px solid var(--line);border-radius:9px;background:rgba(7,17,31,.62);color:var(--blue);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;word-break:break-all;user-select:all}.msgbox{padding:10px 11px;margin:8px 0;border:1px solid var(--line);border-radius:9px;background:rgba(7,17,31,.62);color:var(--muted-strong);font-size:11px;line-height:1.6;white-space:pre-line;word-break:break-word}.mcpy{display:flex;gap:8px;flex-wrap:wrap}
+.toast{position:fixed;right:28px;bottom:27px;z-index:60;max-width:min(380px,calc(100vw - 40px));padding:12px 16px;border:1px solid var(--line-strong);border-radius:11px;background:#12243c;color:var(--text);box-shadow:0 14px 38px rgba(0,0,0,.4);font-size:12px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 @media(max-width:1020px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}.hero{grid-template-columns:1fr;padding-left:34px}.hero-art{right:-80px;opacity:.58}.hero-copy{max-width:560px}.top-actions .live-status{display:none}}
-@media(max-width:760px){.wrap{padding-left:18px;padding-right:18px}.topbar-inner{min-height:68px}.brand{min-width:0}.top-actions{gap:7px}.btn{padding:10px}.btn-secondary .btn-label{display:none}.page-main{padding-top:25px;padding-bottom:55px}.hero{min-height:285px;margin-bottom:18px;padding:27px 23px;align-items:start;border-radius:18px}.hero h2{font-size:32px;max-width:390px}.hero-art{right:-105px;top:73px;opacity:.5;transform:scale(.86);transform-origin:top right}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:18px}.stat{min-height:119px;padding:14px}.stat-value{margin-top:14px;font-size:24px}.customer-panel{padding:21px 14px 0;border-radius:17px}.panel-heading{align-items:flex-start;padding:0 4px 18px}.panel-heading h2{font-size:21px}.panel-subtitle{max-width:230px}.tracked-count{display:none}.toolbar{align-items:stretch;flex-wrap:wrap;padding:8px}.search-field{flex-basis:100%;height:31px}.toolbar-spacer{display:none}.select-wrap{flex:1}.toolbar select{width:100%;min-width:0}.results-meta{width:100%;padding:0 2px;text-align:left}.tablewrap{margin:0 -1px}.sheet{padding:22px 18px}.toast{right:20px;bottom:20px}}
+@media(max-width:760px){.pillbtn{font-size:0;padding:9px}.pillbtn:before{content:"●";font-size:10px}.wrap{padding-left:18px;padding-right:18px}.topbar-inner{min-height:68px}.brand{min-width:0}.top-actions{gap:7px}.btn{padding:10px}.btn-secondary .btn-label{display:none}.page-main{padding-top:25px;padding-bottom:55px}.hero{min-height:285px;margin-bottom:18px;padding:27px 23px;align-items:start;border-radius:18px}.hero h2{font-size:32px;max-width:390px}.hero-art{right:-105px;top:73px;opacity:.5;transform:scale(.86);transform-origin:top right}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:18px}.stat{min-height:119px;padding:14px}.stat-value{margin-top:14px;font-size:24px}.customer-panel{padding:21px 14px 0;border-radius:17px}.panel-heading{align-items:flex-start;padding:0 4px 18px}.panel-heading h2{font-size:21px}.panel-subtitle{max-width:230px}.tracked-count{display:none}.toolbar{align-items:stretch;flex-wrap:wrap;padding:8px}.search-field{flex-basis:100%;height:31px}.toolbar-spacer{display:none}.select-wrap{flex:1}.toolbar select{width:100%;min-width:0}.results-meta{width:100%;padding:0 2px;text-align:left}.tablewrap{margin:0 -1px}.sheet{padding:22px 18px}.toast{right:20px;bottom:20px}}
 @media(max-width:480px){.brand-copy span{font-size:9px}.top-actions .btn-primary{padding:10px 11px}.hero{min-height:300px}.hero-lede{font-size:13px}.hero-art{right:-141px;top:91px}.two{grid-template-columns:1fr;gap:0}.sheet-heading{margin-bottom:18px}.macts{flex-direction:column-reverse}.macts .btn{width:100%}}
 `;
 
@@ -243,6 +273,14 @@ const daysTo = (d) => {
   return isNaN(t) ? null : Math.round((t - Date.parse(new Date().toISOString().slice(0,10) + "T00:00:00Z")) / 864e5);
 };
 const money = (r) => r.price == null ? "" : (r.currency || "") + " " + Number(r.price).toFixed(2);
+const oneLinkOf = (r) => location.origin + "/all/" + encodeURIComponent(r.label || "SP VPN") + "?t=" + r.token;
+// The ready-to-send message uses the fresh link returned by /admin/mint.
+// Backslashes are doubled here because CLIENT itself is an outer template literal.
+const readyMessage = (link) =>
+  "Here is your official SP Connect link: 🔗\\n\\n" + link +
+  "\\n\\nYour data package will be valid for 30 days from the activation date. Your data will be renewed every 30 days once you renew your package.\\n\\n" +
+  "I'll send you a reminder 3 days before your renewal date, so you'll have enough time to renew without any interruption.\\n\\n" +
+  "Thank you for choosing SP Connect! ❤️";
 const prettyDate = (d) => {
   if (!d) return "";
   const p = String(d).slice(0, 10).split("-");
@@ -286,7 +324,7 @@ function needsAction(r) {
 function rowsToShow() {
   let rs = DATA.slice();
   const q = Q.toLowerCase();
-  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes]
+  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes, r.account_email]
     .some((v) => String(v || "").toLowerCase().includes(q)));
   if (FILTER === "action") rs = rs.filter(needsAction);
   if (FILTER === "expiring") rs = rs.filter((r) => { const d = daysTo(r.supplier_expires); return d !== null && d >= 0 && d <= 30; });
@@ -316,17 +354,17 @@ function render() {
   $("#activeCount").textContent = active;
   $("#rows").innerHTML = rs.length ? rs.map((r) => {
     const name = r.customer || r.label || "Unnamed customer";
-    const one = location.origin + "/all/" + encodeURIComponent(r.label || "SP VPN") + "?t=" + r.token;
+    const one = oneLinkOf(r);
     const paid = r.paid_until ? prettyDate(r.paid_until) + (daysTo(r.paid_until) < 0 ? ' <span class="pill red">unpaid</span>' : '') : '<span class="dim">Not recorded</span>';
     return '<tr class="' + (r.revoked ? "revoked" : "") + '">' +
       '<td><div class="customer-cell"><span class="avatar">' + esc(initials(name)) + '</span><div><div class="nm">' + esc(name) + '</div>' +
-        '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + '</div></div></div></td>' +
-      '<td class="plan-cell">' + esc(r.plan || "No plan set") + '<div class="sub">' + esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + '</div></td>' +
+        '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + '</div></div></td>' +
+      '<td class="plan-cell">' + esc(r.plan || "No plan set") + '<div class="sub">' + esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : "") + '</div></td>' +
       '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + esc(prettyDate(r.supplier_expires) || "Not checked") + '</div></td>' +
       '<td class="usage-cell">' + quotaCell(r) + '</td>' +
       '<td class="paid-cell">' + paid + '</td>' +
       '<td class="link-cell"><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span><span class="link-caption"><svg viewBox="0 0 20 20" fill="none"><path d="M7.5 12.5 12.5 7.5M6 14a3 3 0 0 1 0-4.2l1.6-1.6M14 6a3 3 0 0 1 0 4.2l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> private link</span></td>' +
-      '<td class="actions-cell">' + actionButton("copy", one, "Copy") + actionButton("edit", r.token, "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + '</td>' +
+      '<td class="actions-cell">' + actionButton("copy", one, "Copy") + actionButton("edit", r.token, "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
       '</tr>';
   }).join("") : '<tr><td colspan="7" class="loading">No customers match these filters.</td></tr>';
 }
@@ -341,7 +379,8 @@ function renderStats(s) {
     card(s.overdue, "Expired / overdue", s.overdue ? "bad" : "good", ICONS.warning, "needs a follow-up") +
     card(s.unpaid, "Unpaid", s.unpaid ? "bad" : "good", ICONS.coin, "past the paid-through date") +
     card(s.unknownExpiry, "Expiry unknown", s.unknownExpiry ? "warn" : "good", ICONS.calendar, "refresh to check status") +
-    card((s.mrr || 0).toFixed(2), "Recurring revenue", "", ICONS.coin, "active plans · before costs") +
+    card((s.mrr || 0).toFixed(2), "Revenue / month", "", ICONS.coin, "active plans · before costs") +
+    card(s.profitMonthly == null ? "—" : s.profitMonthly.toFixed(2), "Profit / month", s.profitMonthly == null ? "" : s.profitMonthly > 0 ? "good" : s.profitMonthly < 0 ? "bad" : "", ICONS.coin, "after catalogue cost") +
     card(s.legacy, "Legacy links", s.legacy ? "warn" : "good", ICONS.shield, s.legacy ? "migrate when convenient" : "all links protected");
 }
 
@@ -382,21 +421,100 @@ $("#refresh").addEventListener("click", async (e) => {
   button.disabled = false; if (label) label.textContent = "Refresh data";
 });
 
+// ---- auto-detect: paste a supplier link, the form fills itself ------------
+let peekTimer = null, peekReq = 0, peekPromise = null;
+
+function peekSay(msg, cls) {
+  const p = $("#peek");
+  p.textContent = msg || "";
+  p.className = "peek" + (cls ? " " + cls : "");
+  p.hidden = !msg;
+}
+
+async function peek(link) {
+  const myReq = ++peekReq;
+  peekSay("⏳ Reading the link — fetching quota, expiry & nodes…");
+  const pr = (async () => {
+    const r = await fetch("/admin/inspect", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ link }).toString(),
+    });
+    const j = await r.json().catch(() => ({ ok: false, error: "HTTP " + r.status }));
+    if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+    return j;
+  })();
+  peekPromise = pr;
+  try {
+    const j = await pr;
+    if (myReq !== peekReq) return;
+    const f = $("#form");
+    f.elements.supplier_expires.value = j.expires || "";
+    f.elements.total_gb.value = j.total_gb == null ? "" : String(j.total_gb);
+    f.elements.used_gb.value = j.used_gb == null ? "" : String(j.used_gb);
+    const bits = [];
+    if (j.total_gb != null) bits.push(j.total_gb + " GB total · " + (j.used_gb || 0) + " GB used" + (j.used_pct != null ? " (" + j.used_pct + "%)" : ""));
+    if (j.expires) bits.push("expires " + j.expires);
+    if (j.pricing) bits.push(j.pricing.price + " " + j.pricing.currency + " / " + j.pricing.billing_cycle + (j.pricing.cost != null ? " (cost " + j.pricing.cost + ", profit " + (j.pricing.price - j.pricing.cost) + ")" : ""));
+    if (j.nodes) bits.push(j.nodes + " node" + (j.nodes === 1 ? "" : "s"));
+    peekSay(bits.length ? "✓ " + bits.join(" · ") : "✓ link readable, but it carries no quota/expiry info", "ok");
+    if (!f.elements.link.disabled) {
+      if (j.expires && !f.elements.paid_until.value) f.elements.paid_until.value = j.expires;
+      if (j.total_gb > 0 && !f.elements.plan.value) f.elements.plan.value = j.total_gb + "GB";
+      if (j.pricing) {
+        if (!f.elements.price.value) f.elements.price.value = j.pricing.price;
+        if (!f.elements.currency.value) f.elements.currency.value = j.pricing.currency;
+        if (!f.elements.billing_cycle.value) f.elements.billing_cycle.value = j.pricing.billing_cycle;
+      }
+    }
+  } catch (err) {
+    if (myReq !== peekReq) return;
+    const f = $("#form");
+    f.elements.supplier_expires.value = ""; f.elements.total_gb.value = ""; f.elements.used_gb.value = "";
+    peekSay("✗ " + err.message, "err");
+  } finally {
+    if (peekPromise === pr) peekPromise = null;
+  }
+}
+
+$("#form").elements.link.addEventListener("input", () => {
+  clearTimeout(peekTimer);
+  const v = $("#form").elements.link.value.trim();
+  if (!v || !/^[a-z0-9+.-]+:\\/\\//i.test(v)) { peekReq++; peekSay(""); return; }
+  peekTimer = setTimeout(() => peek(v), 700);
+});
+
 function closeModal() { $("#modal").hidden = true; }
 function openModal(row) {
   const f = $("#form"); f.reset(); $("#result").textContent = ""; $("#result").className = "result";
+  clearTimeout(peekTimer); peekReq++; peekPromise = null; peekSay("");
+  if (row && (row.supplier_expires || row.total_gb || row.used_gb != null)) {
+    const bits = [];
+    if (row.total_gb) bits.push(row.total_gb + " GB total · " + (row.used_gb || 0) + " GB used");
+    if (row.supplier_expires) bits.push("expires " + row.supplier_expires);
+    peekSay("On file: " + bits.join(" · ") + " — use ⟳ Refresh quota to update");
+  }
   $("#mtitle").textContent = row ? "Edit " + (row.customer || row.label || "customer") : "Add customer";
   $("#mhelp").textContent = row ? "Update the details you use to keep this account on track." : "Create a private link and keep its billing details close by.";
-  f.token.value = row ? row.token : "";
-  f.link.disabled = !!row;
+  f.elements.token.value = row ? row.token : "";
+  f.elements.link.disabled = !!row;
+  $("#save").disabled = false;
   $("#save").textContent = row ? "Save changes" : "Create private link";
+  $("#cancel").textContent = "Cancel";
   if (row) {
-    for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label"])
-      if (row[k] != null && f[k]) f[k].value = row[k];
+    for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password", "supplier_expires", "total_gb", "used_gb"])
+      if (row[k] != null && f.elements[k]) f.elements[k].value = row[k];
+  } else {
+    f.elements.link.disabled = false;
   }
   $("#modal").hidden = false;
-  setTimeout(() => (row ? f.customer : f.link).focus(), 0);
+  setTimeout(() => (row ? f.elements.customer : f.elements.link).focus(), 0);
 }
+$("#add").addEventListener("click", () => openModal(null));
+$("#cancel").addEventListener("click", closeModal);
+$("#close").addEventListener("click", closeModal);
+$("#modal").addEventListener("click", (e) => { if (e.target === $("#modal")) closeModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#modal").hidden) closeModal(); });
+
 $("#add").addEventListener("click", () => openModal(null));
 $("#cancel").addEventListener("click", closeModal);
 $("#close").addEventListener("click", closeModal);
@@ -405,10 +523,16 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#mod
 
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const f = e.target, d = Object.fromEntries(new FormData(f));
-  const editing = !!d.token;
+  const f = e.target;
+  const editing = !!f.elements.token.value;
   const res = $("#result"), save = $("#save");
   save.disabled = true;
+  if (!editing && peekPromise) {
+    res.className = "result"; res.textContent = "Reading the link before saving…";
+    try { await peekPromise; } catch (err) {}
+    if ($("#modal").hidden) return;
+  }
+  const d = Object.fromEntries(new FormData(f));
   try {
     const r = await fetch(editing ? "/admin/customer" : "/admin/mint", {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -417,11 +541,29 @@ $("#form").addEventListener("submit", async (e) => {
     const j = await r.json();
     if (!r.ok) { res.className = "result err"; res.textContent = j.error || ("HTTP " + r.status); save.disabled = false; return; }
     res.className = "result ok";
-    res.textContent = editing ? "Saved." : "Created. Send this to the customer:  " + j.oneLink;
+    const link = editing ? oneLinkOf({ label: d.label, token: d.token }) : j.oneLink;
+    const msg = editing ? "" : readyMessage(link);
+    res.innerHTML = (editing ? "Saved ✓ — the customer's one-link" : "Created ✓ — send this ready message to the customer") +
+      ':<div class="onelink">' + esc(link) + '</div>' +
+      (msg ? '<div class="msgbox">' + esc(msg) + '</div>' : "") +
+      '<div class="mcpy"><button class="btn btn-primary" data-copy="' + esc(link) + '" data-label="📋 Copy one-link">📋 Copy one-link</button>' +
+      (msg ? '<button class="btn btn-secondary" data-copy="' + esc(msg) + '" data-label="📋 Copy ready message">📋 Copy ready message</button>' : "") + '</div>';
     await load();
-    if (!editing) setTimeout(closeModal, 1500); else { closeModal(); toast("Customer details saved"); }
-  } catch (err) { res.className = "result err"; res.textContent = err.message; }
-  save.disabled = false;
+    if (!editing) { save.disabled = true; save.textContent = "Created ✓"; }
+    $("#cancel").textContent = "Close";
+  } catch (err) { res.className = "result err"; res.textContent = err.message; save.disabled = false; }
+});
+
+$("#result").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-copy]");
+  if (!b) return;
+  const label = b.dataset.label || "📋 Copy one-link";
+  try {
+    await navigator.clipboard.writeText(b.dataset.copy);
+    toast(label.includes("ready message") ? "Ready message copied" : "One-link copied");
+    b.textContent = "✓ Copied";
+    setTimeout(() => (b.textContent = label), 1600);
+  } catch (err) { toast("Copy blocked — select the text manually, then copy"); }
 });
 
 $("#rows").addEventListener("click", async (e) => {
@@ -440,6 +582,15 @@ $("#rows").addEventListener("click", async (e) => {
     if (!response.ok) { toast("Could not revoke this link"); return; }
     toast("Link revoked"); await load(); return;
   }
+  if (a === "delete") {
+    const row = DATA.find((r) => r.token === b.dataset.t);
+    const name = (row && (row.customer || row.label)) || "this customer";
+    if (!confirm('Delete "' + name + '" permanently?\\n\\nThe customer record and its link are removed for good. If you only want the link dead, use revoke instead.')) return;
+    const response = await fetch("/admin/link/" + b.dataset.t + "?action=delete");
+    const j = await response.json().catch(() => ({}));
+    toast(response.ok ? "Deleted " + name : "Delete failed: " + (j.error || ("HTTP " + response.status)));
+    await load(); return;
+  }
   if (a === "rotate") {
     if (!confirm("Rotate? The old link dies and you must send the new one.")) return;
     const j = await (await fetch("/admin/link/" + b.dataset.t + "?action=rotate")).json();
@@ -448,6 +599,54 @@ $("#rows").addEventListener("click", async (e) => {
     catch (err) { toast("Rotated: " + j.newToken); }
   }
 });
+
+
+// ---- live health: store -> supplier -> converter end-to-end -------------------
+let HEALTH = null;
+
+function renderHealth() {
+  const b = $("#healthbody");
+  if (!HEALTH) { b.innerHTML = '<div class="loading"><span class="loader"></span> Checking…</div>'; return; }
+  const row = (ok, name, detail) => '<div class="hrow"><div class="hdot ' + (ok ? "ok" : "bad") + '"></div><div class="hname">' + esc(name) + '</div><div class="hdetail">' + detail + '</div></div>';
+  let h = "";
+  const st = HEALTH.checks.store;
+  if (st) h += row(st.ok, "Token store", st.ok ? esc(st.backend) + " · " + st.customers + " customers (" + st.active + " active) · " + st.ms + " ms" : esc(st.error || "failed"));
+  const sup = HEALTH.checks.supplier;
+  if (sup) for (const [host, d] of Object.entries(sup.hosts || {}))
+    h += row(d.ok, "Supplier", d.ok ? esc(host) + " · " + d.nodes + " nodes · " + (d.quota_parsed ? "quota OK" : "no quota info") + (d.expires ? " · expires " + esc(d.expires) : "") + " · " + d.ms + " ms" : esc(host) + " — " + esc(d.error || "failed"));
+  const cv = HEALTH.checks.converter;
+  if (cv) h += row(cv.ok, "Converter", cv.ok ? (cv.skipped ? esc(cv.skipped) : "one-link served " + cv.nodes + " nodes" + (cv.quota_parsed ? " with quota header" : "") + " · " + cv.ms + " ms") : esc(cv.error || "failed"));
+  h += '<div class="dim" style="padding:11px 0 0;line-height:1.55">' + esc(HEALTH.note || "") + "<br>Checked " + esc(HEALTH.generated) + (HEALTH.cached ? " (cached " + Math.round((HEALTH.age_ms || 0) / 1000) + "s ago)" : "") + '</div>';
+  b.innerHTML = h;
+}
+
+async function loadHealth(force) {
+  const pill = $("#healthpill");
+  try {
+    const r = await fetch("/admin/health" + (force ? "?force=1" : ""));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    HEALTH = await r.json();
+    const lvl = HEALTH.level || (HEALTH.ok ? "ok" : "down");
+    pill.className = "pillbtn " + (lvl === "ok" ? "ok" : lvl === "degraded" ? "warn" : "bad");
+    pill.textContent = lvl === "ok" ? "● all systems healthy" : lvl === "degraded" ? "● supplier issue — serving cached" : "● system down";
+    renderHealth();
+  } catch (err) { pill.className = "pillbtn bad"; pill.textContent = "● health unknown"; }
+}
+
+$("#healthpill").addEventListener("click", () => {
+  renderHealth(); $("#healthmodal").hidden = false;
+  if (!HEALTH || HEALTH.cached) loadHealth(false);
+});
+$("#healthclose").addEventListener("click", () => ($("#healthmodal").hidden = true));
+$("#healthdone").addEventListener("click", () => ($("#healthmodal").hidden = true));
+$("#healthre").addEventListener("click", async (e) => {
+  e.currentTarget.disabled = true; e.currentTarget.textContent = "↻ Checking…";
+  await loadHealth(true);
+  e.currentTarget.disabled = false; e.currentTarget.textContent = "↻ Re-check now";
+});
+
+loadHealth(false);
+setInterval(() => loadHealth(false), 300000);
 
 load();
 `;
