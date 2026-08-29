@@ -279,10 +279,17 @@ const oneLinkOf = (r) => location.origin + "/all/" + encodeURIComponent(r.label 
 // The ready-to-send message the admin sends a new customer. The link is the
 // converted one-link minted by /admin/mint (j.oneLink) — real host, fresh
 // opaque token, never a hardcoded example.
+//
+// CRITICAL: this block is the CLIENT template literal (see dashboardPage),
+// so any line break that must reach the customer has to be a DOUBLED backslash
+// followed by n. A single-backslash version is eaten by this outer template
+// literal as a real newline: it splits the quoted string and turns the whole
+// inlined client script into a fatal SyntaxError. The delete-confirm dialog
+// below uses the same doubled form for the same reason.
 const readyMessage = (link) =>
-  "Here is your official SP Connect link: 🔗\n\n" + link +
-  "\n\nYour data package will be valid for 30 days from the activation date. Your data will be renewed every 30 days once you renew your package.\n\n" +
-  "I'll send you a reminder 3 days before your renewal date, so you'll have enough time to renew without any interruption.\n\n" +
+  "Here is your official SP Connect link: 🔗\\n\\n" + link +
+  "\\n\\nYour data package will be valid for 30 days from the activation date. Your data will be renewed every 30 days once you renew your package.\\n\\n" +
+  "I'll send you a reminder 3 days before your renewal date, so you'll have enough time to renew without any interruption.\\n\\n" +
   "Thank you for choosing SP Connect! ❤️";
 
 function toast(msg) {
@@ -431,9 +438,9 @@ async function peek(link) {
     const j = await pr;
     if (myReq !== peekReq) return; // a newer link was pasted meanwhile
     const f = $("#form");
-    f.supplier_expires.value = j.expires || "";
-    f.total_gb.value = j.total_gb == null ? "" : String(j.total_gb);
-    f.used_gb.value = j.used_gb == null ? "" : String(j.used_gb);
+    f.elements.supplier_expires.value = j.expires || "";
+    f.elements.total_gb.value = j.total_gb == null ? "" : String(j.total_gb);
+    f.elements.used_gb.value = j.used_gb == null ? "" : String(j.used_gb);
     const bits = [];
     if (j.total_gb != null)
       bits.push(j.total_gb + " GB total · " + (j.used_gb || 0) + " GB used" +
@@ -444,28 +451,28 @@ async function peek(link) {
     if (j.nodes) bits.push(j.nodes + " node" + (j.nodes === 1 ? "" : "s"));
     peekSay(bits.length ? "✓ " + bits.join(" · ") : "✓ link readable, but it carries no quota/expiry info", "ok");
     // Pre-fill only what the user hasn't typed themselves.
-    if (!f.link.disabled) {
-      if (j.expires && !f.paid_until.value) f.paid_until.value = j.expires;
-      if (j.total_gb > 0 && !f.plan.value) f.plan.value = j.total_gb + "GB";
+    if (!f.elements.link.disabled) {
+      if (j.expires && !f.elements.paid_until.value) f.elements.paid_until.value = j.expires;
+      if (j.total_gb > 0 && !f.elements.plan.value) f.elements.plan.value = j.total_gb + "GB";
       if (j.pricing) {
-        if (!f.price.value) f.price.value = j.pricing.price;
-        if (!f.currency.value) f.currency.value = j.pricing.currency;
-        if (!f.billing_cycle.value) f.billing_cycle.value = j.pricing.billing_cycle;
+        if (!f.elements.price.value) f.elements.price.value = j.pricing.price;
+        if (!f.elements.currency.value) f.elements.currency.value = j.pricing.currency;
+        if (!f.elements.billing_cycle.value) f.elements.billing_cycle.value = j.pricing.billing_cycle;
       }
     }
   } catch (err) {
     if (myReq !== peekReq) return;
     const f = $("#form");
-    f.supplier_expires.value = ""; f.total_gb.value = ""; f.used_gb.value = "";
+    f.elements.supplier_expires.value = ""; f.elements.total_gb.value = ""; f.elements.used_gb.value = "";
     peekSay("✗ " + err.message, "err");
   } finally {
     if (peekPromise === pr) peekPromise = null;
   }
 }
 
-$("#form").link.addEventListener("input", () => {
+$("#form").elements.link.addEventListener("input", () => {
   clearTimeout(peekTimer);
-  const v = $("#form").link.value.trim();
+  const v = $("#form").elements.link.value.trim();
   if (!v || !/^[a-z0-9+.-]+:\\/\\//i.test(v)) { peekReq++; peekSay(""); return; }
   peekTimer = setTimeout(() => peek(v), 700);
 });
@@ -480,16 +487,16 @@ function openModal(row) {
     peekSay("On file: " + bits.join(" · ") + " — use ⟳ Refresh quota to update");
   }
   $("#mtitle").textContent = row ? "Edit " + (row.customer || row.label || "customer") : "Add customer";
-  f.token.value = row ? row.token : "";
-  f.link.disabled = !!row;
+  f.elements.token.value = row ? row.token : "";
+  f.elements.link.disabled = !!row;
   $("#save").disabled = false;
   $("#save").textContent = row ? "Save changes" : "Create link";
   $("#cancel").textContent = "Cancel";
   if (row) {
     for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password"])
-      if (row[k] != null && f[k]) f[k].value = row[k];
+      if (row[k] != null && f.elements[k]) f.elements[k].value = row[k];
   } else {
-    f.link.disabled = false;
+    f.elements.link.disabled = false;
   }
   $("#modal").hidden = false;
 }
@@ -499,7 +506,7 @@ $("#cancel").addEventListener("click", () => ($("#modal").hidden = true));
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
-  const editing = !!f.token.value;
+  const editing = !!f.elements.token.value;
   const res = $("#result");
   // If auto-detect is still reading the pasted link, let it finish first so
   // the detected quota/expiry are stored together with the new customer.
