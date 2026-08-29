@@ -143,6 +143,10 @@ console.log("\n[5] /admin — the page itself");
   ok(!html.includes("<script src="), "no external script tags (no CDN — loads from China)");
   ok(!html.includes("http://") && !html.includes("https://cdn"), "no CDN references at all");
   ok(html.includes("Refresh quota"), "has the refresh control");
+  ok(html.includes("Here is your official SP Connect link") && html.includes("Thank you for choosing SP Connect! ❤️"),
+    "ready-to-send SP Connect message template present in the page");
+  ok(html.includes("j.oneLink") && html.includes("📋 Copy ready message") && html.includes("📋 Copy one-link"),
+    "ready message inserts the minted one-link (j.oneLink, not a hardcoded example); copy ready message + copy one-link buttons present");
   const alias = await get("/admin/dashboard");
   ok(alias.status === 200, "GET /admin/dashboard alias works too");
 }

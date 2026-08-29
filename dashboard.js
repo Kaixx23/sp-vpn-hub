@@ -253,6 +253,9 @@ padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowra
 .onelink{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--blue);background:var(--card2);
 border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin:8px 0;word-break:break-all;
 user-select:all;-webkit-user-select:all;cursor:text}
+.msgbox{white-space:pre-line;background:var(--card2);border:1px solid var(--line);border-radius:9px;
+padding:9px 11px;margin:8px 0;font-size:12px;line-height:1.55;word-break:break-word;user-select:text}
+.mcpy{display:flex;gap:8px;flex-wrap:wrap}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1b2740;
 border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-size:13px;z-index:60;
 box-shadow:0 12px 30px rgba(0,0,0,.5)}
@@ -273,6 +276,14 @@ const daysTo = (d) => {
 };
 const money = (r) => r.price == null ? "" : (r.currency || "") + " " + Number(r.price).toFixed(2);
 const oneLinkOf = (r) => location.origin + "/all/" + encodeURIComponent(r.label || "SP VPN") + "?t=" + r.token;
+// The ready-to-send message the admin sends a new customer. The link is the
+// converted one-link minted by /admin/mint (j.oneLink) — real host, fresh
+// opaque token, never a hardcoded example.
+const readyMessage = (link) =>
+  "Here is your official SP Connect link: 🔗\n\n" + link +
+  "\n\nYour data package will be valid for 30 days from the activation date. Your data will be renewed every 30 days once you renew your package.\n\n" +
+  "I'll send you a reminder 3 days before your renewal date, so you'll have enough time to renew without any interruption.\n\n" +
+  "Thank you for choosing SP Connect! ❤️";
 
 function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.hidden = false;
@@ -506,12 +517,19 @@ $("#form").addEventListener("submit", async (e) => {
     const j = await r.json();
     if (!r.ok) { res.className = "result err"; res.textContent = j.error || ("HTTP " + r.status); return; }
     res.className = "result ok";
-    // Keep the modal open and show the customer's one-link with a copy
-    // button — auto-closing left no time to copy anything.
+    // Keep the modal open and show the customer's one-link plus the
+    // ready-to-send message below — auto-closing left no time to copy
+    // anything. The link is the one /admin/mint just minted (j.oneLink):
+    // real host + fresh opaque token, never a hardcoded example.
     const link = editing ? oneLinkOf({ label: d.label, token: d.token }) : j.oneLink;
-    res.innerHTML = (editing ? "Saved ✓ — the customer's one-link" : "Created ✓ — send this one-link to the customer") +
+    const msg = editing ? "" : readyMessage(link);
+    res.innerHTML = (editing ? "Saved ✓ — the customer's one-link" : "Created ✓ — send this ready message to the customer") +
       ':<div class="onelink">' + esc(link) + '</div>' +
-      '<button class="btn" data-copy="' + esc(link) + '">📋 Copy one-link</button>';
+      (msg ? '<div class="msgbox">' + esc(msg) + '</div>' : "") +
+      '<div class="mcpy">' +
+      '<button class="btn" data-copy="' + esc(link) + '" data-label="📋 Copy one-link">📋 Copy one-link</button>' +
+      (msg ? '<button class="btn" data-copy="' + esc(msg) + '" data-label="📋 Copy ready message">📋 Copy ready message</button>' : "") +
+      '</div>';
     await load();
     if (!editing) { $("#save").disabled = true; $("#save").textContent = "Created ✓"; }
     $("#cancel").textContent = "Close";
@@ -521,13 +539,15 @@ $("#form").addEventListener("submit", async (e) => {
 $("#result").addEventListener("click", async (e) => {
   const b = e.target.closest("button[data-copy]");
   if (!b) return;
+  const label = b.dataset.label || "📋 Copy one-link";
+  const isMsg = label.includes("ready message");
   try {
     await navigator.clipboard.writeText(b.dataset.copy);
-    toast("One-link copied — paste it to the customer");
+    toast(isMsg ? "Ready message copied — send it to the customer" : "One-link copied — paste it to the customer");
     b.textContent = "✓ Copied";
-    setTimeout(() => (b.textContent = "📋 Copy one-link"), 1600);
+    setTimeout(() => (b.textContent = label), 1600);
   } catch (err) {
-    toast("Copy blocked — click the link text to select it, then copy");
+    toast("Copy blocked — select the text manually, then copy");
   }
 });
 
