@@ -5,6 +5,7 @@
 import worker from "../sp-vpn-worker.js";
 import * as store from "../token-store.js";
 import { summarise } from "../dashboard.js";
+import vm from "node:vm";
 
 let failures = 0, checks = 0;
 const ok = (cond, msg) => {
@@ -149,6 +150,43 @@ console.log("\n[5] /admin — the page itself");
     "ready message inserts the minted one-link (j.oneLink, not a hardcoded example); copy ready message + copy one-link buttons present");
   const alias = await get("/admin/dashboard");
   ok(alias.status === 200, "GET /admin/dashboard alias works too");
+
+  // Regression: the client is a JS template literal inlined raw into <script>.
+  // Any newline the ready-to-send message needs must be a DOUBLED backslash-n;
+  // a single-backslash "\n" is eaten by that outer template literal into a real
+  // line break, which splits the quoted string and makes the WHOLE inlined
+  // client script a fatal SyntaxError — the dashboard then dies at parse time
+  // (stuck on "Loading…", every button dead). Assert the served script is valid
+  // JavaScript and readyMessage() yields real line breaks.
+  const scriptMatch = html.match(/<script>([\s\S]*)<\/script>/);
+  ok(!!scriptMatch, "page carries one inlined <script> block");
+  let parsed = false, readySrc = "";
+  try {
+    new vm.Script(scriptMatch[1]); // throws on a SyntaxError, exactly like the browser
+    parsed = true;
+    const rm = scriptMatch[1].match(/const readyMessage = \(link\) =>([\s\S]*?);/);
+    readySrc = rm ? rm[1] : "";
+  } catch (e) {
+    console.log("     inlined client script failed to parse:", e.message);
+  }
+  ok(parsed, "inlined client script is valid JavaScript (no fatal SyntaxError)");
+  // After the outer template literal is evaluated, the message strings must
+  // still contain an explicit "\n" escape so the browser-built message has real
+  // line breaks — not one mashed line.
+  ok((readySrc.match(/\\n/g) || []).length >= 6,
+    `readyMessage keeps escaped newline sequences for the multi-line message (got ${(readySrc.match(/\\n/g) || []).length})`);
+  // Evaluate just readyMessage and confirm it returns a real multi-line string
+  // with the link embedded.
+  let builtMessage = "";
+  try {
+    const ctx = {};
+    vm.createContext(ctx);
+    builtMessage = vm.runInContext(scriptMatch[1].match(/const readyMessage = \(link\) =>[\s\S]*?;/)[0] + "\nreadyMessage('https://x/all/LINK');", ctx);
+  } catch (e) { /* reported above */ }
+  ok(builtMessage.split("\n").length >= 7,
+    `readyMessage() builds a multi-line message (${builtMessage.split("\n").length} lines), not one mashed line`);
+  ok(builtMessage.includes("https://x/all/LINK"), "readyMessage() embeds the one-link it is given");
+  ok(!builtMessage.includes("\\n"), "no literal backslash-n leaks into the built customer message");
 }
 
 console.log("\n[6] editing a customer");
