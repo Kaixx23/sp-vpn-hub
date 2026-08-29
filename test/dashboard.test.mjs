@@ -184,8 +184,8 @@ console.log("\n[8] /admin/inspect — auto-detect details from a pasted link");
   const big = await post("/admin/inspect", { link: "https://panel.example/sub?who=big" });
   const bj = JSON.parse(await big.text());
   ok(bj.ok === true && bj.total_gb === 512, `512GB plan detected (${bj.total_gb} GB)`);
-  ok(bj.pricing && bj.pricing.price === 12 && bj.pricing.currency === "RMB" && bj.pricing.billing_cycle === "monthly",
-    `512GB auto-priced 12 RMB monthly (got ${JSON.stringify(bj.pricing)})`);
+  ok(bj.pricing && bj.pricing.price === 10 && bj.pricing.currency === "RMB" && bj.pricing.billing_cycle === "monthly",
+    `512GB auto-priced 10 RMB monthly (got ${JSON.stringify(bj.pricing)})`);
   const huge = await post("/admin/inspect", { link: "https://panel.example/sub?who=huge" });
   const hj = JSON.parse(await huge.text());
   ok(hj.ok === true && hj.total_gb === 1024, `1024GB plan detected (${hj.total_gb} GB)`);
@@ -249,7 +249,32 @@ console.log("\n[10] panel account fields + profit on the API");
   ok(dr.status === 404, `unknown token still 404 (got ${dr.status})`);
 }
 
-console.log("\n[11] /admin/health — live pipeline health");
+console.log("\n[11] /admin/fix-512-price — one-off 512GB price correction");
+{
+  const before = JSON.parse(await (await get("/admin/dashboard.json")).text()).customers;
+  const zhangBefore = before.find((r) => r.customer === "Zhang");
+  ok(zhangBefore && zhangBefore.price === 12 && zhangBefore.account_password === "shevinx123",
+    `Zhang starts at 512GB @12 with account data intact (got ${JSON.stringify(zhangBefore && { price: zhangBefore.price, plan: zhangBefore.plan, account_email: zhangBefore.account_email })})`);
+
+  const r = await get("/admin/fix-512-price");
+  const j = JSON.parse(await r.text());
+  ok(r.status === 200 && j.ok === true && j.target >= 1 && j.updated >= 1,
+    `fix route runs and updates the 512GB row(s) (got ${JSON.stringify(j)})`);
+
+  const after = JSON.parse(await (await get("/admin/dashboard.json")).text()).customers;
+  const zhangAfter = after.find((r) => r.customer === "Zhang");
+  ok(zhangAfter && zhangAfter.price === 10 && zhangAfter.currency === "RMB" && zhangAfter.billing_cycle === "monthly",
+    `Zhang now 512GB @10 RMB (got ${JSON.stringify(zhangAfter && { price: zhangAfter.price, currency: zhangAfter.currency, billing_cycle: zhangAfter.billing_cycle })})`);
+  ok(zhangAfter && zhangAfter.account_email === "zhang.new@gmail.com" && zhangAfter.account_password === "shevinx123",
+    "account email/password untouched by the fix route");
+  const ali = after.find((r) => r.customer === "Ali Hassan");
+  ok(ali && ali.price === 30, `non-512GB rows untouched (Ali still ${ali && ali.price})`);
+
+  const again = JSON.parse(await (await get("/admin/fix-512-price")).text());
+  ok(again.updated === 0, `idempotent: second run updates nothing (got ${again.updated})`);
+}
+
+console.log("\n[12] /admin/health — live pipeline health");
 {
   const r = await get("/admin/health?force=1");
   ok(r.status === 200, `health returned 200 (got ${r.status})`);

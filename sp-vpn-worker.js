@@ -894,6 +894,34 @@ export default {
         // survive a cold start.
         return json({ generated: new Date().toISOString(), store: storeBackend().name, stats: summarise(rows), customers: rows.map(redact) });
       }
+      if (path === "/admin/fix-512-price") {
+        // One-off corrective pass: the 512GB pack is now 10 RMB. This only
+        // touches existing rows whose plan is 512GB (idempotent; 1024GB rows,
+        // account credentials, expiry, quota and notes are left untouched).
+        const rows = await storeList();
+        let target = 0, updated = 0, skipped = 0;
+        const results = [];
+        for (const r of rows) {
+          // A row is the 512GB pack when its plan says so OR the supplier
+          // reported TOT:512GB (covers rows created before plan was set).
+          const is512 = String(r.plan || "").trim() === "512GB" || Number(r.total_gb) === 512;
+          if (!is512) continue;
+          target++;
+          if (Number(r.price) === 10 && String(r.currency) === "RMB" && String(r.billing_cycle) === "monthly") {
+            skipped++;
+            continue;
+          }
+          await storeUpdate(r.token, {
+            plan: "512GB",
+            price: 10,
+            currency: "RMB",
+            billing_cycle: "monthly",
+          });
+          updated++;
+          results.push(r.customer || r.token.slice(0, 10));
+        }
+        return json({ ok: true, target, updated, skipped, results });
+      }
       if (path === "/admin/health") {
         // Live health of the whole pipeline: token store -> supplier -> the
         // converter itself (end-to-end, fetched like a customer's app would).

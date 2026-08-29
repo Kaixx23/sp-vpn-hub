@@ -1,7 +1,7 @@
 // ============================================================================
 // PLANS — the reseller's plan catalogue: prices, costs and profit in ONE place.
 //
-//   512GB:  cost 4 RMB  ->  sell 12 RMB  ->  8 RMB profit / month
+//   512GB:  cost 4 RMB  ->  sell 10 RMB  ->  6 RMB profit / month
 //   1024GB: cost 6 RMB  ->  sell 16 RMB  ->  10 RMB profit / month
 //
 // The key is the quota in GB exactly as the supplier reports it (TOT:512GB).
@@ -15,7 +15,7 @@
 // ============================================================================
 
 export const PLAN_CATALOG = {
-  512: { price: 12, cost: 4, currency: "RMB", billing_cycle: "monthly" },
+  512: { price: 10, cost: 4, currency: "RMB", billing_cycle: "monthly" },
   1024: { price: 16, cost: 6, currency: "RMB", billing_cycle: "monthly" },
 };
 
