@@ -188,6 +188,7 @@ tr.revoked{opacity:.5}
 .bar{height:7px;background:#0c1424;border-radius:5px;overflow:hidden;min-width:80px}
 .bar i{display:block;height:100%;background:linear-gradient(90deg,#34d399,#60a5fa)}
 .bar i.hot{background:linear-gradient(90deg,#fbbf24,#f87171)}
+.usage-up{color:var(--amber);font-weight:700}.usage-reset{color:var(--green);font-weight:700}
 .lnk{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--blue);
 max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .mini{background:#1b2740;border:1px solid var(--line);color:var(--text);border-radius:7px;
@@ -246,8 +247,14 @@ function quotaCell(r) {
   if (!r.total_gb) return '<span class="dim">—</span>';
   const pct = Math.min(100, ((r.used_gb || 0) / r.total_gb) * 100);
   const left = Math.max(0, r.total_gb - (r.used_gb || 0));
+  const delta = r.usage_delta_gb;
+  const change = delta == null ? "" : delta > 0
+    ? '<div class="sub usage-up">+' + Number(delta).toFixed(1) + ' GB used since last check</div>'
+    : delta < 0
+      ? '<div class="sub usage-reset">Usage reset by ' + Math.abs(Number(delta)).toFixed(1) + ' GB</div>'
+      : '<div class="sub">No new usage since last check</div>';
   return '<div class="bar"><i class="' + (pct > 85 ? "hot" : "") + '" style="width:' + pct.toFixed(1) + '%"></i></div>' +
-    '<div class="sub">' + left.toFixed(1) + ' / ' + r.total_gb + ' GB left</div>';
+    '<div class="sub">' + left.toFixed(1) + ' / ' + r.total_gb + ' GB left</div>' + change;
 }
 
 function needsAction(r) {
@@ -292,6 +299,7 @@ function render() {
       '<td><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span></td>' +
       '<td style="white-space:nowrap">' +
         '<button class="mini" data-a="copy" data-v="' + esc(one) + '">copy</button>' +
+        (r.revoked ? "" : '<button class="mini" data-a="renew" data-t="' + r.token + '">renew / check</button>') +
         '<button class="mini" data-a="edit" data-t="' + r.token + '">edit</button>' +
         '<button class="mini" data-a="rotate" data-t="' + r.token + '">rotate</button>' +
         (r.revoked ? "" : '<button class="mini danger" data-a="revoke" data-t="' + r.token + '">revoke</button>') +
@@ -373,6 +381,21 @@ $("#rows").addEventListener("click", async (e) => {
   if (a === "copy") {
     try { await navigator.clipboard.writeText(b.dataset.v); toast("Link copied"); }
     catch (err) { toast("Copy failed — select the link manually"); }
+    return;
+  }
+  if (a === "renew") {
+    const original = b.textContent; b.disabled = true; b.textContent = "checking…";
+    try {
+      const response = await fetch("/admin/link/" + b.dataset.t + "?action=renew");
+      const j = await response.json();
+      if (!response.ok) throw new Error(j.error || ("HTTP " + response.status));
+      await load();
+      if (j.expiryChanged) toast("Renewed: expiry updated to " + j.expiry);
+      else toast("Checked: expiry remains " + (j.expiry || "unknown"));
+    } catch (err) {
+      toast("Renewal check failed: " + err.message);
+      b.disabled = false; b.textContent = original;
+    }
     return;
   }
   if (a === "edit") { openModal(DATA.find((r) => r.token === b.dataset.t)); return; }

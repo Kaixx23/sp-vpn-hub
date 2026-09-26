@@ -99,6 +99,16 @@ console.log("\n[3] /admin/refresh — pulls live quota + expiry from the supplie
   ok(byName.Bao.used_gb === 190, `Bao heavy user 190/200GB (got ${byName.Bao.used_gb})`);
   ok(byName.Chen.supplier_expires === day(-3), `Chen already expired (${byName.Chen.supplier_expires})`);
   ok(byName.Ali.checked_at, "checked_at timestamped");
+  ok(byName.Ali.usage_delta_gb === null, "first check has no usage comparison");
+
+  // Simulate another 5 GB consumed, then check only Ali using the row action.
+  PANELS.healthy = PANELS.healthy.replace("↓:9.00GB", "↓:14.00GB");
+  const renewal = await get("/admin/link/" + tokens.healthy + "?action=renew");
+  const renewalJson = JSON.parse(await renewal.text());
+  ok(renewal.status === 200, `single-customer renewal check returned 200 (got ${renewal.status})`);
+  ok(renewalJson.usageDeltaGb === 5, `single check reports +5 GB used (got ${renewalJson.usageDeltaGb})`);
+  ok(renewalJson.customer.usage_delta_gb === 5, "usage change persists until the next check");
+  ok(renewalJson.expiry === day(45), "single check returns the supplier expiry");
 
   console.log("\n[4] dashboard.json stats reflect the live data");
   const s = after.stats;
@@ -121,6 +131,8 @@ console.log("\n[5] /admin — the page itself");
   ok(!html.includes("<script src="), "no external script tags (no CDN — loads from China)");
   ok(!html.includes("http://") && !html.includes("https://cdn"), "no CDN references at all");
   ok(html.includes("Refresh quota"), "has the refresh control");
+  ok(html.includes("renew / check"), "has a per-customer renewal check control");
+  ok(html.includes("GB used since last check"), "shows usage increase from the previous check");
   const alias = await get("/admin/dashboard");
   ok(alias.status === 200, "GET /admin/dashboard alias works too");
 }
