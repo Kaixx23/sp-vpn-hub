@@ -35,6 +35,14 @@ export const ADDED_COLUMNS = [
   ["checked_at", "TEXT"],
   ["account_email", "TEXT"],
   ["account_password", "TEXT"],
+  // Usage-change tracking (see renewal.js). Both nullable, both added by the
+  // additive migration below — existing Turso rows keep every value they have
+  // and simply start with NULL here, which reads as "no previous check to
+  // compare against yet".
+  //   prev_used_gb    used_gb as of the immediately previous SUCCESSFUL check
+  //   usage_delta_gb  used_gb - prev_used_gb  (>0 used more, <0 supplier reset)
+  ["prev_used_gb", "REAL"],
+  ["usage_delta_gb", "REAL"],
 ];
 
 export const LINKS_DDL = `CREATE TABLE IF NOT EXISTS links (
@@ -55,14 +63,16 @@ export const LINKS_DDL = `CREATE TABLE IF NOT EXISTS links (
   used_gb          REAL,
   checked_at       TEXT,
   account_email    TEXT,
-  account_password TEXT
+  account_password TEXT,
+  prev_used_gb     REAL,
+  usage_delta_gb   REAL
 )`;
 
 export const COLUMNS = [
   "token", "supplier_url", "label", "revoked", "created_at",
   "customer", "plan", "price", "currency", "billing_cycle", "paid_until",
   "notes", "supplier_expires", "total_gb", "used_gb", "checked_at",
-  "account_email", "account_password",
+  "account_email", "account_password", "prev_used_gb", "usage_delta_gb",
 ];
 const SELECT = `SELECT ${COLUMNS.join(", ")} FROM links`;
 
