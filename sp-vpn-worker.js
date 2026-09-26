@@ -13,8 +13,10 @@ import {
   removeRow as storeRemove,
   ensureInit as storeInit,
   setBackend as storeSetBackend,
+  backend as storeBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise } from "./dashboard.js";
+import { PLAN_CATALOG, profitOf } from "./plans.js";
 import { runRemindersFromEnv } from "./reminders.js";
 import {
   hasBeenSent as storeHasBeenSent,
@@ -654,6 +656,11 @@ async function collectRows(brand, linksText, host) {
 const _cache = new Map();
 const TTL = 300000;
 
+// Health-report cache: an open dashboard polls /admin/health, and the report
+// itself fetches the supplier — cache it so polling cannot hammer the panel.
+const HEALTH_TTL_MS = 120000;
+let _healthCache = { t: 0, report: null };
+
 async function getDecoded(tok) {
   // Token state is resolved on EVERY request so revocation takes effect
   // immediately; only the expensive supplier fetch is memoised below.
@@ -707,35 +714,6 @@ const json = (obj, code = 200) =>
   });
 // The admin output must never hand back a supplier URL in full — that is the
 // exact secret this whole change exists to protect. Host only.
-// Recheck one saved supplier subscription and persist its latest renewal and
-// quota state. The delta compares this check with the immediately previous
-// check; the first check has no comparison value.
-async function refreshCustomer(row) {
-  const previousExpiry = row.supplier_expires || null;
-  const previousUsed = row.used_gb == null ? null : Number(row.used_gb);
-  const { status } = await fetchSubscription(row.supplier_url);
-  const s = quotaSummary(status);
-  if (!s) throw new Error("supplier did not return quota or expiry information");
-  const used = Math.round((s.up + s.down) * 100) / 100;
-  const usageDelta = previousUsed == null ? null : Math.round((used - previousUsed) * 100) / 100;
-  const updated = await storeUpdate(row.token, {
-    supplier_expires: s.exp,
-    total_gb: s.tot,
-    used_gb: used,
-    usage_delta_gb: usageDelta,
-    checked_at: new Date().toISOString(),
-  });
-  return {
-    customer: redact(updated),
-    previousExpiry,
-    expiry: s.exp,
-    expiryChanged: previousExpiry !== null && previousExpiry !== s.exp,
-    previousUsedGb: previousUsed,
-    usedGb: used,
-    usageDeltaGb: usageDelta,
-  };
-}
-
 const redact = (r) => ({
   token: r.token,
   label: r.label,
@@ -746,13 +724,18 @@ const redact = (r) => ({
   billing_cycle: r.billing_cycle || null,
   paid_until: r.paid_until || null,
   notes: r.notes || null,
+  // The reseller's login on the supplier panel for this customer — used to
+  // renew the account. Shown only on /admin routes.
+  account_email: r.account_email || null,
+  account_password: r.account_password || null,
   supplier_expires: r.supplier_expires || null,
   total_gb: r.total_gb ?? null,
   used_gb: r.used_gb ?? null,
-  usage_delta_gb: r.usage_delta_gb ?? null,
   checked_at: r.checked_at || null,
   revoked: !!r.revoked,
   created_at: r.created_at,
+  // price - catalogue cost of the plan (null when the plan is unknown).
+  profit: profitOf(r),
   supplier_host: (() => {
     try { return new URL(r.supplier_url).host; } catch (e) { return "direct-node-list"; }
   })(),
@@ -797,6 +780,41 @@ export default {
           if (!rows.length) return html(errorPage("No valid links found — paste the subscription URL your supplier gave you (starts with http or https)"));
           return html((path === "/tool" ? toolResults : rebrandResults)(host, brand, rows));
         }
+        if (path === "/admin/inspect") {
+          // The dashboard's "paste a link, we fill the form" helper: fetch the
+          // subscription once and return everything derivable from it — quota,
+          // expiry, node count. The supplier URL itself never goes back out.
+          const link = (data.link || "").trim();
+          if (!/^(https?:\/\/|[a-z0-9+.-]+:\/\/)/i.test(link)) {
+            return json({ ok: false, error: "link must be a subscription URL or node link" }, 400);
+          }
+          try {
+            if (!/^https?:\/\//i.test(link)) {
+              // Direct node link(s) — no panel behind them, so no quota/expiry.
+              const ns = link.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+              const proxies = ns.map(parseNode).filter(Boolean);
+              return json({ ok: true, direct: true, nodes: ns.length, validNodes: proxies.length });
+            }
+            const { status, links } = await fetchSubscription(link);
+            const s = quotaSummary(status);
+            const used = s ? Math.round((s.up + s.down) * 100) / 100 : null;
+            return json({
+              ok: true,
+              nodes: links.length,
+              validNodes: links.map(parseNode).filter(Boolean).length,
+              expires: s ? s.exp : null,
+              total_gb: s ? s.tot : null,
+              used_gb: used,
+              left_gb: s ? Math.round(s.left * 100) / 100 : null,
+              used_pct: s && s.tot ? Math.round(((s.up + s.down) / s.tot) * 1000) / 10 : null,
+              // Matched plan price from the catalogue (null when the quota
+              // is not a known plan) so the form can auto-fill pricing.
+              pricing: s && PLAN_CATALOG[s.tot] ? PLAN_CATALOG[s.tot] : null,
+            });
+          } catch (e) {
+            return json({ ok: false, error: String(e.message || e) }, 502);
+          }
+        }
         if (path === "/admin/mint") {
           const link = (data.link || "").trim();
           const label = (data.label || "").trim().slice(0, 200) || null;
@@ -805,6 +823,18 @@ export default {
           }
           const num = (v) => (v === "" || v === undefined || v === null ? null : Number(v));
           const txt = (v) => (v ? String(v).trim().slice(0, 200) : null);
+          // Details detected up front by POST /admin/inspect (the dashboard's
+          // auto-fill). Stored at creation so the row shows live quota + expiry
+          // immediately, with no separate Refresh click. Strictly validated —
+          // junk fields are dropped, never stored.
+          const dateOnly = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "").trim()) ? String(v).trim() : null);
+          const gb = (v) => { const n = num(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+          const detected = {
+            supplier_expires: dateOnly(data.supplier_expires),
+            total_gb: gb(data.total_gb),
+            used_gb: gb(data.used_gb),
+          };
+          const hasDetected = detected.supplier_expires != null || detected.total_gb != null || detected.used_gb != null;
           const token = await storeMint(link, label, {
             customer: txt(data.customer),
             plan: txt(data.plan),
@@ -813,6 +843,9 @@ export default {
             billing_cycle: txt(data.billing_cycle),
             paid_until: txt(data.paid_until),
             notes: txt(data.notes),
+            account_email: txt(data.account_email),
+            account_password: txt(data.account_password),
+            ...(hasDetected ? { ...detected, checked_at: new Date().toISOString() } : {}),
           });
           return json({ token, oneLink: `${host}/all/${encodeURIComponent(brand)}?t=${token}` });
         }
@@ -825,7 +858,7 @@ export default {
         }
         if (path === "/admin/customer") {
           const patchObj = {};
-          for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label"]) {
+          for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password"]) {
             if (data[k] !== undefined) patchObj[k] = data[k] ? String(data[k]).trim().slice(0, 200) : null;
           }
           if (data.price !== undefined) patchObj.price = data.price === "" ? null : Number(data.price);
@@ -855,7 +888,162 @@ export default {
       }
       if (path === "/admin/dashboard.json") {
         const rows = await storeList();
-        return json({ generated: new Date().toISOString(), stats: summarise(rows), customers: rows.map(redact) });
+        // `store` names the active backend ("turso" | "sqlite-file" | "memory" |
+        // "d1") so a misconfigured deploy is visible from the dashboard itself:
+        // "memory" means TOKEN_STORE_URL was NOT picked up and links will not
+        // survive a cold start.
+        return json({ generated: new Date().toISOString(), store: storeBackend().name, stats: summarise(rows), customers: rows.map(redact) });
+      }
+      if (path === "/admin/health") {
+        // Live health of the whole pipeline: token store -> supplier -> the
+        // converter itself (end-to-end, fetched like a customer's app would).
+        // Cached 2 minutes so a polling dashboard cannot hammer the supplier.
+        // ?force=1 bypasses the cache.
+        const force = url.searchParams.get("force") === "1";
+        if (_healthCache.report && !force && Date.now() - _healthCache.t < HEALTH_TTL_MS) {
+          return json({ ..._healthCache.report, cached: true, age_ms: Date.now() - _healthCache.t });
+        }
+        const report = { generated: new Date().toISOString(), checks: {} };
+        let rows = [];
+        try {
+          const t0 = Date.now();
+          rows = await storeList();
+          report.checks.store = {
+            ok: true, ms: Date.now() - t0, backend: storeBackend().name,
+            customers: rows.length, active: rows.filter((r) => !r.revoked).length,
+          };
+        } catch (e) {
+          report.checks.store = { ok: false, error: String(e.message || e) };
+        }
+        if (report.checks.store.ok) {
+          const active = rows.filter((r) => !r.revoked);
+          // One representative supplier link per unique supplier host.
+          const byHost = new Map();
+          for (const r of active) {
+            try { const h = new URL(r.supplier_url).host; if (!byHost.has(h)) byHost.set(h, r); } catch (e) {}
+          }
+          report.checks.supplier = { ok: true, hosts: {} };
+          await Promise.all([...byHost.entries()].slice(0, 5).map(async ([h, r]) => {
+            const t0 = Date.now();
+            try {
+              const { status, links } = await fetchSubscription(r.supplier_url);
+              const s = quotaSummary(status);
+              report.checks.supplier.hosts[h] = {
+                ok: true, ms: Date.now() - t0, nodes: links.length,
+                quota_parsed: !!s, expires: s ? s.exp : null,
+              };
+            } catch (e) {
+              report.checks.supplier.ok = false;
+              report.checks.supplier.hosts[h] = { ok: false, ms: Date.now() - t0, error: String(e.message || e) };
+            }
+          }));
+          // Converter end-to-end: fetch our own one-link exactly like a
+          // customer's VPN app does — exercises worker -> supplier -> cache ->
+          // transform -> base64, the full path.
+          const target = active[0];
+          if (target) {
+            const t0 = Date.now();
+            try {
+              const one = `${host}/all/${encodeURIComponent(target.label || "SP VPN")}?t=${encodeURIComponent(target.token)}`;
+              const { status, links } = await fetchSubscription(one);
+              report.checks.converter = {
+                ok: true, ms: Date.now() - t0, nodes: links.length,
+                quota_parsed: !!quotaSummary(status),
+              };
+            } catch (e) {
+              report.checks.converter = { ok: false, ms: Date.now() - t0, error: String(e.message || e) };
+            }
+          } else {
+            report.checks.converter = { ok: true, skipped: "no active customers yet" };
+          }
+        }
+        const c = report.checks;
+        report.ok = !!(c.store && c.store.ok && c.supplier && c.supplier.ok && c.converter && c.converter.ok);
+        report.level = !(c.store && c.store.ok) || !(c.converter && c.converter.ok) ? "down"
+          : !(c.supplier && c.supplier.ok) ? "degraded" : "ok";
+        report.note = "Supplier and converter checks run from our server — they prove the pipeline works end-to-end. They cannot measure China-to-node latency: VPN traffic never flows through this server.";
+        _healthCache = { t: Date.now(), report };
+        return json(report);
+      }
+      if (path === "/admin/compare") {
+        // Diagnostics — byte-diff the ORIGINAL supplier subscription against two
+        // converter one-links. `a` and `b` must be https://*.netlify.app URLs;
+        // the original supplier URL is recovered from B's ?t= base64 token (the
+        // sp-global link format embeds it). Returns comparison facts only.
+        const a = url.searchParams.get("a") || "";
+        const b = url.searchParams.get("b") || "";
+        if (!/^https:\/\/[a-z0-9-]+\.netlify\.app\//i.test(a) || !/^https:\/\/[a-z0-9-]+\.netlify\.app\//i.test(b)) {
+          return json({ error: "a and b must be https://<site>.netlify.app/… URLs" }, 400);
+        }
+        let supplier = "";
+        try { supplier = b64d(new URL(b).searchParams.get("t") || ""); } catch (e) { supplier = ""; }
+        if (!/^[a-z0-9+.-]+:\/\//i.test(supplier)) {
+          return json({ error: "could not recover the supplier URL from b's token (expected the sp-global base64 link format)" }, 400);
+        }
+        const grab = async (u) => {
+          const t0 = Date.now();
+          try {
+            const { status, links } = await fetchSubscription(u);
+            return { ok: true, ms: Date.now() - t0, status, links };
+          } catch (e) { return { ok: false, ms: Date.now() - t0, error: String(e.message || e) }; }
+        };
+        // Two original fetches: if the supplier rotates nodes between requests,
+        // that — not the converters — explains any set differences.
+        const [o, ra, rb, o2] = await Promise.all([grab(supplier), grab(a), grab(b), grab(supplier)]);
+
+        const uri = (l) => l.split("#")[0].toLowerCase(); // case-insensitive, as apps parse it
+        const setName = (l) => safeDecode(l.split("#")[1] || "");
+        const hostOf = (u) => String(u.split("@")[1] || u).split(/[?:]/)[0];
+        const set = (links) => new Set(links.map(uri));
+        const base = {
+          fetched: {
+            original: { ok: o.ok, ms: o.ms, nodes: o.links ? o.links.length : 0, status: o.status || o.error },
+            a: { ok: ra.ok, ms: ra.ms, nodes: ra.links ? ra.links.length : 0, status: ra.status || ra.error },
+            b: { ok: rb.ok, ms: rb.ms, nodes: rb.links ? rb.links.length : 0, status: rb.status || rb.error },
+          },
+        };
+        if (!(o.ok && ra.ok && rb.ok)) return json(base);
+
+        const oSet = set(o.links), aSet = set(ra.links), bSet = set(rb.links);
+        const diff = (xSet) => ({
+          identical: [...oSet].filter((u) => xSet.has(u)).length + "/" + oSet.size,
+          missing_from_it: [...oSet].filter((u) => !xSet.has(u)).map(hostOf).slice(0, 12),
+          extra_in_it: [...xSet].filter((u) => !oSet.has(u)).map(hostOf).slice(0, 12),
+        });
+        const aMap = new Map(ra.links.map((l) => [uri(l), l]));
+        const bMap = new Map(rb.links.map((l) => [uri(l), l]));
+        const perfect =
+          [...oSet].every((u) => aSet.has(u)) && aSet.size === oSet.size &&
+          [...oSet].every((u) => bSet.has(u)) && bSet.size === oSet.size;
+        return json({
+          ...base,
+          counts: { original: o.links.length, a: ra.links.length, b: rb.links.length },
+          a_vs_original: diff(aSet),
+          b_vs_original: diff(bSet),
+          a_vs_b: {
+            identical_sets: aSet.size === bSet.size && [...aSet].every((u) => bSet.has(u)),
+            only_in_a: [...aSet].filter((u) => !bSet.has(u)).map(hostOf).slice(0, 12),
+            only_in_b: [...bSet].filter((u) => !aSet.has(u)).map(hostOf).slice(0, 12),
+            same_order: ra.links.map(uri).join() === rb.links.map(uri).join(),
+          },
+          supplier_rotation: o2.ok
+            ? {
+                nodes_second_fetch: o2.links.length,
+                uri_diffs_between_two_original_fetches:
+                  [...oSet].filter((u) => !set(o2.links).has(u)).length +
+                  [...set(o2.links)].filter((u) => !oSet.has(u)).length,
+              }
+            : { error: o2.error },
+          name_samples: o.links.slice(0, 8).map((l) => ({
+            original: setName(l),
+            a: aMap.has(uri(l)) ? setName(aMap.get(uri(l))) : "(missing)",
+            b: bMap.has(uri(l)) ? setName(bMap.get(uri(l))) : "(missing)",
+          })),
+          verdict: perfect
+            ? "✅ both converters pass the original nodes through byte-identically — same servers, ports, UUIDs, REALITY keys; only display names are rebranded"
+            : "⚠️ differences found — see missing/extra lists (check supplier_rotation: if the source itself changes between fetches, rotation explains it)",
+          note: "VPN traffic never flows through either converter — apps connect directly to the node servers. The subscription file is downloaded once; it cannot change node speed or cause timeouts.",
+        });
       }
       if (path === "/admin/refresh") {
         const rows = (await storeList()).filter((r) => !r.revoked);
@@ -867,7 +1055,15 @@ export default {
           const batch = rows.slice(i, i + CONC);
           await Promise.all(batch.map(async (r) => {
             try {
-              await refreshCustomer(r);
+              const { status } = await fetchSubscription(r.supplier_url);
+              const s = quotaSummary(status);
+              if (!s) { failed++; return; }
+              await storeUpdate(r.token, {
+                supplier_expires: s.exp,
+                total_gb: s.tot,
+                used_gb: Math.round((s.up + s.down) * 100) / 100,
+                checked_at: new Date().toISOString(),
+              });
               updated++;
             } catch (e) {
               failed++;
@@ -881,16 +1077,6 @@ export default {
       if ((m0 = path.match(/^\/admin\/link\/([^/]+)$/))) {
         const t = m0[1];
         const action = url.searchParams.get("action");
-        if (action === "renew") {
-          const cur = (await storeList()).find((r) => r.token === t);
-          if (!cur) return json({ error: "unknown token" }, 404);
-          if (cur.revoked) return json({ error: "cannot check a revoked customer" }, 400);
-          try {
-            return json(await refreshCustomer(cur));
-          } catch (e) {
-            return json({ error: e.message || "supplier check failed" }, 502);
-          }
-        }
         if (action === "rotate") {
           const cur = (await storeList()).find((r) => r.token === t);
           if (!cur) return json({ error: "unknown token" }, 404);
@@ -912,7 +1098,7 @@ export default {
           const gone = await storeRemove(t);
           return gone ? json({ token: t, deleted: true }) : json({ error: "unknown token" }, 404);
         }
-        return json({ error: "action must be renew | rotate | revoke | delete" }, 400);
+        return json({ error: "action must be rotate | revoke | delete" }, 400);
       }
       if (path === "/admin/reminders/run") {
         // GET so a platform cron can hit it directly (Vercel/Netlify crons

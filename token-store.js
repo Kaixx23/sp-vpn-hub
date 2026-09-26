@@ -32,8 +32,9 @@ export const ADDED_COLUMNS = [
   ["supplier_expires", "TEXT"],
   ["total_gb", "REAL"],
   ["used_gb", "REAL"],
-  ["usage_delta_gb", "REAL"],
   ["checked_at", "TEXT"],
+  ["account_email", "TEXT"],
+  ["account_password", "TEXT"],
 ];
 
 export const LINKS_DDL = `CREATE TABLE IF NOT EXISTS links (
@@ -52,14 +53,16 @@ export const LINKS_DDL = `CREATE TABLE IF NOT EXISTS links (
   supplier_expires TEXT,
   total_gb         REAL,
   used_gb          REAL,
-  usage_delta_gb   REAL,
-  checked_at       TEXT
+  checked_at       TEXT,
+  account_email    TEXT,
+  account_password TEXT
 )`;
 
 export const COLUMNS = [
   "token", "supplier_url", "label", "revoked", "created_at",
   "customer", "plan", "price", "currency", "billing_cycle", "paid_until",
-  "notes", "supplier_expires", "total_gb", "used_gb", "usage_delta_gb", "checked_at",
+  "notes", "supplier_expires", "total_gb", "used_gb", "checked_at",
+  "account_email", "account_password",
 ];
 const SELECT = `SELECT ${COLUMNS.join(", ")} FROM links`;
 
