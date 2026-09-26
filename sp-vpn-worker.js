@@ -707,6 +707,35 @@ const json = (obj, code = 200) =>
   });
 // The admin output must never hand back a supplier URL in full — that is the
 // exact secret this whole change exists to protect. Host only.
+// Recheck one saved supplier subscription and persist its latest renewal and
+// quota state. The delta compares this check with the immediately previous
+// check; the first check has no comparison value.
+async function refreshCustomer(row) {
+  const previousExpiry = row.supplier_expires || null;
+  const previousUsed = row.used_gb == null ? null : Number(row.used_gb);
+  const { status } = await fetchSubscription(row.supplier_url);
+  const s = quotaSummary(status);
+  if (!s) throw new Error("supplier did not return quota or expiry information");
+  const used = Math.round((s.up + s.down) * 100) / 100;
+  const usageDelta = previousUsed == null ? null : Math.round((used - previousUsed) * 100) / 100;
+  const updated = await storeUpdate(row.token, {
+    supplier_expires: s.exp,
+    total_gb: s.tot,
+    used_gb: used,
+    usage_delta_gb: usageDelta,
+    checked_at: new Date().toISOString(),
+  });
+  return {
+    customer: redact(updated),
+    previousExpiry,
+    expiry: s.exp,
+    expiryChanged: previousExpiry !== null && previousExpiry !== s.exp,
+    previousUsedGb: previousUsed,
+    usedGb: used,
+    usageDeltaGb: usageDelta,
+  };
+}
+
 const redact = (r) => ({
   token: r.token,
   label: r.label,
@@ -720,6 +749,7 @@ const redact = (r) => ({
   supplier_expires: r.supplier_expires || null,
   total_gb: r.total_gb ?? null,
   used_gb: r.used_gb ?? null,
+  usage_delta_gb: r.usage_delta_gb ?? null,
   checked_at: r.checked_at || null,
   revoked: !!r.revoked,
   created_at: r.created_at,
@@ -837,15 +867,7 @@ export default {
           const batch = rows.slice(i, i + CONC);
           await Promise.all(batch.map(async (r) => {
             try {
-              const { status } = await fetchSubscription(r.supplier_url);
-              const s = quotaSummary(status);
-              if (!s) { failed++; return; }
-              await storeUpdate(r.token, {
-                supplier_expires: s.exp,
-                total_gb: s.tot,
-                used_gb: Math.round((s.up + s.down) * 100) / 100,
-                checked_at: new Date().toISOString(),
-              });
+              await refreshCustomer(r);
               updated++;
             } catch (e) {
               failed++;
@@ -859,6 +881,16 @@ export default {
       if ((m0 = path.match(/^\/admin\/link\/([^/]+)$/))) {
         const t = m0[1];
         const action = url.searchParams.get("action");
+        if (action === "renew") {
+          const cur = (await storeList()).find((r) => r.token === t);
+          if (!cur) return json({ error: "unknown token" }, 404);
+          if (cur.revoked) return json({ error: "cannot check a revoked customer" }, 400);
+          try {
+            return json(await refreshCustomer(cur));
+          } catch (e) {
+            return json({ error: e.message || "supplier check failed" }, 502);
+          }
+        }
         if (action === "rotate") {
           const cur = (await storeList()).find((r) => r.token === t);
           if (!cur) return json({ error: "unknown token" }, 404);
@@ -880,7 +912,7 @@ export default {
           const gone = await storeRemove(t);
           return gone ? json({ token: t, deleted: true }) : json({ error: "unknown token" }, 404);
         }
-        return json({ error: "action must be rotate | revoke | delete" }, 400);
+        return json({ error: "action must be renew | rotate | revoke | delete" }, 400);
       }
       if (path === "/admin/reminders/run") {
         // GET so a platform cron can hit it directly (Vercel/Netlify crons
