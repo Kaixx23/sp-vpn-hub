@@ -17,6 +17,7 @@ import {
 } from "./token-store.js";
 import { dashboardPage, summarise } from "./dashboard.js";
 import { PLAN_CATALOG, profitOf } from "./plans.js";
+import { checkCustomerRow, usageKind, usageMessage } from "./renewal.js";
 import { runRemindersFromEnv } from "./reminders.js";
 import {
   hasBeenSent as storeHasBeenSent,
@@ -731,6 +732,13 @@ const redact = (r) => ({
   supplier_expires: r.supplier_expires || null,
   total_gb: r.total_gb ?? null,
   used_gb: r.used_gb ?? null,
+  // Usage movement since the immediately previous SUCCESSFUL check.
+  // usage_delta_gb is null until a customer has been checked twice — the
+  // dashboard renders that as "no comparison yet" rather than "no new usage".
+  prev_used_gb: r.prev_used_gb ?? null,
+  usage_delta_gb: r.usage_delta_gb ?? null,
+  usage_change: usageKind(r.usage_delta_gb ?? null),
+  usage_message: usageMessage(r.usage_delta_gb ?? null),
   checked_at: r.checked_at || null,
   revoked: !!r.revoked,
   created_at: r.created_at,
@@ -1051,39 +1059,96 @@ export default {
         // concurrent fetches just because you opened the dashboard.
         const CONC = 6;
         let updated = 0, failed = 0;
+        // Index-assigned (not pushed) so the report order matches the table
+        // order rather than whichever supplier answered first.
+        const results = new Array(rows.length);
         for (let i = 0; i < rows.length; i += CONC) {
           const batch = rows.slice(i, i + CONC);
-          await Promise.all(batch.map(async (r) => {
-            try {
-              const { status } = await fetchSubscription(r.supplier_url);
-              const s = quotaSummary(status);
-              if (!s) { failed++; return; }
-              await storeUpdate(r.token, {
-                supplier_expires: s.exp,
-                total_gb: s.tot,
-                used_gb: Math.round((s.up + s.down) * 100) / 100,
-                checked_at: new Date().toISOString(),
-              });
-              updated++;
-            } catch (e) {
+          await Promise.all(batch.map(async (r, k) => {
+            // Same single-customer code path as the per-row Renew / Check, so
+            // the global refresh calculates and persists the usage delta for
+            // every customer it successfully checks. A customer whose supplier
+            // fails keeps its previous values AND its previous delta.
+            const out = await checkCustomerRow(r, {
+              fetchSubscription, quotaSummary, updateRow: storeUpdate,
+            });
+            const base = { token: r.token, customer: r.customer || r.label || null };
+            if (!out.ok) {
               failed++;
+              results[i + k] = { ...base, ok: false, error: out.error };
+              return;
             }
+            updated++;
+            results[i + k] = {
+              ...base,
+              ok: true,
+              renewed: out.expiryChanged,
+              supplier_expires: out.row.supplier_expires ?? null,
+              used_gb: out.row.used_gb ?? null,
+              usage_delta_gb: out.usageDeltaGb,
+              usage_change: out.usageKind,
+              message: out.message,
+              usage_message: out.usageMessage,
+            };
           }));
         }
-        return json({ checked: rows.length, updated, failed });
+        const done = results.filter(Boolean);
+        return json({
+          checked: rows.length,
+          updated,
+          failed,
+          renewed: done.filter((x) => x.ok && x.renewed).length,
+          results: done,
+        });
       }
 
       // ---- link lifecycle ----
       if ((m0 = path.match(/^\/admin\/link\/([^/]+)$/))) {
         const t = m0[1];
         const action = url.searchParams.get("action");
+        if (action === "renew") {
+          // "Renew / Check" — you renewed this ONE customer with the supplier
+          // by hand; this verifies it landed. It re-reads only this customer's
+          // saved subscription and persists what the supplier now reports.
+          // It never buys, renews or changes anything on the supplier side.
+          const cur = (await storeList()).find((r) => r.token === t);
+          if (!cur) return json({ ok: false, token: t, error: "unknown token" }, 404);
+          const out = await checkCustomerRow(cur, {
+            fetchSubscription, quotaSummary, updateRow: storeUpdate,
+          });
+          // A failed check writes nothing — the row keeps its previous expiry,
+          // quota and usage delta.
+          if (!out.ok) return json({ ok: false, token: t, error: out.error }, out.code);
+          return json({
+            ok: true,
+            token: t,
+            renewed: out.expiryChanged,
+            expiry_changed: out.expiryChanged,
+            previous_expiry: out.previous.supplier_expires,
+            supplier_expires: out.row.supplier_expires ?? null,
+            previous_used_gb: out.previous.used_gb,
+            used_gb: out.row.used_gb ?? null,
+            total_gb: out.row.total_gb ?? null,
+            usage_delta_gb: out.usageDeltaGb,
+            usage_change: out.usageKind,
+            checked_at: out.row.checked_at || null,
+            message: out.message,
+            usage_message: out.usageMessage,
+            // Redacted so the refreshed row can be merged straight into the
+            // dashboard table without a full reload — and without ever
+            // carrying the supplier URL.
+            customer: redact(out.row),
+          });
+        }
         if (action === "rotate") {
           const cur = (await storeList()).find((r) => r.token === t);
           if (!cur) return json({ error: "unknown token" }, 404);
           // Carry the customer's details onto the new link, but never its
           // identity: token / created_at / revoked belong to the new row.
           const carry = {};
-          for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "checked_at"]) {
+          // prev_used_gb / usage_delta_gb ride along so a rotated link keeps
+          // the usage comparison it had; everything else is unchanged.
+          for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "checked_at", "prev_used_gb", "usage_delta_gb"]) {
             if (cur[k] != null) carry[k] = cur[k];
           }
           const fresh = await storeMint(cur.supplier_url, cur.label, carry);
@@ -1098,7 +1163,7 @@ export default {
           const gone = await storeRemove(t);
           return gone ? json({ token: t, deleted: true }) : json({ error: "unknown token" }, 404);
         }
-        return json({ error: "action must be rotate | revoke | delete" }, 400);
+        return json({ error: "action must be renew | rotate | revoke | delete" }, 400);
       }
       if (path === "/admin/reminders/run") {
         // GET so a platform cron can hit it directly (Vercel/Netlify crons

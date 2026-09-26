@@ -22,6 +22,8 @@
 //     the rest of the reminders from being recorded and delivered.
 // ============================================================================
 
+import { checkCustomerRow } from "./renewal.js";
+
 export const DEFAULT_THRESHOLDS = [30, 14, 7, 3, 1];
 
 const DAY_MS = 86400000;
@@ -185,20 +187,13 @@ export async function runReminders(deps, opts = {}) {
     for (let i = 0; i < rows.length; i += concurrency) {
       const batch = rows.slice(i, i + concurrency);
       await Promise.all(batch.map(async (r) => {
-        try {
-          const { status } = await fetchSubscription(r.supplier_url);
-          const s = quotaSummary(status);
-          if (!s) { result.refreshFailed++; return; }
-          await updateRow(r.token, {
-            supplier_expires: s.exp,
-            total_gb: s.tot,
-            used_gb: Math.round((s.up + s.down) * 100) / 100,
-            checked_at: new Date().toISOString(),
-          });
-          result.refreshed++;
-        } catch (e) {
-          result.refreshFailed++;
-        }
+        // Shared with the dashboard's global refresh and the per-customer
+        // Renew / Check (renewal.js), so the cron keeps the usage delta in
+        // step with used_gb instead of silently leaving a stale comparison
+        // behind. A failed check still writes nothing at all.
+        const out = await checkCustomerRow(r, { fetchSubscription, quotaSummary, updateRow });
+        if (out.ok) result.refreshed++;
+        else result.refreshFailed++;
       }));
     }
     rows = (await listAll()).filter((r) => !r.revoked);
