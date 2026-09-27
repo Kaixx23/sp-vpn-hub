@@ -117,8 +117,11 @@ export function dashboardPage(host = "") {
 </main>
 
 <div id="modal" class="modal" hidden>
-  <div class="sheet">
-    <h2 id="mtitle">Add customer</h2>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="mtitle">
+    <div class="sheet-head">
+      <h2 id="mtitle">Add customer</h2>
+      <button type="button" id="xclose" class="xbtn" aria-label="Close">×</button>
+    </div>
     <form id="form">
       <input type="hidden" name="token">
       <label>Supplier link <span class="req">*</span>
@@ -155,6 +158,7 @@ const CSS = `
 :root{--bg:#0b1220;--card:#141d31;--card2:#0e1626;--line:rgba(148,163,184,.14);--text:#e8eef8;
 --dim:#8ea0ba;--green:#34d399;--red:#f87171;--amber:#fbbf24;--blue:#60a5fa}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text)}
 .wrap{max-width:1200px;margin:0 auto;padding:0 18px}
 header{border-bottom:1px solid var(--line);background:linear-gradient(180deg,#17233c,#121a2c);padding:16px 0}
@@ -206,7 +210,11 @@ padding:5px 8px;font-size:11px;cursor:pointer;margin-right:4px}
 justify-content:center;padding:40px 16px;overflow:auto;z-index:50}
 .sheet{background:linear-gradient(180deg,#17233c,#121a2c);border:1px solid var(--line);
 border-radius:18px;padding:22px;width:100%;max-width:520px}
-h2{margin:0 0 14px;font-size:17px}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+h2{margin:0;font-size:17px}
+.xbtn{background:#1b2740;border:1px solid var(--line);color:var(--text);border-radius:9px;
+width:34px;height:34px;font-size:22px;line-height:1;cursor:pointer}
+.xbtn:hover{border-color:var(--blue)}
 label{display:block;font-size:12px;color:#cbd5e1;font-weight:600;margin-bottom:11px}
 .req{color:var(--red)}
 input,textarea{width:100%;margin-top:5px;background:var(--card2);border:1px solid var(--line);
@@ -360,9 +368,14 @@ function openModal(row) {
     if (row[k] != null && f[k]) f[k].value = row[k];
   else f.link.disabled = false;
   $("#modal").hidden = false;
+  setTimeout(() => (row ? f.customer : f.link).focus(), 0);
 }
+function closeModal() { $("#modal").hidden = true; }
 $("#add").addEventListener("click", () => openModal(null));
-$("#cancel").addEventListener("click", () => ($("#modal").hidden = true));
+$("#cancel").addEventListener("click", closeModal);
+$("#xclose").addEventListener("click", closeModal);
+$("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#modal").hidden) closeModal(); });
 
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -378,8 +391,8 @@ $("#form").addEventListener("submit", async (e) => {
     if (!r.ok) { res.className = "result err"; res.textContent = j.error || ("HTTP " + r.status); return; }
     res.className = "result ok";
     res.textContent = editing ? "Saved." : "Created. Send this to the customer:  " + j.oneLink;
-    if (!editing) { await load(); setTimeout(() => ($("#modal").hidden = true), 1400); }
-    else { await load(); $("#modal").hidden = true; toast("Saved"); }
+    if (!editing) { await load(); setTimeout(closeModal, 1400); }
+    else { await load(); closeModal(); toast("Saved"); }
   } catch (err) { res.className = "result err"; res.textContent = err.message; }
 });
 
