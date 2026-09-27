@@ -1,5 +1,13 @@
 # SP VPN Hub — supplier-leak fix + customer link registry
 
+> **Business source of truth**
+>
+> Live business repository: `Kaixx23/sp-vpn-hub`  
+> Live business branch: `arena/01a0e3a9-sp-vpn-hub`  
+> Live site: `https://sp-vpn.netlify.app/`
+>
+> Future AI/coding sessions should read [`BUSINESS_SOURCE_OF_TRUTH.md`](./BUSINESS_SOURCE_OF_TRUTH.md) before making changes. The live business code is on `arena/01a0e3a9-sp-vpn-hub`, not necessarily `main`.
+
 Drop-in replacement for `sp-global` that fixes the supplier-link leak and adds a
 token registry (the database your dashboard will sit on).
 
