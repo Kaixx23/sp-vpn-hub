@@ -1,0 +1,32 @@
+-- ============================================================================
+-- 001 — usage-change tracking  (ADDITIVE ONLY)
+--
+-- Adds the two columns the "Renew / Check" action and the usage-delta display
+-- need. Nothing is dropped, nothing is recreated, no row is touched: every
+-- existing customer keeps its token, supplier_url, billing fields, account
+-- email/password, expiry and quota exactly as they are, and simply gains two
+-- NULL columns that read as "no previous check to compare against yet".
+--
+--   prev_used_gb    used_gb as of the immediately previous SUCCESSFUL check
+--   usage_delta_gb  used_gb - prev_used_gb   (>0 used more, <0 supplier reset)
+--
+-- You normally do NOT need to run this by hand. token-store.js runs the same
+-- additive migration on every boot (ADDED_COLUMNS -> ALTER TABLE ... ADD
+-- COLUMN, guarded by PRAGMA table_info and a duplicate-column catch), so the
+-- first request after deploy migrates Turso for you. This file exists so the
+-- change is reviewable as SQL and can be applied ahead of the deploy:
+--
+--   turso db shell <your-db> < migrations/001-usage-delta.sql
+--
+-- or, against whatever TOKEN_STORE_URL points at:
+--
+--   npm run migrate
+--
+-- SQLite/libSQL has no "ADD COLUMN IF NOT EXISTS". Re-running this file after
+-- it has already been applied therefore reports "duplicate column name" —
+-- that error is safe and means the migration is already in place. `npm run
+-- migrate` swallows it for you.
+-- ============================================================================
+
+ALTER TABLE links ADD COLUMN prev_used_gb REAL;
+ALTER TABLE links ADD COLUMN usage_delta_gb REAL;
