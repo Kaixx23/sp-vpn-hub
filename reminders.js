@@ -122,6 +122,8 @@ Plan: ${row.plan || "—"} · ${money(row) || "no price set"}${quota}${tail}`;
   }
 }
 
+const isSystemGeneratedRow = (r) => !!(r && !r.customer && (r.system_generated || r.label === "quota-page" || r.label === "seller-tool"));
+
 /**
  * Decide what needs saying. Pure function — no I/O, no sending.
  * Returns [{ token, kind, days, text }].
@@ -129,7 +131,7 @@ Plan: ${row.plan || "—"} · ${money(row) || "no price set"}${quota}${tail}`;
 export function dueReminders(rows, { thresholds = DEFAULT_THRESHOLDS, includeLegacy = true } = {}) {
   const out = [];
   for (const r of rows) {
-    if (r.revoked) continue;
+    if (r.revoked || isSystemGeneratedRow(r)) continue;
 
     const d = daysUntil(r.supplier_expires);
     if (d === null) {
@@ -179,7 +181,7 @@ export async function runReminders(deps, opts = {}) {
   const dateKey = now.toISOString().slice(0, 10);
   const result = { refreshed: 0, refreshFailed: 0, sent: [], skipped: [], failed: [] };
 
-  let rows = (await listAll()).filter((r) => !r.revoked);
+  let rows = (await listAll()).filter((r) => !r.revoked && !isSystemGeneratedRow(r));
 
   // 1. Pull live expiry + quota from the supplier. Bounded concurrency: the
   //    supplier panel must not see a burst just because the cron fired.
@@ -196,7 +198,7 @@ export async function runReminders(deps, opts = {}) {
         else result.refreshFailed++;
       }));
     }
-    rows = (await listAll()).filter((r) => !r.revoked);
+    rows = (await listAll()).filter((r) => !r.revoked && !isSystemGeneratedRow(r));
   }
 
   // 2. Decide, then send only what is new.

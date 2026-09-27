@@ -59,10 +59,16 @@ console.log("\n[1] summarise() — the renewal maths");
     { revoked: false, supplier_expires: null, paid_until: null, price: 0 },
     { revoked: true, supplier_expires: day(45), paid_until: day(45), price: 99 },
     { revoked: false, supplier_expires: day(60), paid_until: day(60), price: 25, legacy: true },
+    // Anonymous/system-generated rows should remain visible elsewhere, but they
+    // must never inflate customer counts, MRR, expiry alerts, or profit.
+    { label: "quota-page", revoked: false, supplier_expires: day(-99), paid_until: day(-99), price: 999, total_gb: 512, currency: "RMB", billing_cycle: "monthly" },
+    { label: "seller-tool", revoked: false, supplier_expires: day(1), price: 888, total_gb: 1024, currency: "RMB", billing_cycle: "monthly" },
   ];
   const s = summarise(rows);
-  ok(s.total === 7, `total counts every row (got ${s.total})`);
-  ok(s.active === 6, `active excludes revoked (got ${s.active})`);
+  ok(s.total === 7, `total counts real customer rows only (got ${s.total})`);
+  ok(s.allLinks === 9, `allLinks still records every stored link (got ${s.allLinks})`);
+  ok(s.generatedLinks === 2 && s.generatedActive === 2, `anonymous/generated links are counted separately (${s.generatedLinks}/${s.generatedActive})`);
+  ok(s.active === 6, `active excludes revoked and generated rows (got ${s.active})`);
   ok(s.revoked === 1, `revoked counted separately (got ${s.revoked})`);
   ok(s.overdue === 1, `overdue = expiry in the past (got ${s.overdue})`);
   ok(s.expiring7 === 1, `expiring ≤7d catches the 4-day link (got ${s.expiring7})`);
@@ -104,6 +110,8 @@ for (const [who, name, price, paid] of [
   tokens[who] = j.token;
   ok(r.status === 200 && j.token, `${name}: minted with customer data`);
 }
+const anonymousQuotaToken = await store.mint("https://panel.example/sub?who=healthy", "quota-page");
+ok(anonymousQuotaToken, "anonymous quota-page token created as a generated link");
 
 console.log("\n[3] /admin/refresh — pulls live quota + expiry from the supplier");
 {
@@ -124,8 +132,12 @@ console.log("\n[3] /admin/refresh — pulls live quota + expiry from the supplie
   ok(byName.Ali.checked_at, "checked_at timestamped");
 
   console.log("\n[4] dashboard.json stats reflect the live data");
+  const anon = after.customers.find((c) => c.token === anonymousQuotaToken);
+  ok(anon && anon.system_generated === true && anon.system_kind === "quota-page", "quota-page row is flagged as anonymous/generated");
+  ok(anon && anon.supplier_expires === null, "global refresh skipped anonymous quota-page rows");
   const s = after.stats;
-  ok(s.active === 3, `3 active (got ${s.active})`);
+  ok(s.active === 3, `3 active paying/customer rows (got ${s.active})`);
+  ok(s.generatedLinks === 1, `1 generated quota-page link counted separately (got ${s.generatedLinks})`);
   ok(s.overdue === 1, `1 overdue — Chen (got ${s.overdue})`);
   ok(s.expiring7 === 1, `1 expiring ≤7d — Bao at 4 days (got ${s.expiring7})`);
   ok(s.unpaid === 1, `1 unpaid — Chen (got ${s.unpaid})`);
@@ -149,6 +161,8 @@ console.log("\n[5] /admin — the page itself");
   ok(!html.includes("<script src="), "no external script tags (no CDN — loads from China)");
   ok(!html.includes("http://") && !html.includes("https://cdn"), "no CDN references at all");
   ok(html.includes("Refresh quota"), "has the refresh control");
+  ok(html.includes("Anonymous quota checks") && html.includes("All links"), "generated quota links have their own dashboard filters");
+  ok(html.includes("hidden from customer totals") && html.includes("Anonymous checks"), "stats explain generated links are separate from customers/profit");
   ok(html.includes("[hidden]{display:none !important}"), "modal/toast hidden state is enforced over component CSS");
   ok(html.includes('id="close"') && html.includes('function closeModal()'), "customer popup has reliable close controls");
   ok(html.includes('e.key === "Escape"') && html.includes('e.target === $("#modal")'), "customer popup closes on Escape and backdrop click");

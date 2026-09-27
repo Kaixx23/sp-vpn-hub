@@ -12,6 +12,16 @@ import { profitOf, PANEL_PASSWORD_DEFAULT } from "./plans.js";
  * Derive the numbers the dashboard leads with, from the raw rows.
  * Exported separately so it can be unit-tested without rendering HTML.
  */
+export function isSystemGeneratedRow(r) {
+  return !!(r && !r.customer && (r.system_generated || r.label === "quota-page" || r.label === "seller-tool"));
+}
+
+export function systemGeneratedLabel(r) {
+  if ((r && r.label) === "quota-page") return "Anonymous quota check";
+  if ((r && r.label) === "seller-tool") return "Seller-tool generated link";
+  return "System-generated link";
+}
+
 export function summarise(rows) {
   const now = new Date();
   const day = (d) => {
@@ -20,8 +30,14 @@ export function summarise(rows) {
     return Number.isNaN(t) ? null : Math.round((t - Date.parse(now.toISOString().slice(0, 10) + "T00:00:00Z")) / 86400000);
   };
 
-  const active = rows.filter((r) => !r.revoked);
-  const revoked = rows.filter((r) => r.revoked);
+  // Anonymous quota-check links and seller-tool scratch links are useful
+  // records, but they are NOT paying customers. Keep them visible on their own
+  // filter, while excluding them from customer counts, renewal alerts, MRR and
+  // profit so the dashboard stays financially accurate.
+  const generated = rows.filter(isSystemGeneratedRow);
+  const customerRows = rows.filter((r) => !isSystemGeneratedRow(r));
+  const active = customerRows.filter((r) => !r.revoked);
+  const revoked = customerRows.filter((r) => r.revoked);
 
   const withExp = active.map((r) => ({ r, d: day(r.supplier_expires) })).filter((x) => x.d !== null);
   const overdue = withExp.filter((x) => x.d < 0);
@@ -50,7 +66,10 @@ export function summarise(rows) {
   const legacy = active.filter((r) => r.legacy).length;
 
   return {
-    total: rows.length,
+    total: customerRows.length,
+    allLinks: rows.length,
+    generatedLinks: generated.length,
+    generatedActive: generated.filter((r) => !r.revoked).length,
     active: active.length,
     revoked: revoked.length,
     overdue: overdue.length,
@@ -134,8 +153,10 @@ export function dashboardPage(host = "") {
       </label>
       <div class="toolbar-spacer"></div>
       <label class="select-wrap"><span class="sr-only">Filter customer links</span><select id="filter" aria-label="Filter customer links">
-        <option value="all">All customers</option>
+        <option value="all">Customers</option>
         <option value="action">Needs attention</option>
+        <option value="generated">Anonymous quota checks</option>
+        <option value="all-links">All links</option>
         <option value="expiring">Expiring ≤ 30 days</option>
         <option value="overdue">Overdue</option>
         <option value="legacy">Legacy links</option>
@@ -158,7 +179,7 @@ export function dashboardPage(host = "") {
         <tbody id="rows"><tr><td colspan="7" class="loading"><span class="loader"></span> Loading your customers…</td></tr></tbody>
       </table>
     </div>
-    <div class="panel-footer"><span class="footer-dot"></span> Supplier URLs are private and never shown here.</div>
+    <div class="panel-footer"><span class="footer-dot"></span> Supplier URLs are private and never shown here. Anonymous quota-check links are hidden from customer totals by default.</div>
   </section>
 </main>
 
@@ -244,7 +265,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid transparent;border-radius:10px;padding:10px 14px;color:var(--text);font-size:12px;font-weight:750;line-height:1;cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease,background .18s ease}.btn:hover{transform:translateY(-1px)}.btn:active{transform:translateY(0)}.btn:disabled{opacity:.55;cursor:default;transform:none}.btn-primary{background:linear-gradient(135deg,#e8323f,#a3131f);color:#ffffff;box-shadow:0 8px 22px rgba(220,38,38,.16)}.btn-primary:hover{box-shadow:0 10px 28px rgba(220,38,38,.28)}.btn-secondary{background:rgba(24,18,22,.85);border-color:var(--line-strong);color:var(--muted-strong)}.btn-secondary:hover{border-color:rgba(255,77,87,.42);color:var(--text);background:rgba(32,22,27,.92)}.btn-symbol{display:grid;place-items:center}.btn-symbol svg{width:16px;height:16px}.plus{font-size:17px;font-weight:400;line-height:10px;margin-left:-2px}
 .page-main{padding-top:44px;padding-bottom:88px;position:relative}.hero{min-height:224px;position:relative;display:grid;grid-template-columns:minmax(0,1fr) 360px;align-items:center;overflow:hidden;margin-bottom:27px;padding:34px 48px;border:1px solid var(--line);border-radius:24px;background:linear-gradient(110deg,rgba(26,18,22,.9),rgba(14,10,12,.7) 52%,rgba(43,15,20,.72));box-shadow:var(--shadow)}.hero:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(255,77,87,.045),transparent 34%,rgba(216,27,63,.08))}.hero-copy{position:relative;z-index:2;max-width:600px}.eyebrow{display:flex;align-items:center;gap:9px;margin:0 0 12px;color:var(--mint);font-size:10px;font-weight:800;letter-spacing:.18em}.eyebrow-line{width:22px;height:1px;background:currentColor;opacity:.75}.hero h2{margin:0;font-size:clamp(28px,4vw,45px);letter-spacing:-.045em;line-height:1.08;font-weight:780}.hero h2 em{font-style:normal;color:var(--mint)}.hero-lede{max-width:490px;margin:14px 0 19px;color:var(--muted);font-size:14px;line-height:1.65}.hero-foot{display:flex;align-items:center;gap:9px;color:var(--muted-strong);font-size:11px}.pulse-ring{display:grid;place-items:center;width:16px;height:16px}.pulse-ring i{width:6px;height:6px}.hero-art{position:absolute;right:30px;top:0;width:400px;height:100%;opacity:.95}.art-glow{position:absolute;width:280px;height:220px;right:28px;top:4px;background:radial-gradient(circle,rgba(255,77,87,.14),rgba(216,27,63,.1) 36%,transparent 69%);filter:blur(8px)}.art-orbit{position:absolute;border:1px solid rgba(255,125,132,.18);border-radius:50%;transform:rotate(-24deg)}.orbit-one{width:270px;height:132px;right:47px;top:47px}.orbit-two{width:170px;height:250px;right:95px;top:-10px;transform:rotate(43deg)}.art-core{position:absolute;display:grid;place-items:center;right:150px;top:78px;width:80px;height:80px;border:1px solid rgba(255,77,87,.38);border-radius:50%;background:radial-gradient(circle at 35% 25%,rgba(255,77,87,.27),rgba(24,18,22,.9) 66%);box-shadow:0 0 0 12px rgba(255,77,87,.035),0 0 45px rgba(255,77,87,.18)}.art-core span{font-size:15px;letter-spacing:.1em;font-weight:850;color:var(--mint)}.art-core i{position:absolute;right:10px;top:10px;width:6px;height:6px;border-radius:50%;background:var(--mint);box-shadow:0 0 10px var(--mint)}.art-node{position:absolute;width:7px;height:7px;border-radius:50%;background:var(--violet);box-shadow:0 0 14px rgba(216,27,63,.9)}.node-one{right:66px;top:66px}.node-two{right:92px;bottom:36px;background:var(--mint);box-shadow:0 0 14px rgba(255,77,87,.9)}.node-three{right:274px;top:46px;background:var(--amber);box-shadow:0 0 14px rgba(247,201,107,.9)}.art-card{position:absolute;display:flex;align-items:center;gap:9px;padding:9px 12px;border:1px solid var(--line-strong);border-radius:11px;background:rgba(22,16,19,.82);box-shadow:0 12px 25px rgba(0,0,0,.22);backdrop-filter:blur(8px)}.art-card b,.art-card small{display:block}.art-card b{font-size:10px}.art-card small{color:var(--muted);font-size:9px;margin-top:2px}.art-card-top{right:4px;top:33px}.art-card-bottom{right:39px;bottom:24px}.art-card-icon{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;color:var(--violet);background:rgba(216,27,63,.14);font-size:14px}.art-card-icon.green{color:var(--mint);background:rgba(255,77,87,.13)}
 .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:29px}.stat{position:relative;min-height:132px;overflow:hidden;padding:17px 18px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(24,18,22,.9),rgba(15,11,14,.84));box-shadow:0 12px 26px rgba(0,0,0,.1);transition:border-color .2s ease,transform .2s ease}.stat:after{content:"";position:absolute;right:-25px;bottom:-45px;width:110px;height:110px;border-radius:50%;background:var(--stat-glow,rgba(255,77,87,.07));filter:blur(4px)}.stat:hover{transform:translateY(-2px);border-color:var(--line-strong)}.stat-head{position:relative;z-index:1;display:flex;align-items:center;gap:9px}.stat-icon{display:grid;place-items:center;width:26px;height:26px;border-radius:8px;color:var(--mint);background:var(--mint-soft)}.stat-icon svg{width:14px;height:14px}.stat-kicker{color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.stat-value{position:relative;z-index:1;display:block;margin-top:17px;color:var(--text);font-size:27px;letter-spacing:-.04em;line-height:1;font-weight:790}.stat-caption{position:relative;z-index:1;display:block;margin-top:9px;color:var(--muted);font-size:11px}.stat.bad{--stat-glow:rgba(255,125,132,.1)}.stat.bad .stat-icon{color:var(--red);background:rgba(255,125,132,.11)}.stat.bad .stat-value{color:#ffabb0}.stat.warn{--stat-glow:rgba(247,201,107,.1)}.stat.warn .stat-icon{color:var(--amber);background:rgba(247,201,107,.11)}.stat.warn .stat-value{color:#f9d98d}.stat.good .stat-icon{color:var(--mint)}
-.customer-panel{padding:27px 27px 0;border:1px solid var(--line);border-radius:22px;background:linear-gradient(145deg,rgba(19,14,17,.94),rgba(12,9,11,.92));box-shadow:var(--shadow)}.panel-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:0 2px 24px}.panel-heading .eyebrow{margin-bottom:8px}.panel-heading h2{margin:0;font-size:23px;letter-spacing:-.03em}.panel-subtitle{margin:5px 0 0;color:var(--muted);font-size:12px}.dim{color:var(--muted);font-size:11px}.tracked-count{display:flex;align-items:flex-end;gap:9px;padding-bottom:2px}.tracked-count strong{font-size:24px;letter-spacing:-.04em}.tracked-count span{color:var(--muted);font-size:11px;padding-bottom:3px}.toolbar{display:flex;align-items:center;gap:9px;min-height:54px;padding:8px 10px;margin-bottom:12px;border:1px solid var(--line);border-radius:13px;background:rgba(12,9,11,.65)}.search-field{display:flex;align-items:center;gap:9px;flex:1;min-width:190px;color:var(--muted)}.search-field svg{width:17px;height:17px;flex:none}.search-field input{width:100%;min-width:0;border:0;background:transparent;color:var(--text);font-size:12px;outline:0}.search-field input::placeholder{color:#9c828c}.toolbar-spacer{flex:1}.select-wrap{position:relative}.select-wrap:after{content:"⌄";position:absolute;right:11px;top:7px;color:var(--muted);font-size:14px;pointer-events:none}.toolbar select{appearance:none;min-width:144px;padding:8px 29px 8px 11px;border:1px solid var(--line);border-radius:8px;outline:0;background:var(--surface-soft);color:var(--muted-strong);font-size:11px;cursor:pointer}.toolbar select:hover{border-color:var(--line-strong);color:var(--text)}.results-meta{display:inline-block;min-width:78px;color:var(--muted);font-size:11px;text-align:right;white-space:nowrap}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:rgba(10,8,9,.48)}table{width:100%;min-width:1110px;border-collapse:collapse;font-size:12px}th{padding:13px 15px;text-align:left;border-bottom:1px solid var(--line);color:#a58a93;font-size:10px;font-weight:750;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}td{padding:15px;border-bottom:1px solid var(--line);vertical-align:middle}tbody tr:last-child td{border-bottom:0}tbody tr{transition:background .18s ease}tbody tr:hover{background:rgba(255,77,87,.035)}tr.revoked{opacity:.54}.customer-cell{display:flex;align-items:center;gap:11px;min-width:170px}.avatar{display:grid;place-items:center;flex:none;width:34px;height:34px;border-radius:11px;color:#ffb3b8;background:linear-gradient(145deg,rgba(255,77,87,.22),rgba(216,27,63,.24));font-size:11px;font-weight:850;letter-spacing:.04em}.nm{font-size:12px;font-weight:750;white-space:nowrap}.sub{display:block;margin-top:3px;color:var(--muted);font-size:10px;line-height:1.35}.plan-cell{min-width:150px;color:var(--muted-strong);font-weight:650}.renewal-cell{min-width:130px}.date{margin-top:4px;color:var(--muted);font-size:10px}.usage-cell{width:186px;min-width:186px}.usage-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;color:var(--muted-strong);font-size:10px}.usage-top b{color:var(--text);font-weight:700}.bar{height:6px;overflow:hidden;border-radius:99px;background:#0a0808;box-shadow:inset 0 0 0 1px rgba(255,255,255,.035)}.bar i{display:block;height:100%;min-width:3px;border-radius:inherit;background:linear-gradient(90deg,var(--mint),#dc2626);box-shadow:0 0 9px rgba(255,77,87,.25)}.bar i.hot{background:linear-gradient(90deg,var(--amber),var(--red));box-shadow:0 0 9px rgba(255,125,132,.25)}.paid-cell{min-width:130px;color:var(--muted-strong);font-size:11px;white-space:nowrap}.paid-cell .pill{margin-left:4px}.lnk{display:block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--blue);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}.link-cell{min-width:190px}.link-caption{display:flex;align-items:center;gap:5px;margin-top:4px;color:var(--muted);font-size:10px}.link-caption svg{width:11px;height:11px}.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:999px;font-size:10px;font-weight:750;white-space:nowrap}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.red{color:var(--red);background:rgba(255,125,132,.11)}.pill.amber{color:var(--amber);background:rgba(247,201,107,.11)}.pill.green{color:var(--mint);background:rgba(255,77,87,.11)}.pill.gray{color:var(--muted);background:rgba(255,125,132,.11)}.mini{display:inline-flex;align-items:center;justify-content:center;padding:6px 8px;margin:0 3px 3px 0;border:1px solid var(--line);border-radius:7px;background:rgba(24,18,22,.76);color:var(--muted-strong);font-size:10px;cursor:pointer;transition:all .18s ease}.mini:hover{border-color:rgba(255,77,87,.45);color:var(--mint);background:rgba(255,77,87,.07)}.mini.danger:hover{border-color:rgba(255,125,132,.48);color:var(--red);background:rgba(255,125,132,.07)}
+.customer-panel{padding:27px 27px 0;border:1px solid var(--line);border-radius:22px;background:linear-gradient(145deg,rgba(19,14,17,.94),rgba(12,9,11,.92));box-shadow:var(--shadow)}.panel-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:0 2px 24px}.panel-heading .eyebrow{margin-bottom:8px}.panel-heading h2{margin:0;font-size:23px;letter-spacing:-.03em}.panel-subtitle{margin:5px 0 0;color:var(--muted);font-size:12px}.dim{color:var(--muted);font-size:11px}.tracked-count{display:flex;align-items:flex-end;gap:9px;padding-bottom:2px}.tracked-count strong{font-size:24px;letter-spacing:-.04em}.tracked-count span{color:var(--muted);font-size:11px;padding-bottom:3px}.toolbar{display:flex;align-items:center;gap:9px;min-height:54px;padding:8px 10px;margin-bottom:12px;border:1px solid var(--line);border-radius:13px;background:rgba(12,9,11,.65)}.search-field{display:flex;align-items:center;gap:9px;flex:1;min-width:190px;color:var(--muted)}.search-field svg{width:17px;height:17px;flex:none}.search-field input{width:100%;min-width:0;border:0;background:transparent;color:var(--text);font-size:12px;outline:0}.search-field input::placeholder{color:#9c828c}.toolbar-spacer{flex:1}.select-wrap{position:relative}.select-wrap:after{content:"⌄";position:absolute;right:11px;top:7px;color:var(--muted);font-size:14px;pointer-events:none}.toolbar select{appearance:none;min-width:144px;padding:8px 29px 8px 11px;border:1px solid var(--line);border-radius:8px;outline:0;background:var(--surface-soft);color:var(--muted-strong);font-size:11px;cursor:pointer}.toolbar select:hover{border-color:var(--line-strong);color:var(--text)}.results-meta{display:inline-block;min-width:78px;color:var(--muted);font-size:11px;text-align:right;white-space:nowrap}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:rgba(10,8,9,.48)}table{width:100%;min-width:1110px;border-collapse:collapse;font-size:12px}th{padding:13px 15px;text-align:left;border-bottom:1px solid var(--line);color:#a58a93;font-size:10px;font-weight:750;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}td{padding:15px;border-bottom:1px solid var(--line);vertical-align:middle}tbody tr:last-child td{border-bottom:0}tbody tr{transition:background .18s ease}tbody tr:hover{background:rgba(255,77,87,.035)}tr.revoked{opacity:.54}tr.generated{background:rgba(247,201,107,.025)}tr.generated .avatar{color:var(--amber);background:rgba(247,201,107,.12)}.customer-cell{display:flex;align-items:center;gap:11px;min-width:170px}.avatar{display:grid;place-items:center;flex:none;width:34px;height:34px;border-radius:11px;color:#ffb3b8;background:linear-gradient(145deg,rgba(255,77,87,.22),rgba(216,27,63,.24));font-size:11px;font-weight:850;letter-spacing:.04em}.nm{font-size:12px;font-weight:750;white-space:nowrap}.sub{display:block;margin-top:3px;color:var(--muted);font-size:10px;line-height:1.35}.plan-cell{min-width:150px;color:var(--muted-strong);font-weight:650}.renewal-cell{min-width:130px}.date{margin-top:4px;color:var(--muted);font-size:10px}.usage-cell{width:186px;min-width:186px}.usage-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;color:var(--muted-strong);font-size:10px}.usage-top b{color:var(--text);font-weight:700}.bar{height:6px;overflow:hidden;border-radius:99px;background:#0a0808;box-shadow:inset 0 0 0 1px rgba(255,255,255,.035)}.bar i{display:block;height:100%;min-width:3px;border-radius:inherit;background:linear-gradient(90deg,var(--mint),#dc2626);box-shadow:0 0 9px rgba(255,77,87,.25)}.bar i.hot{background:linear-gradient(90deg,var(--amber),var(--red));box-shadow:0 0 9px rgba(255,125,132,.25)}.paid-cell{min-width:130px;color:var(--muted-strong);font-size:11px;white-space:nowrap}.paid-cell .pill{margin-left:4px}.lnk{display:block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--blue);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}.link-cell{min-width:190px}.link-caption{display:flex;align-items:center;gap:5px;margin-top:4px;color:var(--muted);font-size:10px}.link-caption svg{width:11px;height:11px}.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:999px;font-size:10px;font-weight:750;white-space:nowrap}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.red{color:var(--red);background:rgba(255,125,132,.11)}.pill.amber{color:var(--amber);background:rgba(247,201,107,.11)}.pill.green{color:var(--mint);background:rgba(255,77,87,.11)}.pill.gray{color:var(--muted);background:rgba(255,125,132,.11)}.mini{display:inline-flex;align-items:center;justify-content:center;padding:6px 8px;margin:0 3px 3px 0;border:1px solid var(--line);border-radius:7px;background:rgba(24,18,22,.76);color:var(--muted-strong);font-size:10px;cursor:pointer;transition:all .18s ease}.mini:hover{border-color:rgba(255,77,87,.45);color:var(--mint);background:rgba(255,77,87,.07)}.mini.danger:hover{border-color:rgba(255,125,132,.48);color:var(--red);background:rgba(255,125,132,.07)}
 .mini[data-a="renew"]{border-color:rgba(255,77,87,.38);color:var(--mint);font-weight:800}
 .mini[data-a="renew"]:hover{border-color:rgba(255,77,87,.62);background:rgba(255,77,87,.12);color:var(--mint)}
 .mini:disabled{opacity:.55;cursor:default}
@@ -272,6 +293,7 @@ const ICONS = {
   calendar: '<svg viewBox="0 0 20 20" fill="none"><rect x="2.8" y="4.4" width="14.4" height="13" rx="2" stroke="currentColor" stroke-width="1.45"/><path d="M6 2.8v3.1M14 2.8v3.1M2.8 8.2h14.4" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/></svg>',
   warning: '<svg viewBox="0 0 20 20" fill="none"><path d="M10 2.7v8.1M10 14.2v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="10" r="7.5" stroke="currentColor" stroke-width="1.45"/></svg>',
   coin: '<svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.3" stroke="currentColor" stroke-width="1.45"/><path d="M12.4 7.3c-.5-.5-1.2-.8-2.1-.8-1.2 0-2 .6-2 1.5 0 2.3 4.1 1 4.1 3.3 0 .9-.8 1.6-2 1.6-.9 0-1.7-.3-2.3-.9M10.3 5.2v9.5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>',
+  link: '<svg viewBox="0 0 20 20" fill="none"><path d="M7.8 12.2 12.2 7.8M7 8.8l-.9.9a3 3 0 0 0 4.2 4.2l.9-.9M13 11.2l.9-.9a3 3 0 0 0-4.2-4.2l-.9.9" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/></svg>',
   shield: '<svg viewBox="0 0 20 20" fill="none"><path d="M10 2.5 16 5v4.2c0 3.3-2.1 6.1-6 7.5-3.9-1.4-6-4.2-6-7.5V5l6-2.5Z" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/><path d="m7 9.9 2 2 4-4" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
 
@@ -341,10 +363,15 @@ function needsAction(r) {
   return r.revoked || e === null || e <= 30 || (p !== null && p < 0) || r.legacy;
 }
 
+function isGenerated(r) { return !!(r && !r.customer && (r.system_generated || r.label === "quota-page" || r.label === "seller-tool")); }
+function displayName(r) { return r.customer || (isGenerated(r) ? (r.label === "quota-page" ? "Anonymous quota check" : r.label === "seller-tool" ? "Seller-tool generated link" : "System-generated link") : (r.label || "Unnamed customer")); }
+
 function rowsToShow() {
   let rs = DATA.slice();
+  if (FILTER === "generated") rs = rs.filter(isGenerated);
+  else if (FILTER !== "all-links") rs = rs.filter((r) => !isGenerated(r));
   const q = Q.toLowerCase();
-  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes, r.account_email]
+  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes, r.account_email, displayName(r)]
     .some((v) => String(v || "").toLowerCase().includes(q)));
   if (FILTER === "action") rs = rs.filter(needsAction);
   if (FILTER === "expiring") rs = rs.filter((r) => { const d = daysTo(r.supplier_expires); return d !== null && d >= 0 && d <= 30; });
@@ -369,22 +396,29 @@ function actionButton(action, token, label, danger) {
 
 function render() {
   const rs = rowsToShow();
-  $("#meta").textContent = rs.length + " of " + DATA.length + " links";
-  const active = DATA.filter((r) => !r.revoked).length;
+  const customers = DATA.filter((r) => !isGenerated(r));
+  const generated = DATA.filter(isGenerated);
+  const active = customers.filter((r) => !r.revoked).length;
   $("#activeCount").textContent = active;
+  $("#meta").textContent = FILTER === "generated"
+    ? rs.length + " of " + generated.length + " generated links"
+    : FILTER === "all-links"
+      ? rs.length + " of " + DATA.length + " links" + (generated.length ? " · " + generated.length + " generated" : "")
+      : rs.length + " of " + customers.length + " customers" + (generated.length ? " · " + generated.length + " hidden generated" : "");
   $("#rows").innerHTML = rs.length ? rs.map((r) => {
-    const name = r.customer || r.label || "Unnamed customer";
+    const generatedRow = isGenerated(r);
+    const name = displayName(r);
     const one = oneLinkOf(r);
     const paid = r.paid_until ? prettyDate(r.paid_until) + (daysTo(r.paid_until) < 0 ? ' <span class="pill red">unpaid</span>' : '') : '<span class="dim">Not recorded</span>';
-    return '<tr class="' + (r.revoked ? "revoked" : "") + '">' +
+    return '<tr class="' + (r.revoked ? "revoked " : "") + (generatedRow ? "generated" : "") + '">' +
       '<td><div class="customer-cell"><span class="avatar">' + esc(initials(name)) + '</span><div><div class="nm">' + esc(name) + '</div>' +
-        '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + '</div></div></td>' +
-      '<td class="plan-cell">' + esc(r.plan || "No plan set") + '<div class="sub">' + esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : "") + '</div></td>' +
+        '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + (generatedRow ? ' · generated' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + (generatedRow ? '<div class="sub">Not counted as a customer or profit.</div>' : '') + '</div></div></td>' +
+      '<td class="plan-cell">' + esc(r.plan || (generatedRow ? "Not a customer record" : "No plan set")) + '<div class="sub">' + (generatedRow ? "Created by quota/tool page" : (esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : ""))) + '</div></td>' +
       '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + esc(prettyDate(r.supplier_expires) || "Not checked") + '</div></td>' +
       '<td class="usage-cell">' + quotaCell(r) + '</td>' +
       '<td class="paid-cell">' + paid + '</td>' +
       '<td class="link-cell"><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span><span class="link-caption"><svg viewBox="0 0 20 20" fill="none"><path d="M7.5 12.5 12.5 7.5M6 14a3 3 0 0 1 0-4.2l1.6-1.6M14 6a3 3 0 0 1 0 4.2l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> private link</span></td>' +
-      '<td class="actions-cell">' + (r.revoked ? "" : actionButton("renew", r.token, "Renew / Check")) + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
+      '<td class="actions-cell">' + (r.revoked || generatedRow ? "" : actionButton("renew", r.token, "Renew / Check")) + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, generatedRow ? "Convert/Edit" : "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
       '</tr>';
   }).join("") : '<tr><td colspan="7" class="loading">No customers match these filters.</td></tr>';
 }
@@ -401,6 +435,7 @@ function renderStats(s) {
     card(s.unknownExpiry, "Expiry unknown", s.unknownExpiry ? "warn" : "good", ICONS.calendar, "refresh to check status") +
     card((s.mrr || 0).toFixed(2), "Revenue / month", "", ICONS.coin, "active plans · before costs") +
     card(s.profitMonthly == null ? "—" : s.profitMonthly.toFixed(2), "Profit / month", s.profitMonthly == null ? "" : s.profitMonthly > 0 ? "good" : s.profitMonthly < 0 ? "bad" : "", ICONS.coin, "after catalogue cost") +
+    card(s.generatedLinks || 0, "Anonymous checks", s.generatedLinks ? "warn" : "good", ICONS.link, "hidden from customer totals") +
     card(s.legacy, "Legacy links", s.legacy ? "warn" : "good", ICONS.shield, s.legacy ? "migrate when convenient" : "all links protected");
 }
 

@@ -15,7 +15,7 @@ import {
   setBackend as storeSetBackend,
   backend as storeBackend,
 } from "./token-store.js";
-import { dashboardPage, summarise } from "./dashboard.js";
+import { dashboardPage, summarise, isSystemGeneratedRow } from "./dashboard.js";
 import { PLAN_CATALOG, profitOf } from "./plans.js";
 import { checkCustomerRow, usageKind, usageMessage } from "./renewal.js";
 import { runRemindersFromEnv } from "./reminders.js";
@@ -754,9 +754,12 @@ const json = (obj, code = 200) =>
   });
 // The admin output must never hand back a supplier URL in full — that is the
 // exact secret this whole change exists to protect. Host only.
+const generatedKind = (r) => r.label === "quota-page" ? "quota-page" : r.label === "seller-tool" ? "seller-tool" : null;
 const redact = (r) => ({
   token: r.token,
   label: r.label,
+  system_generated: isSystemGeneratedRow(r),
+  system_kind: isSystemGeneratedRow(r) ? generatedKind(r) : null,
   customer: r.customer || null,
   plan: r.plan || null,
   price: r.price ?? null,
@@ -782,7 +785,8 @@ const redact = (r) => ({
   revoked: !!r.revoked,
   created_at: r.created_at,
   // price - catalogue cost of the plan (null when the plan is unknown).
-  profit: profitOf(r),
+  // Anonymous quota/tool links are not customers, so they never carry profit.
+  profit: isSystemGeneratedRow(r) ? null : profitOf(r),
   supplier_host: (() => {
     try { return new URL(r.supplier_url).host; } catch (e) { return "direct-node-list"; }
   })(),
@@ -957,13 +961,15 @@ export default {
           rows = await storeList();
           report.checks.store = {
             ok: true, ms: Date.now() - t0, backend: storeBackend().name,
-            customers: rows.length, active: rows.filter((r) => !r.revoked).length,
+            customers: rows.filter((r) => !isSystemGeneratedRow(r)).length,
+            generated: rows.filter(isSystemGeneratedRow).length,
+            active: rows.filter((r) => !r.revoked && !isSystemGeneratedRow(r)).length,
           };
         } catch (e) {
           report.checks.store = { ok: false, error: String(e.message || e) };
         }
         if (report.checks.store.ok) {
-          const active = rows.filter((r) => !r.revoked);
+          const active = rows.filter((r) => !r.revoked && !isSystemGeneratedRow(r));
           // One representative supplier link per unique supplier host.
           const byHost = new Map();
           for (const r of active) {
@@ -1093,7 +1099,7 @@ export default {
         });
       }
       if (path === "/admin/refresh") {
-        const rows = (await storeList()).filter((r) => !r.revoked);
+        const rows = (await storeList()).filter((r) => !r.revoked && !isSystemGeneratedRow(r));
         // Bounded parallelism: the supplier panel must not see a burst of 50
         // concurrent fetches just because you opened the dashboard.
         const CONC = 6;
