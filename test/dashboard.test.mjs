@@ -128,6 +128,11 @@ console.log("\n[5] /admin — the page itself");
   ok(html.includes("<!doctype html>"), "serves a full HTML document");
   ok(html.includes("reseller dashboard"), "renders the dashboard title");
   ok(html.includes("dashboard.json"), "client fetches dashboard.json");
+  const script = (html.match(/<script>([\s\S]*)<\/script>/) || [])[1] || "";
+  ok(script.includes('document.querySelector(s)'), "dashboard client JS is embedded");
+  ok(script.includes('FILTER = "all"') && script.includes('$("#toast")') && !script.includes('FILTER = &quot;all&quot;'), "dashboard client JS is not HTML-escaped");
+  try { new Function(script); ok(true, "dashboard client JS parses as valid JavaScript"); }
+  catch (e) { ok(false, "dashboard client JS parses as valid JavaScript (" + e.message + ")"); }
   ok(!html.includes("<script src="), "no external script tags (no CDN — loads from China)");
   ok(!html.includes("http://") && !html.includes("https://cdn"), "no CDN references at all");
   ok(html.includes("Refresh quota"), "has the refresh control");

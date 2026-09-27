@@ -60,6 +60,12 @@ export function summarise(rows) {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// Script text is not normal HTML text: entities such as &quot; are not decoded
+// inside <script>. Escaping the whole dashboard client made the live admin page
+// stay forever on "Loading…" because the browser saw invalid JavaScript like
+// $(&quot;#toast&quot;). Only escape the literal sequence that can close the tag.
+const scriptSafe = (s) => String(s).replace(/<\/script/gi, "<\\/script").replace(/<!--/g, "<\\!--");
+
 export function dashboardPage(host = "") {
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8">
@@ -141,7 +147,7 @@ export function dashboardPage(host = "") {
 </div>
 
 <div id="toast" class="toast" hidden></div>
-<script>${esc(CLIENT)}</script>
+<script>${scriptSafe(CLIENT)}</script>
 </body></html>`;
 }
 
