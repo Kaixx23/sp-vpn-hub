@@ -21,6 +21,7 @@ import {
   markSent as storeMarkSent,
   listReminders as storeListReminders,
 } from "./token-store.js";
+import { generateQrSvg, qrMakerPage } from "./qr.js";
 
 // ---------------- translation ----------------
 const INFO_PREFIX = [
@@ -483,6 +484,8 @@ input[type=submit]{width:100%;margin-top:14px;background:linear-gradient(90deg,#
 .dim{color:var(--dim);font-size:12px;margin-top:14px;text-align:center;line-height:1.6}
 .ok{color:var(--green);font-size:13px;text-align:center;margin-top:8px;font-weight:600}
 .row{border-top:1px solid var(--line);margin-top:16px;padding-top:14px}
+.qr-wrap{background:#fff;border-radius:12px;padding:14px;margin:12px 0;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.qr-wrap svg{width:180px;height:180px;margin:0 auto;display:block}
 .msg{font-size:13px;color:#cdd8e8;background:var(--card2);border-radius:10px;padding:12px;line-height:1.65;white-space:pre-wrap}
 .steps{margin-top:16px;font-size:14px;line-height:1.85;color:#cbd5e1}`;
 
@@ -498,7 +501,8 @@ else{var x=document.createElement('textarea');x.value=t;document.body.appendChil
 function cm(k,ok){var el=document.getElementById(k);el.style.display='block';var t=el.textContent;
 function d(){document.getElementById(ok).style.display='block'}
 if(navigator.clipboard){navigator.clipboard.writeText(t).then(d)}
-else{var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();document.execCommand('copy');x.remove();d()}}</script>`;
+else{var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();document.execCommand('copy');x.remove();d()}}
+function tqr(id){var el=document.getElementById(id);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'block':'none'}</script>`;
 
 const homePage = () => page("Check your data", `
 <h1>⚡ SP VPN — check your data</h1>
@@ -508,7 +512,7 @@ const homePage = () => page("Check your data", `
 <textarea name="link" placeholder="Paste your subscription link here"></textarea>
 <input type="submit" value=" Show my quota">
 </form>
-<div class="steps">1️⃣ Paste the link your seller gave you<br>2️⃣ Tap <b>Show my quota</b><br>3️⃣ You'll get <b>your own personal link</b> — save it. Next time you just tap it.</div>`);
+<div class="steps">1️⃣ Paste the link your seller gave you<br>2️⃣ Tap <b>Show my quota</b><br>3️⃣ You'll get <b>your own personal link &amp; QR code</b> — save it. Next time you just tap it.<br><br>📱 Need to make a QR code? <a href="/qr" style="color:var(--blue)">Open QR Maker</a></div>`);
 
 const formPage = (title, sub, action, btn) => page(title, `
 <h1>⚡ ${title}</h1>
@@ -520,7 +524,7 @@ const formPage = (title, sub, action, btn) => page(title, `
 <textarea name="links" placeholder="https://provider.example/api/sub?token=…"></textarea>
 <input type="submit" value="${btn}">
 </form>
-<div class="steps">For each link you get: ✨ the ONE link (any app) · 🔗 live quota link · 📋 ready-to-send message</div>`);
+<div class="steps">For each link you get: ✨ ONE link (all apps) · 📱 QR Code (scan &amp; go) · 🔗 live quota link · 📋 ready-to-send message · <a href="/qr" style="color:var(--blue)">QR Maker</a></div>`);
 
 const errorPage = (msg) => page("Error", `
 <h1>⚡ SP VPN</h1>
@@ -553,14 +557,37 @@ function quotaBody(host, tok, brand, status, proxies, linksTotal) {
 ${quota}
 <div class="dim" style="text-align:center;margin-top:10px">${proxies.length} of ${linksTotal} nodes ready</div>
 <div class="me"><div class="t">🔗 <b>YOUR personal link</b> — save it:</div><div class="u" id="pl">${one}</div></div>
-<button class="btn gray" style="margin-top:8px" onclick="cp('pl','cop1')">📋 Copy my personal link</button>
+<div style="display:flex;gap:8px">
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="cp('pl','cop1')">📋 Copy personal link</button>
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="tqr('qr_pl')">📱 Show QR</button>
+</div>
 <div class="ok" id="cop1" style="display:none">✅ copied</div>
+<div id="qr_pl" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "Personal Quota Link" })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan to open your live data page</div>
+</div>
+
 <div class="me" style="margin-top:14px"><div class="t">✨ <b>ONE VPN LINK — all apps</b> (Shadowrocket / v2rayNG / Clash / Hiddify — auto-detects, named "${brand}", English node names):</div><div class="u" id="al">${one}</div></div>
-<button class="btn green" style="margin-top:8px" onclick="cp('al','copa')">📋 Copy the ONE link</button>
+<div style="display:flex;gap:8px">
+<button class="btn green" style="flex:1;margin-top:8px" onclick="cp('al','copa')">📋 Copy ONE link</button>
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="tqr('qr_al')">📱 Show QR</button>
+</div>
 <div class="ok" id="copa" style="display:none">✅ copied — that's all your client needs</div>
+<div id="qr_al" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "ONE VPN Link" })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan in Shadowrocket, Clash, or v2rayNG</div>
+</div>
+
 <div class="me" style="margin-top:14px"><div class="t">🔄 <b>Clash auto-update</b> (Verge/Fugu): Profiles → New → remote URL:</div><div class="u" id="su">${sub}</div></div>
-<button class="btn gray" style="margin-top:8px" onclick="cp('su','cop2')">📋 Copy Clash link</button>
+<div style="display:flex;gap:8px">
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="cp('su','cop2')">📋 Copy Clash link</button>
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="tqr('qr_su')">📱 Show QR</button>
+</div>
 <div class="ok" id="cop2" style="display:none">✅ copied</div>
+<div id="qr_su" class="qr-wrap" style="display:none">
+  ${generateQrSvg(sub, { title: "Clash Auto-Update Link" })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan in Clash Meta / Verge</div>
+</div>
 ${COPY_JS}`;
 }
 
@@ -574,12 +601,17 @@ function rebrandResults(host, brand, rows) {
 ${r.summary ? `<div class="dim" style="text-align:center">🚀 ${r.summary.left.toFixed(2)} GB left · expires ${r.summary.exp}</div>` : ""}
 <div class="me"><div class="t">✨ <b>ONE LINK — works in all apps</b> (Shadowrocket, v2rayNG, NekoBox, Hiddify, Clash):</div><div class="u" id="al${n}">${one}</div></div>
 <div class="me"><div class="t">🔗 <b>Client's private quota</b> link (live GB, auto-refresh):</div><div class="u" id="pl${n}">${one}</div></div>
-<div style="display:flex;gap:8px">
-<button class="btn green" style="flex:1;margin-top:8px" onclick="cp('al${n}','cosp${n}')">📋 Copy one link</button>
-<button class="btn gray" style="flex:1;margin-top:8px" onclick="cp('pl${n}','cosp2${n}')">📋 Copy quota link</button>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn green" style="flex:1;min-width:120px;margin-top:8px" onclick="cp('al${n}','cosp${n}')">📋 Copy one link</button>
+<button class="btn gray" style="flex:1;min-width:120px;margin-top:8px" onclick="tqr('qr_al${n}')">📱 Show QR</button>
+<button class="btn gray" style="flex:1;min-width:120px;margin-top:8px" onclick="cp('pl${n}','cosp2${n}')">📋 Copy quota link</button>
 </div>
 <div class="ok" id="cosp${n}" style="display:none">✅ copied</div>
-<div class="ok" id="cosp2${n}" style="display:none">✅ copied</div></div>`);
+<div class="ok" id="cosp2${n}" style="display:none">✅ copied</div>
+<div id="qr_al${n}" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "ONE Link " + n })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan with Shadowrocket, Clash, or v2rayNG</div>
+</div></div>`);
   });
   parts.push(COPY_JS);
   return page(`Rebranded as ${brand}`, parts.join(""));
@@ -608,9 +640,16 @@ ${r.summary ? `<div class="dim" style="text-align:center">🚀 ${r.summary.left.
 <div class="me"><div class="t">✨ <b>ONE LINK — all apps</b>:</div><div class="u" id="al${n}">${one}</div></div>
 <div class="me"><div class="t">🔄 <b>Clash auto-update</b> link:</div><div class="u" id="su${n}">${sub}</div></div>
 <div class="me"><div class="t">🔗 <b>Client's private quota</b> link:</div><div class="u" id="pl${n}">${one}</div></div>
-<button class="btn" onclick="cm('m${n}','copm${n}')">📋 Copy ready-to-send message</button>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn" style="flex:2;min-width:140px;margin-top:8px" onclick="cm('m${n}','copm${n}')">📋 Copy message</button>
+<button class="btn gray" style="flex:1;min-width:100px;margin-top:8px" onclick="tqr('qr_tool${n}')">📱 Show QR</button>
+</div>
 <div class="msg" id="m${n}" style="display:none">${msg.replace(/</g, "&lt;")}</div>
-<div class="ok" id="copm${n}" style="display:none">✅ message copied — send it to your client</div></div>`);
+<div class="ok" id="copm${n}" style="display:none">✅ message copied — send it to your client</div>
+<div id="qr_tool${n}" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "ONE Link " + n })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan with Shadowrocket, Clash, or v2rayNG</div>
+</div></div>`);
   });
   parts.push(COPY_JS);
   return page(`${brand} — client packs`, parts.join(""));
@@ -935,6 +974,14 @@ export default {
       if (path === "/") return html(homePage());
       if (path === "/rebrand") return html(formPage("Link Rebranding", "paste supplier link → get your ONE link", "/rebrand", "✨ Rebrand link(s)"));
       if (path === "/tool") return html(formPage("Seller Tool", "full client packs — links for every app, quota & message", "/tool", "⚡ Generate client packs"));
+      if (path === "/qr" || path === "/qr-maker") return html(qrMakerPage(host));
+      if (path === "/qr/svg" || path === "/qr.svg") {
+        const text = url.searchParams.get("text") || url.searchParams.get("t") || "";
+        if (!text) return plainErr("missing text parameter", 400);
+        return new Response(generateQrSvg(text), {
+          headers: { "Content-Type": "image/svg+xml; charset=utf-8" },
+        });
+      }
 
       let m;
       if ((m = path.match(/^\/q\/([^/]+)$/))) {
@@ -952,7 +999,7 @@ export default {
         const fmt = (url.searchParams.get("fmt") || "").toLowerCase();
         const ua = (request.headers.get("user-agent") || "").toLowerCase();
         const accept = (request.headers.get("accept") || "").toLowerCase();
-        const clashClient = ["clash", "mihomo", "fugu", "streisand", "nyanpasu", "verge", "reqwest", "tauri", "clashx", "clashmeta", "stash", "flclash"].some((k) => ua.includes(k));
+        const clashClient = ["clash", "mihomo", "fugu", "streisand", "nyanpasu", "verge", "reqwest", "tauri", "clashx", "clashmeta", "meta", "metacubex", "stash", "flclash", "karing"].some((k) => ua.includes(k));
         const wantsYaml = fmt === "yaml" ? true : fmt === "sr" ? false : clashClient || accept.includes("yaml") || accept.includes("yml");
         const extra = subHeaders(status, `${host}/q/${tok}`);
         if (wantsYaml) {

@@ -71,6 +71,7 @@ export function dashboardPage(host = "") {
   <div class="wrap">
     <h1>SP VPN <span>reseller dashboard</span></h1>
     <div class="acts">
+      <a href="/qr" class="btn ghost" style="text-decoration:none;display:inline-flex;align-items:center" title="Open QR Code Maker">📱 QR Maker</a>
       <button id="refresh" class="btn ghost" title="Fetch live quota &amp; expiry from the supplier">⟳ Refresh quota</button>
       <button id="add" class="btn">＋ Add customer</button>
     </div>
@@ -299,6 +300,7 @@ function render() {
       '<td><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span></td>' +
       '<td style="white-space:nowrap">' +
         '<button class="mini" data-a="copy" data-v="' + esc(one) + '">copy</button>' +
+        '<button class="mini" data-a="qr" data-v="' + esc(one) + '" title="View QR Code">QR</button>' +
         (r.revoked ? "" : '<button class="mini" data-a="renew" data-t="' + r.token + '">renew / check</button>') +
         '<button class="mini" data-a="edit" data-t="' + r.token + '">edit</button>' +
         '<button class="mini" data-a="rotate" data-t="' + r.token + '">rotate</button>' +
@@ -381,6 +383,10 @@ $("#rows").addEventListener("click", async (e) => {
   if (a === "copy") {
     try { await navigator.clipboard.writeText(b.dataset.v); toast("Link copied"); }
     catch (err) { toast("Copy failed — select the link manually"); }
+    return;
+  }
+  if (a === "qr") {
+    window.open("/qr?text=" + encodeURIComponent(b.dataset.v), "_blank");
     return;
   }
   if (a === "renew") {
