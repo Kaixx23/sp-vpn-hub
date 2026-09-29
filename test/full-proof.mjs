@@ -292,6 +292,36 @@ console.log("\n[C2] Profile must not depend on a GeoIP download or China-only DN
   ok(/geo-auto-update: true/.test(cnr.body), "?cn=1 updates geodata in the background");
 }
 
+console.log("\n[C2b] Node filtering (?include= / ?exclude=) when a node family dies upstream:");
+{
+  const r = await get(`/all/SP%20VPN?t=${TOK}&exclude=telecom`, "ClashMi/1.0.15.191");
+  const cfg = validateMihomo(r.body, "?exclude=telecom");
+  ok(!cfg.proxies.some((p) => /telecom/i.test(p.name)), "?exclude drops every matching node");
+  ok(cfg.proxies.length > 0 && cfg.proxies.some((p) => /Mobile|Unicom/i.test(p.name)), "?exclude keeps the rest");
+  ok(cfg["proxy-groups"].every((g) => g.proxies.length > 0), "groups stay non-empty after filtering (mihomo fatal)");
+  const inc = await get(`/all/SP%20VPN?t=${TOK}&include=hong%20kong`, "ClashMi/1.0.15.191");
+  const icfg = validateMihomo(inc.body, "?include=hong kong");
+  ok(icfg.proxies.every((p) => /hong kong/i.test(p.name)), "?include keeps only matching nodes");
+  const sr = await get(`/all/SP%20VPN?t=${TOK}&exclude=telecom`, "v2rayNG/1.10.6");
+  const txt = decodeURIComponent(escape(atob(sr.body.replace(/\s/g, ""))));
+  ok(!/Telecom/i.test(txt), "filter also applies to the base64 share list");
+  const none = await get(`/all/SP%20VPN?t=${TOK}&include=zzzznomatch`, "ClashMi/1.0.15.191");
+  ok(none.status === 400 && /loosen the filter/.test(none.body), "filtering everything out is a clear 400, not a broken profile");
+  const bad = await get(`/all/SP%20VPN?t=${TOK}&exclude=[unclosed`, "ClashMi/1.0.15.191");
+  ok(bad.status === 200 && bad.ct.includes("yaml"), "an invalid regex is ignored instead of breaking the link");
+}
+
+console.log("\n[C2c] Health checks must not hammer dead nodes:");
+{
+  const r = await get(`/all/SP%20VPN?t=${TOK}`, "ClashMi/1.0.15.191");
+  const cfg = yaml.load(r.body);
+  const auto = cfg["proxy-groups"].find((g) => g.type === "url-test");
+  const fb = cfg["proxy-groups"].find((g) => g.type === "fallback");
+  ok(auto.lazy === true && fb.lazy === true, "auto/failover groups are lazy (only the group in use is probed)");
+  ok(auto["expected-status"] === 204, "expected-status pinned to 204");
+  ok(fb["max-failed-times"] === 3, "fallback gives up on a dead node after 3 failures");
+}
+
 console.log("\n[C3] /diag self-service diagnosis:");
 {
   const d = await worker.fetch(new Request(`https://sp.example.com/diag?t=${TOK}`, { headers: { "User-Agent": "ClashMi/1.0.15.191" } }), {}, {});
@@ -301,6 +331,8 @@ console.log("\n[C3] /diag self-service diagnosis:");
   ok(j.yaml.needsGeoipDownload === false && j.yaml.duplicateNames === 0, "/diag confirms geo-free, collision-free YAML");
   ok(j.nodes.clashUsable === 20, "/diag counts Clash-usable nodes");
   ok(!JSON.stringify(j).includes("supplier.example"), "/diag never leaks the supplier URL");
+  ok(Array.isArray(j.servers) && j.servers[0].nodes >= 1 && j.servers.some((x) => x.server === "hk1.example.com"),
+     "/diag breaks nodes down per server host (spots a dead host family)");
   const d2 = await worker.fetch(new Request("https://sp.example.com/diag", { headers: { "User-Agent": "Shadowrocket/2.2.51" } }), {}, {});
   const j2 = JSON.parse(await d2.text());
   ok(d2.status === 400 && j2.detected.servedFormat === "base64 share list", "/diag without a token still explains the client");

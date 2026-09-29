@@ -417,7 +417,14 @@ function buildYaml(status, proxies, brand, opts = {}) {
       L.push("  type: " + gtype);
       L.push("  url: http://www.gstatic.com/generate_204");
       L.push("  interval: 300");
+      // lazy: only health-check the group that is actually in use. Without it
+      // mihomo dials EVERY node every interval — when a whole node family is
+      // down (a banned CDN front, say) the app fills with red "connect error"
+      // lines and burns battery for nodes nobody selected.
+      L.push("  lazy: true");
+      L.push("  expected-status: 204");
       if (gtype === "url-test") L.push("  tolerance: 80");
+      if (gtype === "fallback") L.push("  max-failed-times: 3");
       L.push("  proxies:");
       for (const n of names) L.push("  - " + yq(n));
     }
@@ -879,6 +886,36 @@ function splitExt(seg) {
   const m = String(seg).match(/^(.*)\.(yaml|yml|txt|sr)$/i);
   return m ? { name: m[1], ext: m[2].toLowerCase() } : { name: seg, ext: "" };
 }
+// ---------------------------------------------------------------------------
+// ?include= / ?exclude= — keep or drop nodes by name (case-insensitive regex,
+// matched against the English display name).
+//
+// Why this exists: when one whole node family dies upstream — e.g. a supplier's
+// Cloudflare-fronted hosts get banned — every client shows a wall of "connect
+// error" lines and the auto group keeps retrying them. Until the supplier fixes
+// it, `&exclude=telecom` hands out a profile built only from the nodes that
+// still work.
+// ---------------------------------------------------------------------------
+const safeRx = (s) => { try { return s ? new RegExp(s, "i") : null; } catch (e) { return null; } };
+const displayName = (originalName) => translateName(originalName) || originalName;
+function filterNodes(d, url) {
+  const inc = safeRx(url.searchParams.get("include") || "");
+  const exc = safeRx(url.searchParams.get("exclude") || "");
+  if (!inc && !exc) return d;
+  const keep = (n) => (!inc || inc.test(n)) && (!exc || !exc.test(n));
+  const nameOfLink = (l) => {
+    const i = l.indexOf("#");
+    return displayName(i >= 0 ? safeDecode(l.slice(i + 1)) : "");
+  };
+  return {
+    status: d.status,
+    links: d.links.filter((l) => keep(nameOfLink(l))),
+    proxies: d.proxies.filter((p) => keep(displayName(p.name))),
+    filtered: true,
+  };
+}
+const FILTERED_OUT = "Every node was removed by ?include= / ?exclude= — loosen the filter.";
+
 // ?cn=1 restores the China-ISP profile (CN resolvers + GEOIP rules).
 const isCn = (url) => ["1", "true", "yes", "on"].includes((url.searchParams.get("cn") || "").toLowerCase());
 
@@ -1080,6 +1117,13 @@ export default {
           const { status, links, proxies } = await getDecoded(tok);
           out.supplierMs = Date.now() - t0;
           out.nodes = { shareLinks: links.length, clashUsable: proxies.length, unsupported: links.length - proxies.length };
+          // Group by the host actually dialled: if one host is down upstream,
+          // every node under it fails and the count makes that obvious.
+          const byServer = {};
+          for (const p of proxies) byServer[p.server] = (byServer[p.server] || 0) + 1;
+          out.servers = Object.entries(byServer)
+            .sort((a, b) => b[1] - a[1])
+            .map(([server, count]) => ({ server, nodes: count }));
           out.quota = quotaSummary(status) || null;
           const y = buildYaml(status, proxies, "SP VPN", { cn: isCn(url) });
           const names = proxies.length ? y.split("\n").filter((l) => l.startsWith("- name: ")).map((l) => l.slice(8)) : [];
@@ -1110,8 +1154,10 @@ export default {
         const brand = seg.name || "SP VPN";
         const tok = url.searchParams.get("t") || "";
         if (!tok) return plainErr("missing ?t= parameter", 400);
-        const { status, links, proxies } = await getDecoded(tok);
-        if (!links.length) return plainErr("No nodes found in that link.");
+        const all = await getDecoded(tok);
+        if (!all.links.length) return plainErr("No nodes found in that link.");
+        const { status, links, proxies } = filterNodes(all, url);
+        if (!links.length) return plainErr(FILTERED_OUT, 400);
         // format negotiation: explicit ?fmt= / .yaml suffix wins, then UA, then Accept
         const wantsYaml = wantsClashYaml({
           fmt: url.searchParams.get("fmt") || "",
@@ -1129,7 +1175,7 @@ export default {
       if ((m = path.match(/^\/sub\/([^/]+)$/))) {
         const tok = splitExt(m[1]).name;
         const brand = url.searchParams.get("brand") || "SP VPN";
-        const { status, proxies } = await getDecoded(tok);
+        const { status, proxies } = filterNodes(await getDecoded(tok), url);
         if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
         return yamlRes(buildYaml(status, proxies, brand, { cn: isCn(url) }), subHeaders(status, `${host}/q/${tok}`));
       }
@@ -1146,8 +1192,8 @@ export default {
         const brand = safeDecode(m[1]) || "SP VPN";
         const tok = url.searchParams.get("t") || "";
         if (!tok) return plainErr("missing ?t= parameter", 400);
-        const { status, links } = await getDecoded(tok);
-        if (!links.length) return plainErr("No nodes found in that link.");
+        const { status, links } = filterNodes(await getDecoded(tok), url);
+        if (!links.length) return plainErr(FILTERED_OUT, 400);
         return plain(btoa(unescape(encodeURIComponent(buildShare(status, links, brand)))), subHeaders(status, `${host}/q/${tok}`));
       }
       return html(errorPage("Not found"));

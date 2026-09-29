@@ -284,6 +284,28 @@ There are only three possible causes, and each has a switch:
    Really on a Chinese ISP? Append **`&cn=1`** to get the old CN-optimized
    profile (CN resolvers, `GEOIP,CN,DIRECT`, background geodata updates).
 
+### A whole family of nodes shows "connect error"
+
+That is upstream, not the profile: those nodes share one hostname and it is
+unreachable (supplier down, host blocked by the ISP, or a CDN front that got
+banned). `/diag?t=<token>` lists nodes per server host, which makes a dead
+family obvious at a glance.
+
+Two mitigations ship in the profile:
+
+* `lazy: true` + `expected-status: 204` + `max-failed-times: 3` on the auto /
+  failover groups, so the core stops dialling dead nodes it isn't using.
+* **`&exclude=<regex>` / `&include=<regex>`** (case-insensitive, matched on the
+  English node name) build a profile from the nodes that still work:
+
+  ```
+  https://<host>/all/SP%20VPN?t=<token>&fmt=yaml&exclude=telecom
+  https://<host>/all/SP%20VPN?t=<token>&fmt=yaml&include=japan|korea
+  ```
+
+  Filtering everything out returns a clear `400` instead of a broken profile,
+  and an invalid regex is ignored rather than breaking the customer's link.
+
 Not sure which one you're hitting? Open `/diag?t=<token>` **in the failing app's
 own browser/WebView** (or curl it with that app's UA) — it reports the detected
 client family, the format it would be served, supplier latency and whether the
