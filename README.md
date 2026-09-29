@@ -243,7 +243,90 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/link/<t>?action=rotate` | GET | Kill + reissue, carries the customer's details |
 | `/admin/link/<t>?action=delete` | GET | Remove the row entirely |
 
+| `/diag?t=<t>` | GET | Self-service diagnosis — what format *this* client gets, supplier latency, YAML sanity |
+
 `/admin/*` has **no authentication yet** — see *Before you deploy*.
+
+---
+
+## Clash / Clash Mi troubleshooting
+
+Symptom: the ONE link works in Shadowrocket, but a mihomo client (Clash Mi,
+Clash Verge, FlClash, ClashX Meta…) shows a **timeout** on import or every node
+times out after importing.
+
+There are only three possible causes, and each has a switch:
+
+1. **The client got the wrong format.** Clash cores can only read mihomo YAML; a
+   base64 node list makes them fail with a parse/timeout style error. Format is
+   picked from the `User-Agent`, so a client with an unusual UA needs an
+   explicit hint:
+
+   ```
+   https://<host>/all/SP%20VPN?t=<token>&fmt=yaml     # always YAML
+   https://<host>/all/SP%20VPN.yaml?t=<token>         # same, via extension
+   https://<host>/all/SP%20VPN?t=<token>&fmt=sr       # always base64
+   ```
+
+2. **The profile needed a GeoIP download before it could connect.** The old
+   generator always emitted `GEOIP,CN` / `GEOIP,PRIVATE` rules and
+   `dns.fallback-filter.geoip: true`. On a fresh install the core must first
+   download the GeoIP database *through the network the user cannot reach yet*,
+   which surfaces as a timeout. The default profile is now **geo-free**
+   (private ranges are literal `IP-CIDR` rules).
+
+3. **The profile pinned China-only DNS.** `223.5.5.5` / `119.29.29.29` are only
+   fast inside China; anywhere else they are slow or dropped, and since mihomo
+   resolves the node hostnames with them, *every* connection and latency test
+   times out even though the profile imported fine. The default profile now
+   uses `1.1.1.1 / 8.8.8.8 / 9.9.9.9` and sets `proxy-server-nameserver`.
+
+   Really on a Chinese ISP? Append **`&cn=1`** to get the old CN-optimized
+   profile (CN resolvers, `GEOIP,CN,DIRECT`, background geodata updates).
+
+### "Auto Speed doesn't pick anything"
+
+Traffic enters the top `select` group (`🚀 <brand>`), and mihomo points a
+`select` group at its **first member** on a fresh load. `⚡ Auto Speed` is
+emitted first in every selector, so a freshly imported profile auto-selects it
+for every customer — no tapping required.
+
+The one thing that used to defeat that was `profile.store-selected: true`,
+which restores whatever node the user last tapped, forever. It is now **off by
+default**: every import *and* every auto-update re-arms Auto Speed. Append
+**`&remember=1`** if you'd rather a manual pick survived updates.
+
+Auto Speed itself is `url-test` with `interval: 300`, `tolerance: 80` (it only
+switches for a >80 ms improvement, which stops it flapping) and `lazy: true`
+(it probes while it is the active selection).
+
+### A whole family of nodes shows "connect error"
+
+That is upstream, not the profile: those nodes share one hostname and it is
+unreachable (supplier down, host blocked by the ISP, or a CDN front that got
+banned). `/diag?t=<token>` lists nodes per server host, which makes a dead
+family obvious at a glance.
+
+Two mitigations ship in the profile:
+
+* `lazy: true` + `expected-status: 204` + `max-failed-times: 3` on the auto /
+  failover groups, so the core stops dialling dead nodes it isn't using.
+* **`&exclude=<regex>` / `&include=<regex>`** (case-insensitive, matched on the
+  English node name) build a profile from the nodes that still work:
+
+  ```
+  https://<host>/all/SP%20VPN?t=<token>&fmt=yaml&exclude=telecom
+  https://<host>/all/SP%20VPN?t=<token>&fmt=yaml&include=japan|korea
+  ```
+
+  Filtering everything out returns a clear `400` instead of a broken profile,
+  and an invalid regex is ignored rather than breaking the customer's link.
+
+Not sure which one you're hitting? Open `/diag?t=<token>` **in the failing app's
+own browser/WebView** (or curl it with that app's UA) — it reports the detected
+client family, the format it would be served, supplier latency and whether the
+generated YAML passes mihomo's import-time checks. It never echoes the supplier
+URL.
 
 ---
 
