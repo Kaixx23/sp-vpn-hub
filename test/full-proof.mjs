@@ -191,6 +191,10 @@ const clashUAs = [
   ["FlClash", "FlClash/0.8.83"],
   ["Stash (iOS)", "Stash/3.2.4 CFNetwork"],
   ["mihomo", "mihomo/1.19.13"],
+  ["Clash Mi (iOS/Android)", "ClashMi/1.0.15.191"],
+  ["Clash Mi (alt UA)", "clash-mi/1.0 (iPhone; iOS 18.5)"],
+  ["mihomo Party", "mihomo-party/1.7.7"],
+  ["Sparkle", "Sparkle/1.5.2"],
 ];
 for (const [name, ua] of clashUAs) {
   const r = await get(`/all/SP%20VPN?t=${TOK}`, ua);
@@ -257,6 +261,49 @@ console.log("\n[C] Explicit format override + aliases:");
   ok(sh.body.includes("vless://"), "/share plain list");
   const q = await get(`/q/${TOK}`, "Mozilla/5.0");
   ok(q.status === 200 && q.body.includes("<h1>"), "/q quota page renders");
+  // extension override — for clients whose UA we cannot recognise at all
+  const ext = await get(`/all/SP%20VPN.yaml?t=${TOK}`, "CFNetwork/1498 Darwin/23.5.0");
+  ok(ext.ct.includes("yaml"), ".yaml suffix forces YAML for an unknown UA");
+  const cfgExt = validateMihomo(ext.body, ".yaml suffix");
+  ok(!!cfgExt && !cfgExt["proxy-groups"].some((g) => g.name.includes(".yaml")), ".yaml suffix stripped from the brand/group name");
+  const alias = await get(`/all/SP%20VPN?t=${TOK}&fmt=clash`, "curl/8.5.0");
+  ok(alias.ct.includes("yaml"), "?fmt=clash alias forces YAML");
+  const b64alias = await get(`/all/SP%20VPN?t=${TOK}&fmt=base64`, "ClashMi/1.0.15.191");
+  ok(b64alias.ct.includes("text/plain"), "?fmt=base64 alias forces SR list");
+}
+
+console.log("\n[C2] Profile must not depend on a GeoIP download or China-only DNS (Clash Mi 'timeout' bug):");
+{
+  const r = await get(`/all/SP%20VPN?t=${TOK}`, "ClashMi/1.0.15.191");
+  const cfg = validateMihomo(r.body, "Clash Mi default");
+  ok(!/GEOIP/.test(r.body), "default profile has no GEOIP rule (no mmdb download before first connect)");
+  ok(!/geoip:\s*true/.test(r.body), "default profile has no dns.fallback-filter.geoip");
+  ok(!/223\.5\.5\.5|119\.29\.29\.29/.test(r.body), "default profile does not pin China-only resolvers");
+  ok(!!cfg.dns && Array.isArray(cfg.dns["proxy-server-nameserver"]) && cfg.dns["proxy-server-nameserver"].length > 0,
+     "proxy-server-nameserver set (node hostnames always resolvable)");
+  ok((cfg.dns.nameserver || []).every((n) => /^\d/.test(String(n))), "resolvers are plain-UDP IPs (no DoH/DoT handshake to stall)");
+  ok((cfg.rules || []).some((x) => x.startsWith("IP-CIDR,192.168.0.0/16,DIRECT")), "private ranges kept DIRECT without GeoIP");
+  ok(cfg.profile && cfg.profile["store-selected"] === true, "store-selected keeps the user's node choice across updates");
+
+  const cnr = await get(`/all/SP%20VPN?t=${TOK}&cn=1`, "ClashMi/1.0.15.191");
+  const cncfg = validateMihomo(cnr.body, "?cn=1 (China ISP)");
+  ok(/GEOIP,CN,DIRECT/.test(cnr.body), "?cn=1 restores the CN-optimized rules");
+  ok((cncfg.dns.nameserver || []).includes("223.5.5.5"), "?cn=1 restores the CN resolvers");
+  ok(/geo-auto-update: true/.test(cnr.body), "?cn=1 updates geodata in the background");
+}
+
+console.log("\n[C3] /diag self-service diagnosis:");
+{
+  const d = await worker.fetch(new Request(`https://sp.example.com/diag?t=${TOK}`, { headers: { "User-Agent": "ClashMi/1.0.15.191" } }), {}, {});
+  const j = JSON.parse(await d.text());
+  ok(d.status === 200 && j.ok === true, "/diag reports a healthy link");
+  ok(j.detected.servedFormat === "mihomo YAML" && j.detected.matchedUaKeyword, "/diag names the format + matched UA keyword");
+  ok(j.yaml.needsGeoipDownload === false && j.yaml.duplicateNames === 0, "/diag confirms geo-free, collision-free YAML");
+  ok(j.nodes.clashUsable === 20, "/diag counts Clash-usable nodes");
+  ok(!JSON.stringify(j).includes("supplier.example"), "/diag never leaks the supplier URL");
+  const d2 = await worker.fetch(new Request("https://sp.example.com/diag", { headers: { "User-Agent": "Shadowrocket/2.2.51" } }), {}, {});
+  const j2 = JSON.parse(await d2.text());
+  ok(d2.status === 400 && j2.detected.servedFormat === "base64 share list", "/diag without a token still explains the client");
 }
 
 console.log("\n[D] Plain (non-base64) supplier payload with BOM/CRLF:");

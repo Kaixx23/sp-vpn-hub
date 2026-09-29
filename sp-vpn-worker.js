@@ -282,7 +282,31 @@ function normNet(n, proto) {
   return ok.includes(v) ? v : "tcp";
 }
 
-function buildYaml(status, proxies, brand) {
+// ---------------------------------------------------------------------------
+// Profile "flavour".
+//
+// The old generator ALWAYS emitted a China-tuned config: AliDNS/DNSPod as the
+// only resolvers, a DoT fallback, and GEOIP rules. That is exactly what makes
+// mihomo clients (Clash Mi, Verge, FlClash…) look "broken with a timeout"
+// outside China, while Shadowrocket — which ignores all of it and just dials
+// the node — keeps working:
+//
+//   1. 223.5.5.5 / 119.29.29.29 are only fast *inside* China. From anywhere
+//      else they are slow or silently dropped, and because mihomo resolves the
+//      node's own hostname (chuixuevl1.blowingsnowclouds.cc) with them, EVERY
+//      connection and every latency test ends in "timeout"/"context deadline
+//      exceeded" even though the profile imported fine.
+//   2. GEOIP,CN / GEOIP,PRIVATE and dns.fallback-filter.geoip force the core to
+//      download the GeoIP database on first run — from GitHub, i.e. through the
+//      very network the user can't reach yet. A fresh install therefore fails
+//      to apply the profile with a download timeout.
+//
+// So: the DEFAULT profile is now geo-free and uses globally reachable
+// resolvers. The old China-optimized profile is still one query-string away
+// (?cn=1) for users who really are on a Chinese ISP.
+// ---------------------------------------------------------------------------
+function buildYaml(status, proxies, brand, opts = {}) {
+  const cn = !!opts.cn;
   const AUTO = "⚡ Auto Speed", FAIL = "🔁 Failover", DIRECT = "🇨🇳 Direct", TOP = "🚀 " + brand;
   const CI = { Telecom: "📡", Unicom: "📶", Mobile: "📱" };
   const CN = { Telecom: "电信", Unicom: "联通", Mobile: "移动" };
@@ -331,23 +355,50 @@ function buildYaml(status, proxies, brand) {
   const L = [];
   L.push(`# ${brand} — generated for your account (live quota below)`);
   if (status) L.push("# " + status);
-  L.push(`# ${branded.length} nodes · CN-optimized: auto speed-test, fallback, carrier lines, CN-direct rules`);
+  L.push(`# ${branded.length} nodes · ${cn
+    ? "CN-optimized: auto speed-test, fallback, carrier lines, CN-direct rules (?cn=1)"
+    : "global profile: auto speed-test, fallback, carrier lines, no GeoIP download needed"}`);
   L.push(`# refreshed ${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC`);
   L.push("mixed-port: 7890");
   L.push("allow-lan: false");
   L.push("mode: rule");
   L.push("log-level: info");
+  L.push("ipv6: false");
   L.push("unified-delay: true");
+  L.push("tcp-concurrent: true");
+  L.push("profile:");
+  L.push("  store-selected: true");
   L.push("dns:");
   L.push("  enable: true");
+  L.push("  ipv6: false");
   L.push("  enhanced-mode: fake-ip");
   L.push("  fake-ip-range: 198.18.0.1/16");
-  L.push("  default-nameserver: [223.5.5.5, 119.29.29.29]");
-  L.push("  nameserver: [223.5.5.5, 119.29.29.29]");
-  L.push("  fallback: [tls://8.8.8.8:853, tls://1.1.1.1:853]");
-  L.push("  fallback-filter:");
-  L.push("    geoip: true");
-  L.push("    geoip-code: CN");
+  L.push('  fake-ip-filter: ["*.lan", "*.local", "+.msftconnecttest.com", "+.msftncsi.com", "time.*.com", "+.pool.ntp.org"]');
+  if (cn) {
+    L.push("  default-nameserver: [223.5.5.5, 119.29.29.29]");
+    L.push("  nameserver: [223.5.5.5, 119.29.29.29]");
+    L.push("  proxy-server-nameserver: [223.5.5.5, 119.29.29.29]");
+    L.push("  fallback: [tls://8.8.8.8:853, tls://1.1.1.1:853]");
+    L.push("  fallback-filter:");
+    L.push("    geoip: true");
+    L.push("    geoip-code: CN");
+  } else {
+    // Plain-UDP public resolvers only: reachable from every country, no DoH/DoT
+    // handshake to stall behind, and no GeoIP database needed.
+    L.push("  default-nameserver: [1.1.1.1, 8.8.8.8, 9.9.9.9]");
+    L.push("  nameserver: [1.1.1.1, 8.8.8.8, 9.9.9.9]");
+    // Without this mihomo resolves the NODE hostnames with the entries above
+    // too; naming it explicitly keeps that path working even if a user edits
+    // `nameserver` later. This is the setting whose absence produces the
+    // classic "profile imported, every node times out".
+    L.push("  proxy-server-nameserver: [1.1.1.1, 8.8.8.8]");
+  }
+  if (cn) {
+    // GEOIP rules below need the mmdb; let the core refresh it in the
+    // background instead of blocking the first connection.
+    L.push("geo-auto-update: true");
+    L.push("geo-update-interval: 24");
+  }
   L.push("proxy-groups:");
   const topMembers = [
     ...(hasAuto ? [AUTO, FAIL] : []),
@@ -381,9 +432,23 @@ function buildYaml(status, proxies, brand) {
   L.push("  type: select");
   L.push("  proxies: [DIRECT, REJECT]");
   L.push("rules:");
-  L.push("  - GEOIP,PRIVATE,DIRECT");
-  L.push("  - DOMAIN-SUFFIX,cn,DIRECT");
-  L.push("  - GEOIP,CN,DIRECT");
+  if (cn) {
+    L.push("  - GEOIP,PRIVATE,DIRECT,no-resolve");
+    L.push("  - DOMAIN-SUFFIX,cn,DIRECT");
+    L.push("  - GEOIP,CN,DIRECT");
+  } else {
+    // Same effect as GEOIP,PRIVATE but expressed as literal CIDRs, so the core
+    // never has to fetch a GeoIP database before it can apply the profile.
+    L.push("  - DOMAIN-SUFFIX,lan,DIRECT");
+    L.push("  - DOMAIN-SUFFIX,local,DIRECT");
+    L.push("  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve");
+    L.push("  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve");
+    L.push("  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve");
+    L.push("  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve");
+    L.push("  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve");
+    L.push("  - IP-CIDR6,fc00::/7,DIRECT,no-resolve");
+    L.push("  - IP-CIDR6,fe80::/10,DIRECT,no-resolve");
+  }
   L.push("  - MATCH," + TOP);
   L.push("proxies:");
   for (const p of branded) {
@@ -531,7 +596,9 @@ const errorPage = (msg) => page("Error", `
 function quotaBody(host, tok, brand, status, proxies, linksTotal) {
   const s = quotaSummary(status);
   const one = `${host}/all/${encodeURIComponent(brand)}?t=${encodeURIComponent(tok)}`;
-  const sub = `${host}/sub/${encodeURIComponent(tok)}?brand=${encodeURIComponent(brand)}`;
+  // Explicit YAML link: works even when the Clash app sends a User-Agent we
+  // don't recognise (Clash Mi, mihomo-party, generic CFNetwork/okhttp shells).
+  const sub = `${one}&fmt=yaml`;
   let quota;
   if (s) {
     const pct = Math.min(100, ((s.tot - s.left) / s.tot) * 100);
@@ -558,7 +625,8 @@ ${quota}
 <div class="me" style="margin-top:14px"><div class="t">✨ <b>ONE VPN LINK — all apps</b> (Shadowrocket / v2rayNG / Clash / Hiddify — auto-detects, named "${brand}", English node names):</div><div class="u" id="al">${one}</div></div>
 <button class="btn green" style="margin-top:8px" onclick="cp('al','copa')">📋 Copy the ONE link</button>
 <div class="ok" id="copa" style="display:none">✅ copied — that's all your client needs</div>
-<div class="me" style="margin-top:14px"><div class="t">🔄 <b>Clash auto-update</b> (Verge/Fugu): Profiles → New → remote URL:</div><div class="u" id="su">${sub}</div></div>
+<div class="me" style="margin-top:14px"><div class="t">🔄 <b>Clash / Clash Mi / mihomo link</b> (always YAML, auto-updates) — Profiles → + → add URL:</div><div class="u" id="su">${sub}</div></div>
+<div class="dim" style="margin-top:6px">On a Chinese ISP? add <b>&amp;cn=1</b> to that link for the CN-optimized rules.</div>
 <button class="btn gray" style="margin-top:8px" onclick="cp('su','cop2')">📋 Copy Clash link</button>
 <div class="ok" id="cop2" style="display:none">✅ copied</div>
 ${COPY_JS}`;
@@ -591,12 +659,12 @@ function toolResults(host, brand, rows) {
     const n = i + 1;
     if (r.error) { parts.push(`<div class="row"><b>Link ${n}</b><div class="err">❌ ${r.error}</div></div>`); return; }
     const one = `${host}/all/${encodeURIComponent(brand)}?t=${encodeURIComponent(r.tok)}`;
-    const sub = `${host}/sub/${encodeURIComponent(r.tok)}?brand=${encodeURIComponent(brand)}`;
+    const sub = `${one}&fmt=yaml`;
     const msg = `Here's your ${brand} setup 🚀
 
 1) VPN — add this ONE link in your app (Shadowrocket / v2rayNG / NekoBox / Hiddify / Clash — auto-detects, arrives named "${brand}"):
 ${one}
-   Clash (Verge/Fugu) users — use this instead, it auto-updates:
+   Clash users (Clash Mi / Verge / FlClash / ClashX) — use this instead, it always returns YAML and auto-updates:
 ${sub}
 
 2) Check your data anytime (live):
@@ -606,7 +674,7 @@ If your plan renews: open ${one} and paste your new subscription link.`;
     parts.push(`<div class="row"><b>Link ${n} — ${r.proxies.length} nodes</b>
 ${r.summary ? `<div class="dim" style="text-align:center">🚀 ${r.summary.left.toFixed(2)} GB left · expires ${r.summary.exp}</div>` : ""}
 <div class="me"><div class="t">✨ <b>ONE LINK — all apps</b>:</div><div class="u" id="al${n}">${one}</div></div>
-<div class="me"><div class="t">🔄 <b>Clash auto-update</b> link:</div><div class="u" id="su${n}">${sub}</div></div>
+<div class="me"><div class="t">🔄 <b>Clash / Clash Mi</b> link (always YAML, auto-updates):</div><div class="u" id="su${n}">${sub}</div></div>
 <div class="me"><div class="t">🔗 <b>Client's private quota</b> link:</div><div class="u" id="pl${n}">${one}</div></div>
 <button class="btn" onclick="cm('m${n}','copm${n}')">📋 Copy ready-to-send message</button>
 <div class="msg" id="m${n}" style="display:none">${msg.replace(/</g, "&lt;")}</div>
@@ -776,6 +844,43 @@ function subHeaders(status, pageUrl) {
   return h;
 }
 
+// ---------------------------------------------------------------------------
+// Which payload does this client want?
+//
+// Clash-family cores can ONLY read mihomo YAML — handed a base64 node list they
+// fail with a parse/"timeout" style error. The UA list therefore has to cover
+// every mihomo shell, including newer ones (Clash Mi / mihomo-party / Sparkle /
+// Zash). Two escape hatches exist for clients that send an unhelpful UA
+// (several iOS/Android shells send a bare CFNetwork or okhttp UA):
+//   * ?fmt=yaml | clash | mihomo   (and ?fmt=sr | base64 for the other side)
+//   * a .yaml / .yml suffix on the brand segment: /all/SP VPN.yaml?t=…
+// ---------------------------------------------------------------------------
+export const CLASH_UA_KEYS = [
+  "clash", "clashmi", "clash-mi", "clashx", "clashmeta", "mihomo", "meta",
+  "verge", "nyanpasu", "fugu", "flclash", "stash", "streisand", "sparkle",
+  "party", "zash", "reqwest", "tauri",
+];
+export function wantsClashYaml({ fmt = "", ua = "", accept = "", ext = "" }) {
+  const f = String(fmt).toLowerCase();
+  const e = String(ext).toLowerCase();
+  if (["yaml", "yml", "clash", "mihomo", "meta"].includes(f)) return true;
+  if (["sr", "b64", "base64", "v2ray", "share", "txt"].includes(f)) return false;
+  if (e === "yaml" || e === "yml") return true;
+  if (e === "txt" || e === "sr") return false;
+  const u = String(ua).toLowerCase();
+  const a = String(accept).toLowerCase();
+  if (CLASH_UA_KEYS.some((k) => u.includes(k))) return true;
+  return a.includes("yaml") || a.includes("yml");
+}
+// A trailing .yaml/.yml/.txt on the brand segment selects the format and is
+// stripped from the brand itself (so the profile is still named "SP VPN").
+function splitExt(seg) {
+  const m = String(seg).match(/^(.*)\.(yaml|yml|txt|sr)$/i);
+  return m ? { name: m[1], ext: m[2].toLowerCase() } : { name: seg, ext: "" };
+}
+// ?cn=1 restores the China-ISP profile (CN resolvers + GEOIP rules).
+const isCn = (url) => ["1", "true", "yes", "on"].includes((url.searchParams.get("cn") || "").toLowerCase());
+
 export default {
   async fetch(request, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
@@ -937,35 +1042,88 @@ export default {
       if (path === "/tool") return html(formPage("Seller Tool", "full client packs — links for every app, quota & message", "/tool", "⚡ Generate client packs"));
 
       let m;
+      // ---- /diag — "why doesn't my app like this link?" ----
+      // Open it in the failing app's own WebView/browser, or curl it with the
+      // app's User-Agent: it reports which format that client is served, how
+      // long the supplier took, and whether the generated YAML passes the
+      // checks mihomo makes at import time. It never echoes the supplier URL.
+      if (path === "/diag" || (m0 = path.match(/^\/diag\/([^/]+)$/))) {
+        const tok = (m0 ? m0[1] : url.searchParams.get("t")) || "";
+        const ua = request.headers.get("user-agent") || "";
+        const accept = request.headers.get("accept") || "";
+        const fmt = url.searchParams.get("fmt") || "";
+        const yamlWanted = wantsClashYaml({ fmt, ua, accept });
+        const out = {
+          now: new Date().toISOString(),
+          client: { "user-agent": ua || null, accept: accept || null },
+          detected: {
+            family: yamlWanted ? "clash / mihomo" : "v2ray / shadowrocket",
+            servedFormat: yamlWanted ? "mihomo YAML" : "base64 share list",
+            matchedUaKeyword: CLASH_UA_KEYS.find((k) => ua.toLowerCase().includes(k)) || null,
+            forcedBy: fmt ? "?fmt=" + fmt : null,
+          },
+          hint: yamlWanted
+            ? "This client gets Clash YAML. If it still fails, add &cn=1 only when you are on a Chinese ISP."
+            : "This client gets a base64 node list. A Clash/mihomo app MUST use &fmt=yaml (or a .yaml suffix) if its User-Agent isn't recognised.",
+        };
+        if (!tok) return json({ ...out, error: "add ?t=<your token> for a full profile check" }, 400);
+        const t0 = Date.now();
+        try {
+          const { status, links, proxies } = await getDecoded(tok);
+          out.supplierMs = Date.now() - t0;
+          out.nodes = { shareLinks: links.length, clashUsable: proxies.length, unsupported: links.length - proxies.length };
+          out.quota = quotaSummary(status) || null;
+          const y = buildYaml(status, proxies, "SP VPN", { cn: isCn(url) });
+          const names = proxies.length ? y.split("\n").filter((l) => l.startsWith("- name: ")).map((l) => l.slice(8)) : [];
+          out.yaml = {
+            mode: isCn(url) ? "cn" : "global",
+            bytes: y.length,
+            proxies: names.length,
+            duplicateNames: names.length - new Set(names).size,
+            needsGeoipDownload: /GEOIP|geoip:/.test(y),
+            resolvers: (y.match(/^  nameserver: .*$/m) || [""])[0].trim(),
+          };
+          out.ok = proxies.length > 0 && out.yaml.duplicateNames === 0;
+        } catch (e) {
+          out.ok = false;
+          out.supplierMs = Date.now() - t0;
+          out.error = String(e.message || e);
+        }
+        return json(out, out.ok === false ? 502 : 200);
+      }
+
       if ((m = path.match(/^\/q\/([^/]+)$/))) {
         const brand = url.searchParams.get("brand") || "SP VPN";
         const { status, proxies, links } = await getDecoded(m[1]);
         return html(quotaBody(host, m[1], brand, status, proxies, links.length));
       }
       if ((m = path.match(/^\/all\/([^/?]+)$/))) {
-        const brand = safeDecode(m[1]) || "SP VPN";
+        const seg = splitExt(safeDecode(m[1]));
+        const brand = seg.name || "SP VPN";
         const tok = url.searchParams.get("t") || "";
         if (!tok) return plainErr("missing ?t= parameter", 400);
         const { status, links, proxies } = await getDecoded(tok);
         if (!links.length) return plainErr("No nodes found in that link.");
-        // format negotiation: explicit ?fmt= wins, then Accept header, then UA
-        const fmt = (url.searchParams.get("fmt") || "").toLowerCase();
-        const ua = (request.headers.get("user-agent") || "").toLowerCase();
-        const accept = (request.headers.get("accept") || "").toLowerCase();
-        const clashClient = ["clash", "mihomo", "fugu", "streisand", "nyanpasu", "verge", "reqwest", "tauri", "clashx", "clashmeta", "stash", "flclash"].some((k) => ua.includes(k));
-        const wantsYaml = fmt === "yaml" ? true : fmt === "sr" ? false : clashClient || accept.includes("yaml") || accept.includes("yml");
+        // format negotiation: explicit ?fmt= / .yaml suffix wins, then UA, then Accept
+        const wantsYaml = wantsClashYaml({
+          fmt: url.searchParams.get("fmt") || "",
+          ua: request.headers.get("user-agent") || "",
+          accept: request.headers.get("accept") || "",
+          ext: seg.ext,
+        });
         const extra = subHeaders(status, `${host}/q/${tok}`);
         if (wantsYaml) {
           if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-          return yamlRes(buildYaml(status, proxies, brand), extra);
+          return yamlRes(buildYaml(status, proxies, brand, { cn: isCn(url) }), extra);
         }
         return plain(btoa(unescape(encodeURIComponent(buildShare(status, links, brand)))), extra);
       }
       if ((m = path.match(/^\/sub\/([^/]+)$/))) {
+        const tok = splitExt(m[1]).name;
         const brand = url.searchParams.get("brand") || "SP VPN";
-        const { status, proxies } = await getDecoded(m[1]);
+        const { status, proxies } = await getDecoded(tok);
         if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-        return yamlRes(buildYaml(status, proxies, brand), subHeaders(status, `${host}/q/${m[1]}`));
+        return yamlRes(buildYaml(status, proxies, brand, { cn: isCn(url) }), subHeaders(status, `${host}/q/${tok}`));
       }
       if ((m = path.match(/^\/share\/([^/]+)$/))) {
         const brand = url.searchParams.get("brand") || "SP VPN";
