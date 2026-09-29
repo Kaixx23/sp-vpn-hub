@@ -284,6 +284,22 @@ There are only three possible causes, and each has a switch:
    Really on a Chinese ISP? Append **`&cn=1`** to get the old CN-optimized
    profile (CN resolvers, `GEOIP,CN,DIRECT`, background geodata updates).
 
+### "Auto Speed doesn't pick anything"
+
+Traffic enters the top `select` group (`🚀 <brand>`), and mihomo points a
+`select` group at its **first member** on a fresh load. `⚡ Auto Speed` is
+emitted first in every selector, so a freshly imported profile auto-selects it
+for every customer — no tapping required.
+
+The one thing that used to defeat that was `profile.store-selected: true`,
+which restores whatever node the user last tapped, forever. It is now **off by
+default**: every import *and* every auto-update re-arms Auto Speed. Append
+**`&remember=1`** if you'd rather a manual pick survived updates.
+
+Auto Speed itself is `url-test` with `interval: 300`, `tolerance: 80` (it only
+switches for a >80 ms improvement, which stops it flapping) and `lazy: true`
+(it probes while it is the active selection).
+
 ### A whole family of nodes shows "connect error"
 
 That is upstream, not the profile: those nodes share one hostname and it is

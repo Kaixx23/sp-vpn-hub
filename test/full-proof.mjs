@@ -283,7 +283,7 @@ console.log("\n[C2] Profile must not depend on a GeoIP download or China-only DN
      "proxy-server-nameserver set (node hostnames always resolvable)");
   ok((cfg.dns.nameserver || []).every((n) => /^\d/.test(String(n))), "resolvers are plain-UDP IPs (no DoH/DoT handshake to stall)");
   ok((cfg.rules || []).some((x) => x.startsWith("IP-CIDR,192.168.0.0/16,DIRECT")), "private ranges kept DIRECT without GeoIP");
-  ok(cfg.profile && cfg.profile["store-selected"] === true, "store-selected keeps the user's node choice across updates");
+  ok(cfg.profile && cfg.profile["store-selected"] === false, "store-selected off → the profile lands on Auto Speed for everyone");
 
   const cnr = await get(`/all/SP%20VPN?t=${TOK}&cn=1`, "ClashMi/1.0.15.191");
   const cncfg = validateMihomo(cnr.body, "?cn=1 (China ISP)");
@@ -320,6 +320,23 @@ console.log("\n[C2c] Health checks must not hammer dead nodes:");
   ok(auto.lazy === true && fb.lazy === true, "auto/failover groups are lazy (only the group in use is probed)");
   ok(auto["expected-status"] === 204, "expected-status pinned to 204");
   ok(fb["max-failed-times"] === 3, "fallback gives up on a dead node after 3 failures");
+}
+
+console.log("\n[C2d] Auto Speed must be the selection everyone lands on:");
+{
+  const r = await get(`/all/SP%20VPN?t=${TOK}`, "ClashMi/1.0.15.191");
+  const cfg = yaml.load(r.body);
+  const selects = cfg["proxy-groups"].filter((g) => g.type === "select" && g.proxies.length > 1 && !/Direct/.test(g.name));
+  ok(selects.length > 0 && selects.every((g) => g.proxies[0] === "⚡ Auto Speed"),
+     `Auto Speed is the first member of every selector (${selects.length} groups) → mihomo's default pick`);
+  ok(cfg.profile["store-selected"] === false, "store-selected off by default → every import/update re-arms Auto Speed");
+  const top = cfg["proxy-groups"][0];
+  const match = cfg.rules.find((x) => x.startsWith("MATCH,"));
+  ok(match.slice(6) === top.name && top.proxies[0] === "⚡ Auto Speed",
+     "traffic enters the top group, whose default member is Auto Speed");
+  const rem = await get(`/all/SP%20VPN?t=${TOK}&remember=1`, "ClashMi/1.0.15.191");
+  ok(yaml.load(rem.body).profile["store-selected"] === true, "?remember=1 restores sticky manual selection");
+  validateMihomo(rem.body, "?remember=1");
 }
 
 console.log("\n[C3] /diag self-service diagnosis:");

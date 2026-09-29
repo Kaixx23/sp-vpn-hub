@@ -308,6 +308,17 @@ function normNet(n, proto) {
 // ---------------------------------------------------------------------------
 function buildYaml(status, proxies, brand, opts = {}) {
   const cn = !!opts.cn;
+  // Should the client remember a manually picked node across profile updates?
+  //
+  // mihomo points a `select` group at its FIRST member on a fresh load, and
+  // "⚡ Auto Speed" is emitted first everywhere — so out of the box every
+  // customer lands on the auto group without touching anything. But
+  // `store-selected: true` restores whatever they last tapped, which means one
+  // stray tap (or a node that was fastest last week) sticks forever and the
+  // profile never looks like it auto-selects. Default is therefore OFF: every
+  // import and every auto-update re-arms Auto Speed. ?remember=1 brings the
+  // sticky behaviour back for power users.
+  const remember = !!opts.remember;
   const AUTO = "⚡ Auto Speed", FAIL = "🔁 Failover", DIRECT = "🇨🇳 Direct", TOP = "🚀 " + brand;
   const CI = { Telecom: "📡", Unicom: "📶", Mobile: "📱" };
   const CN = { Telecom: "电信", Unicom: "联通", Mobile: "移动" };
@@ -356,6 +367,7 @@ function buildYaml(status, proxies, brand, opts = {}) {
   const L = [];
   L.push(`# ${brand} — generated for your account (live quota below)`);
   if (status) L.push("# " + status);
+  L.push(`# default selection: ${AUTO}${remember ? " (your last manual pick is remembered)" : " — re-armed on every update"}`);
   L.push(`# ${branded.length} nodes · ${cn
     ? "CN-optimized: auto speed-test, fallback, carrier lines, CN-direct rules (?cn=1)"
     : "global profile: auto speed-test, fallback, carrier lines, no GeoIP download needed"}`);
@@ -368,7 +380,7 @@ function buildYaml(status, proxies, brand, opts = {}) {
   L.push("unified-delay: true");
   L.push("tcp-concurrent: true");
   L.push("profile:");
-  L.push("  store-selected: true");
+  L.push("  store-selected: " + (remember ? "true" : "false"));
   L.push("dns:");
   L.push("  enable: true");
   L.push("  ipv6: false");
@@ -916,8 +928,11 @@ function filterNodes(d, url) {
 }
 const FILTERED_OUT = "Every node was removed by ?include= / ?exclude= — loosen the filter.";
 
+const isOn = (v) => ["1", "true", "yes", "on"].includes(String(v || "").toLowerCase());
 // ?cn=1 restores the China-ISP profile (CN resolvers + GEOIP rules).
-const isCn = (url) => ["1", "true", "yes", "on"].includes((url.searchParams.get("cn") || "").toLowerCase());
+const isCn = (url) => isOn(url.searchParams.get("cn"));
+// Every profile option that changes the generated YAML, in one place.
+const yamlOpts = (url) => ({ cn: isCn(url), remember: isOn(url.searchParams.get("remember")) });
 
 export default {
   async fetch(request, env, ctx) {
@@ -1125,7 +1140,7 @@ export default {
             .sort((a, b) => b[1] - a[1])
             .map(([server, count]) => ({ server, nodes: count }));
           out.quota = quotaSummary(status) || null;
-          const y = buildYaml(status, proxies, "SP VPN", { cn: isCn(url) });
+          const y = buildYaml(status, proxies, "SP VPN", yamlOpts(url));
           const names = proxies.length ? y.split("\n").filter((l) => l.startsWith("- name: ")).map((l) => l.slice(8)) : [];
           out.yaml = {
             mode: isCn(url) ? "cn" : "global",
@@ -1168,7 +1183,7 @@ export default {
         const extra = subHeaders(status, `${host}/q/${tok}`);
         if (wantsYaml) {
           if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-          return yamlRes(buildYaml(status, proxies, brand, { cn: isCn(url) }), extra);
+          return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url)), extra);
         }
         return plain(btoa(unescape(encodeURIComponent(buildShare(status, links, brand)))), extra);
       }
@@ -1177,7 +1192,7 @@ export default {
         const brand = url.searchParams.get("brand") || "SP VPN";
         const { status, proxies } = filterNodes(await getDecoded(tok), url);
         if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-        return yamlRes(buildYaml(status, proxies, brand, { cn: isCn(url) }), subHeaders(status, `${host}/q/${tok}`));
+        return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url)), subHeaders(status, `${host}/q/${tok}`));
       }
       if ((m = path.match(/^\/share\/([^/]+)$/))) {
         const brand = url.searchParams.get("brand") || "SP VPN";
