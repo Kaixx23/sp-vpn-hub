@@ -13,6 +13,7 @@ import {
   removeRow as storeRemove,
   ensureInit as storeInit,
   setBackend as storeSetBackend,
+  backend as storeBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise } from "./dashboard.js";
 import { runRemindersFromEnv } from "./reminders.js";
@@ -1066,6 +1067,13 @@ export default {
             ? "This client gets Clash YAML. If it still fails, add &cn=1 only when you are on a Chinese ISP."
             : "This client gets a base64 node list. A Clash/mihomo app MUST use &fmt=yaml (or a .yaml suffix) if its User-Agent isn't recognised.",
         };
+        // Which store is this deployment using? "memory" means every minted
+        // link dies on the next cold start — the #1 way a fresh deploy looks
+        // like "the link stopped working".
+        try {
+          const b = storeBackend();
+          out.store = { backend: b && b.name ? b.name : "unknown", persistent: !!(b && b.name && b.name !== "memory") };
+        } catch (e) { out.store = { backend: "unknown", persistent: null }; }
         if (!tok) return json({ ...out, error: "add ?t=<your token> for a full profile check" }, 400);
         const t0 = Date.now();
         try {

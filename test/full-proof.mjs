@@ -304,6 +304,7 @@ console.log("\n[C3] /diag self-service diagnosis:");
   const d2 = await worker.fetch(new Request("https://sp.example.com/diag", { headers: { "User-Agent": "Shadowrocket/2.2.51" } }), {}, {});
   const j2 = JSON.parse(await d2.text());
   ok(d2.status === 400 && j2.detected.servedFormat === "base64 share list", "/diag without a token still explains the client");
+  ok(!!j2.store && typeof j2.store.backend === "string", "/diag reports the token-store backend (memory = links die on cold start)");
 }
 
 console.log("\n[D] Plain (non-base64) supplier payload with BOM/CRLF:");
