@@ -811,172 +811,6 @@ function subHeaders(status, pageUrl) {
 }
 
 
-// ---------------------------------------------------------------------------
-// Admin lock
-// ---------------------------------------------------------------------------
-// Every /admin route exposes customer names, emails, prices and — critically —
-// the private ?t= subscription tokens. Without a gate anyone who guesses the
-// URL can read and reuse them, so the whole /admin tree sits behind a password
-// held in the ADMIN_PASSWORD environment variable (set it in Netlify, never in
-// Git). A successful login sets a signed, HttpOnly cookie so the dashboard
-// keeps working from a bookmark without re-typing the password.
-const ADMIN_COOKIE = "sp_admin";
-const ADMIN_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
-
-const adminSecret = (env) =>
-  (env && (env.ADMIN_PASSWORD || env.ADMIN_TOKEN)) || "";
-
-const sha256Hex = async (s) => {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
-};
-
-// The cookie never carries the password itself — only a hash of it, so a stolen
-// cookie cannot be replayed against anything else.
-const adminCookieValue = (secret) => sha256Hex("sp-vpn-admin-v1:" + secret);
-
-// Length-independent comparison: bail out on length, then OR every byte diff so
-// the loop cannot return early and leak position information through timing.
-const safeEqual = (a, b) => {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-};
-
-const readCookie = (request, name) => {
-  const raw = request.headers.get("cookie") || "";
-  for (const part of raw.split(";")) {
-    const idx = part.indexOf("=");
-    if (idx < 0) continue;
-    if (part.slice(0, idx).trim() === name) return decodeURIComponent(part.slice(idx + 1).trim());
-  }
-  return null;
-};
-
-const loginPage = (msg = "", nextPath = "/admin/dashboard") => `<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SP VPN — Admin sign in</title><style>
-*{box-sizing:border-box}
-html,body{max-width:100%;overflow-x:hidden}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
-background:#0b0809;color:#f5eef0;font-family:Inter,-apple-system,'Segoe UI',Roboto,sans-serif}
-.card{width:100%;max-width:380px;padding:30px 26px;border:1px solid rgba(255,125,132,.16);border-radius:20px;
-background:linear-gradient(145deg,rgba(25,18,21,.96),rgba(14,10,12,.94));box-shadow:0 26px 60px rgba(0,0,0,.55)}
-.badge{display:inline-flex;align-items:center;gap:7px;margin-bottom:16px;padding:5px 11px;border-radius:999px;
-background:rgba(255,77,87,.12);color:#ff7d84;font-size:10px;font-weight:750;letter-spacing:.11em;text-transform:uppercase}
-h1{margin:0 0 6px;font-size:22px;letter-spacing:-.03em}
-p.sub{margin:0 0 20px;color:#a58a93;font-size:12.5px;line-height:1.5}
-label{display:block;color:#cbb4bb;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
-input{width:100%;margin-top:7px;padding:12px 13px;border:1px solid rgba(255,125,132,.18);border-radius:11px;
-background:#0a0708;color:#f5eef0;font-size:14px;outline:0}
-input:focus{border-color:rgba(255,77,87,.5)}
-button{width:100%;margin-top:16px;padding:13px;border:0;border-radius:11px;cursor:pointer;
-background:linear-gradient(90deg,#ff4d57,#d81b3f);color:#fff;font-size:14px;font-weight:750}
-.err{margin-top:14px;padding:10px 12px;border-radius:10px;background:rgba(255,125,132,.11);color:#ff7d84;font-size:12px;line-height:1.5}
-</style></head><body>
-<form class="card" method="post" action="/admin/login">
-  <span class="badge">🔒 Restricted</span>
-  <h1>Admin sign in</h1>
-  <p class="sub">This area shows customer data and private subscription links.</p>
-  <input type="hidden" name="next" value="${String(nextPath).replace(/[^a-zA-Z0-9/._-]/g, "")}">
-  <label for="pw">Password</label>
-  <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
-  <button type="submit">Unlock dashboard</button>
-  ${msg ? `<div class="err">${msg}</div>` : ""}
-</form></body></html>`;
-
-const setupPage = () => `<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SP VPN — Admin locked</title><style>
-*{box-sizing:border-box}html,body{max-width:100%;overflow-x:hidden}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#0b0809;color:#f5eef0;
-font-family:Inter,-apple-system,'Segoe UI',Roboto,sans-serif}
-.card{width:100%;max-width:470px;padding:30px 26px;border:1px solid rgba(255,125,132,.16);border-radius:20px;
-background:linear-gradient(145deg,rgba(25,18,21,.96),rgba(14,10,12,.94))}
-h1{margin:0 0 10px;font-size:21px}p{color:#a58a93;font-size:13px;line-height:1.6}
-code{display:block;margin:12px 0;padding:12px;border-radius:10px;background:#0a0708;color:#ff9aa0;
-font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
-</style></head><body><div class="card">
-<h1>🔒 Admin is locked</h1>
-<p>No admin password is configured, so this area stays sealed — it would otherwise expose customer data and private subscription links to anyone with the URL.</p>
-<p>In <b>Netlify → Site configuration → Environment variables</b>, add:</p>
-<code>ADMIN_PASSWORD = your-long-random-password</code>
-<p>Redeploy, then reload this page and sign in.</p>
-</div></body></html>`;
-
-// Returns a Response when the request must be intercepted (login screen, bad
-// password, logout, missing config); returns null to let the route through.
-async function adminGate(request, env, path, url) {
-  const secret = adminSecret(env);
-  const expected = secret ? await adminCookieValue(secret) : "";
-
-  if (path === "/admin/logout") {
-    return new Response(null, {
-      status: 302,
-      headers: {
-        Location: "/admin/login",
-        "Set-Cookie": `${ADMIN_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
-      },
-    });
-  }
-
-  if (!secret) {
-    return new Response(setupPage(), {
-      status: 503,
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-    });
-  }
-
-  const authed = safeEqual(readCookie(request, ADMIN_COOKIE) || "", expected);
-
-  if (path === "/admin/login") {
-    if (request.method === "POST") {
-      const data = Object.fromEntries(new URLSearchParams(await request.text()));
-      let next = String(data.next || "/admin/dashboard");
-      if (!next.startsWith("/admin")) next = "/admin/dashboard"; // no open redirect
-      if (safeEqual(String(data.password || ""), secret)) {
-        return new Response(null, {
-          status: 302,
-          headers: {
-            Location: next,
-            "Set-Cookie": `${ADMIN_COOKIE}=${expected}; Path=/; Max-Age=${ADMIN_MAX_AGE}; HttpOnly; Secure; SameSite=Lax`,
-          },
-        });
-      }
-      // Slow brute force down a little without blocking the event loop hard.
-      await new Promise((r) => setTimeout(r, 600));
-      return new Response(loginPage("Wrong password — try again.", next), {
-        status: 401,
-        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-      });
-    }
-    if (authed) return new Response(null, { status: 302, headers: { Location: "/admin/dashboard" } });
-    return new Response(loginPage("", url.searchParams.get("next") || "/admin/dashboard"), {
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-    });
-  }
-
-  if (authed) return null;
-
-  // Unauthenticated: JSON/data routes get a flat 401 (no HTML redirect that a
-  // fetch() would silently follow and then fail to parse); pages get the form.
-  const wantsJson =
-    path.endsWith(".json") ||
-    request.method !== "GET" ||
-    (request.headers.get("accept") || "").includes("application/json");
-  if (wantsJson) {
-    return new Response(JSON.stringify({ error: "unauthorized", login: "/admin/login" }), {
-      status: 401,
-      headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
-    });
-  }
-  return new Response(loginPage("", path), {
-    status: 401,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-  });
-}
-
 // Where "Mark paid" should push paid_until when no explicit date is given:
 // the supplier expiry if it is still ahead of us, otherwise one billing cycle
 // from today so a customer paying for a fresh month is not instantly overdue.
@@ -988,7 +822,6 @@ function paidThroughManual(row, now = new Date()) {
   const days = CYCLE_DAYS[String((row && row.billing_cycle) || "monthly").toLowerCase()] || 30;
   return new Date(today.getTime() + days * 864e5).toISOString().slice(0, 10);
 }
-
 
 export default {
   async fetch(request, env, ctx) {
@@ -1002,12 +835,6 @@ export default {
       url = new URL(request.url);
       path = url.pathname;
       const host = `${request.headers.get("x-forwarded-proto") || "https"}://${url.host}`;
-
-      // Lock the whole admin tree (see adminGate above) before any route runs.
-      if (path === "/admin" || path.startsWith("/admin/")) {
-        const gated = await adminGate(request, env, path, url);
-        if (gated) return gated;
-      }
 
       if (request.method === "POST") {
         const data = Object.fromEntries(new URLSearchParams(await request.text()));

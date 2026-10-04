@@ -35,13 +35,12 @@ const originalLink = `https://sp.example.com/all/SP%20VPN?t=${encodeURIComponent
 // PATCHED: run the real modified worker through /admin/mint
 const patched = (await import("../sp-vpn-worker.js")).default;
 const store = await import("../token-store.js");
-const { ADMIN_ENV, ADMIN_COOKIE } = await import("./admin-session.mjs");
 store.setBackend(new store.MemoryBackend());
 await store.ensureInit();
 const mintRes = await patched.fetch(new Request("https://sp.example.com/admin/mint", {
-  method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", cookie: ADMIN_COOKIE },
+  method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({ link: SUP, label: "Ali — 3mo" }).toString(),
-}), ADMIN_ENV, {});
+}), {}, {});
 const minted = JSON.parse(await mintRes.text());
 const patchedLink = `https://sp.example.com/all/SP%20VPN?t=${minted.token}`;
 

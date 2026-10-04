@@ -1,7 +1,6 @@
 // Billing status: renewing a customer into the future marks them paid, and
 // "Mark paid" / "Mark unpaid" flip it by hand.
 import worker from "../sp-vpn-worker.js";
-import { ADMIN_ENV, ADMIN_COOKIE } from "./admin-session.mjs";
 import * as store from "../token-store.js";
 import { paidThroughOnRenewal } from "../renewal.js";
 
@@ -10,7 +9,7 @@ const ok = (c, m) => { console.log((c ? "  ✅ " : "  ❌ ") + m); if (!c) fail+
 const day = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
 
 const HOST = "https://sp.example.com";
-const get = (p) => worker.fetch(new Request(HOST + p, { headers: { cookie: ADMIN_COOKIE } }), ADMIN_ENV, {});
+const get = (p) => worker.fetch(new Request(HOST + p), {}, {});
 const jget = async (p) => JSON.parse(await (await get(p)).text());
 
 console.log("\n[1] paidThroughOnRenewal() — when a renewal counts as payment");
@@ -75,12 +74,6 @@ console.log("\n[3] Manual Mark paid / Mark unpaid");
 
   const bad = await get("/admin/link/nope-not-a-token?action=paid");
   ok(bad.status === 404, "unknown token -> 404");
-}
-
-console.log("\n[4] The lock still applies to the billing actions");
-{
-  const r = await worker.fetch(new Request(HOST + "/admin/link/whatever?action=paid"), ADMIN_ENV, {});
-  ok(r.status === 401, "mark paid without a session -> 401 (got " + r.status + ")");
 }
 
 console.log("\n" + "─".repeat(70));

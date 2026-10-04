@@ -6,7 +6,6 @@
 // ============================================================================
 import worker from "../sp-vpn-worker.js";
 import * as store from "../token-store.js";
-import { ADMIN_ENV, ADMIN_COOKIE } from "./admin-session.mjs";
 
 let failures = 0, checks = 0;
 const ok = (cond, msg) => {
@@ -32,15 +31,13 @@ await store.ensureInit();
 
 const HOST = "https://sp.example.com";
 const get = (path, ua) =>
-  worker.fetch(new Request(HOST + path, {
-    headers: { cookie: ADMIN_COOKIE, ...(ua ? { "User-Agent": ua } : {}) },
-  }), ADMIN_ENV, {});
+  worker.fetch(new Request(HOST + path, { headers: ua ? { "User-Agent": ua } : {} }), {}, {});
 const post = (path, form) =>
   worker.fetch(new Request(HOST + path, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", cookie: ADMIN_COOKIE },
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(form).toString(),
-  }), ADMIN_ENV, {});
+  }), {}, {});
 
 const b64e = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const b64d = (s) => {

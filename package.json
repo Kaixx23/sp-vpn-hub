@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "patch": "node bin/apply-patch.mjs",
-    "test": "node test/full-proof.mjs && node test/opaque-token.test.mjs && node test/dashboard.test.mjs && node test/migration.test.mjs && node test/renewal.test.mjs && node test/reminders.test.mjs && node test/leak-proof.mjs && node test/qr.test.mjs && node test/admin-lock.test.mjs && node test/paid-status.test.mjs",
+    "test": "node test/full-proof.mjs && node test/opaque-token.test.mjs && node test/dashboard.test.mjs && node test/migration.test.mjs && node test/renewal.test.mjs && node test/reminders.test.mjs && node test/leak-proof.mjs && node test/qr.test.mjs && node test/paid-status.test.mjs",
     "dev": "node --watch bin/server.mjs",
     "demo": "node bin/demo-supplier.mjs",
     "migrate": "node bin/migrate.mjs",

@@ -6,7 +6,6 @@ import worker from "../sp-vpn-worker.js";
 import * as store from "../token-store.js";
 import { summarise } from "../dashboard.js";
 import vm from "node:vm";
-import { ADMIN_ENV, ADMIN_COOKIE } from "./admin-session.mjs";
 
 let failures = 0, checks = 0;
 const ok = (cond, msg) => {
@@ -44,11 +43,11 @@ store.setBackend(new store.MemoryBackend());
 await store.ensureInit();
 
 const HOST = "https://sp.example.com";
-const get = (p) => worker.fetch(new Request(HOST + p, { headers: { cookie: ADMIN_COOKIE } }), ADMIN_ENV, {});
+const get = (p) => worker.fetch(new Request(HOST + p), {}, {});
 const post = (p, form) => worker.fetch(new Request(HOST + p, {
-  method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", cookie: ADMIN_COOKIE },
+  method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams(form).toString(),
-}), ADMIN_ENV, {});
+}), {}, {});
 
 console.log("\n[1] summarise() — the renewal maths");
 {
