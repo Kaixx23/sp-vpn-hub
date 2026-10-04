@@ -112,6 +112,7 @@ export function dashboardPage(host = "") {
         <span class="btn-label">Refresh data</span>
       </button>
       <button id="add" class="btn btn-primary"><span class="plus" aria-hidden="true">＋</span> Add customer</button>
+      <a id="logout" class="btn btn-secondary" href="/admin/logout" title="Sign out of the admin dashboard" aria-label="Sign out">🔓<span class="btn-label"> Sign out</span></a>
     </div>
   </div>
 </header>
@@ -278,6 +279,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 @media(max-width:1020px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}.hero{grid-template-columns:1fr;padding-left:34px}.hero-art{right:-80px;opacity:.58}.hero-copy{max-width:560px}.top-actions .live-status{display:none}}
 @media(max-width:760px){.pillbtn{font-size:0;padding:9px}.pillbtn:before{content:"●";font-size:10px}.wrap{padding-left:18px;padding-right:18px}.topbar-inner{min-height:68px}.brand{min-width:0}.top-actions{gap:7px}.btn{padding:10px}.btn-secondary .btn-label{display:none}.page-main{padding-top:25px;padding-bottom:55px}.hero{min-height:285px;margin-bottom:18px;padding:27px 23px;align-items:start;border-radius:18px}.hero h2{font-size:32px;max-width:390px}.hero-art{right:-105px;top:73px;opacity:.5;transform:scale(.86);transform-origin:top right}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:18px}.stat{min-height:119px;padding:14px}.stat-value{margin-top:14px;font-size:24px}.customer-panel{padding:21px 14px 0;border-radius:17px}.panel-heading{align-items:flex-start;padding:0 4px 18px}.panel-heading h2{font-size:21px}.panel-subtitle{max-width:230px}.tracked-count{display:none}.toolbar{align-items:stretch;flex-wrap:wrap;padding:8px}.search-field{flex-basis:100%;height:31px}.toolbar-spacer{display:none}.select-wrap{flex:1}.toolbar select{width:100%;min-width:0}.results-meta{width:100%;padding:0 2px;text-align:left}.tablewrap{margin:0 -1px}.sheet{padding:22px 18px}.toast{right:20px;bottom:20px}}
 @media(max-width:480px){.brand-copy span{font-size:9px}.top-actions .btn-primary{padding:10px 11px}.hero{min-height:300px}.hero-lede{font-size:13px}.hero-art{right:-141px;top:91px}.two{grid-template-columns:1fr;gap:0}.sheet-heading{margin-bottom:18px}.macts{flex-direction:column-reverse}.macts .btn{width:100%}}
+a#logout{display:inline-flex;align-items:center;gap:6px;text-decoration:none}
 /* --- mobile horizontal-overflow fix: only the table may scroll sideways --- */
 html,body{max-width:100%;overflow-x:clip}
 @supports not (overflow:clip){html,body{overflow-x:hidden}}

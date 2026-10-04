@@ -17,6 +17,7 @@
 //   [12] the renew action never writes to the supplier (read-only)
 // ============================================================================
 import worker from "../sp-vpn-worker.js";
+import { ADMIN_ENV, ADMIN_COOKIE } from "./admin-session.mjs";
 import * as store from "../token-store.js";
 import {
   usageKind, usageMessage, renewalMessage, scrubSupplier, checkCustomerRow,
@@ -62,11 +63,11 @@ store.setBackend(new store.MemoryBackend());
 await store.ensureInit();
 
 const HOST = "https://sp.example.com";
-const get = (p) => worker.fetch(new Request(HOST + p), {}, {});
+const get = (p) => worker.fetch(new Request(HOST + p, { headers: { cookie: ADMIN_COOKIE } }), ADMIN_ENV, {});
 const post = (p, form) => worker.fetch(new Request(HOST + p, {
-  method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", cookie: ADMIN_COOKIE },
   body: new URLSearchParams(form).toString(),
-}), {}, {});
+}), ADMIN_ENV, {});
 
 const jget = async (p) => JSON.parse(await (await get(p)).text());
 const renew = async (token) => {
