@@ -148,8 +148,11 @@ const CSS = `
 :root{--bg:#0b1220;--card:#141d31;--card2:#0e1626;--line:rgba(148,163,184,.14);--text:#e8eef8;
 --dim:#8ea0ba;--green:#34d399;--red:#f87171;--amber:#fbbf24;--blue:#60a5fa}
 *{box-sizing:border-box}
+html{background:var(--bg)}
+html,body{max-width:100%;overflow-x:hidden}
 body{margin:0;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text)}
-.wrap{max-width:1200px;margin:0 auto;padding:0 18px}
+.wrap{max-width:1200px;margin:0 auto;padding:0 18px;min-width:0}
+header,main,section,.toolbar,.tablewrap{min-width:0;max-width:100%}
 header{border-bottom:1px solid var(--line);background:linear-gradient(180deg,#17233c,#121a2c);padding:16px 0}
 header .wrap{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 h1{font-size:19px;margin:0;font-weight:800}
@@ -171,8 +174,10 @@ border-radius:9px;padding:9px 11px;font-size:13px;outline:none}
 .toolbar input[type=search]{flex:1;min-width:180px}
 .dim{color:var(--dim);font-size:12px}
 .loading{text-align:center;padding:26px}
-.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
-table{width:100%;border-collapse:collapse;font-size:13px;min-width:900px}
+.tablewrap{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;
+border:1px solid var(--line);border-radius:14px;background:var(--card)}
+table{width:100%;border-collapse:collapse;font-size:13px;min-width:900px;background:var(--card)}
+thead th{background:var(--card)}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;
 letter-spacing:.05em;padding:11px 13px;border-bottom:1px solid var(--line)}
 td{padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:middle}
@@ -211,7 +216,14 @@ color:var(--text);border-radius:9px;padding:9px 11px;font-size:13px;outline:none
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1b2740;
 border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-size:13px;z-index:60;
 box-shadow:0 12px 30px rgba(0,0,0,.5)}
-@media(max-width:640px){.stats{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:640px){
+.stats{grid-template-columns:repeat(2,1fr)}
+main{padding:16px 0 60px}
+.wrap{padding:0 12px}
+table{min-width:760px;font-size:12px}
+th,td{padding:9px 10px}
+.lnk{max-width:140px}
+}
 `;
 
 const CLIENT = `
