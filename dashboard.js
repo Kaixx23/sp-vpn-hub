@@ -220,9 +220,19 @@ box-shadow:0 12px 30px rgba(0,0,0,.5)}
 .stats{grid-template-columns:repeat(2,1fr)}
 main{padding:16px 0 60px}
 .wrap{padding:0 12px}
-table{min-width:760px;font-size:12px}
+header .wrap{align-items:flex-start}
+.acts{width:100%}
+.acts .btn{flex:1}
+.toolbar input[type=search]{min-width:100%;flex:1 1 100%}
+.toolbar select{flex:1 1 auto}
+table{min-width:720px;font-size:12px}
 th,td{padding:9px 10px}
-.lnk{max-width:140px}
+.lnk{max-width:130px}
+.two{grid-template-columns:1fr}
+.sheet{padding:18px}
+.modal{padding:20px 12px}
+/* the table is the only thing allowed to scroll sideways on a phone */
+.tablewrap{scroll-padding-left:0;box-shadow:inset -14px 0 14px -14px rgba(0,0,0,.6)}
 }
 `;
 
