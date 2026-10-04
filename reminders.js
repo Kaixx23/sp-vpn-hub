@@ -22,6 +22,8 @@
 //     the rest of the reminders from being recorded and delivered.
 // ============================================================================
 
+import { checkCustomerRow } from "./renewal.js";
+
 export const DEFAULT_THRESHOLDS = [30, 14, 7, 3, 1];
 
 const DAY_MS = 86400000;
@@ -120,6 +122,8 @@ Plan: ${row.plan || "—"} · ${money(row) || "no price set"}${quota}${tail}`;
   }
 }
 
+const isSystemGeneratedRow = (r) => !!(r && !r.customer && (r.system_generated || r.label === "quota-page" || r.label === "seller-tool"));
+
 /**
  * Decide what needs saying. Pure function — no I/O, no sending.
  * Returns [{ token, kind, days, text }].
@@ -127,7 +131,7 @@ Plan: ${row.plan || "—"} · ${money(row) || "no price set"}${quota}${tail}`;
 export function dueReminders(rows, { thresholds = DEFAULT_THRESHOLDS, includeLegacy = true } = {}) {
   const out = [];
   for (const r of rows) {
-    if (r.revoked) continue;
+    if (r.revoked || isSystemGeneratedRow(r)) continue;
 
     const d = daysUntil(r.supplier_expires);
     if (d === null) {
@@ -177,7 +181,7 @@ export async function runReminders(deps, opts = {}) {
   const dateKey = now.toISOString().slice(0, 10);
   const result = { refreshed: 0, refreshFailed: 0, sent: [], skipped: [], failed: [] };
 
-  let rows = (await listAll()).filter((r) => !r.revoked);
+  let rows = (await listAll()).filter((r) => !r.revoked && !isSystemGeneratedRow(r));
 
   // 1. Pull live expiry + quota from the supplier. Bounded concurrency: the
   //    supplier panel must not see a burst just because the cron fired.
@@ -185,23 +189,16 @@ export async function runReminders(deps, opts = {}) {
     for (let i = 0; i < rows.length; i += concurrency) {
       const batch = rows.slice(i, i + concurrency);
       await Promise.all(batch.map(async (r) => {
-        try {
-          const { status } = await fetchSubscription(r.supplier_url);
-          const s = quotaSummary(status);
-          if (!s) { result.refreshFailed++; return; }
-          await updateRow(r.token, {
-            supplier_expires: s.exp,
-            total_gb: s.tot,
-            used_gb: Math.round((s.up + s.down) * 100) / 100,
-            checked_at: new Date().toISOString(),
-          });
-          result.refreshed++;
-        } catch (e) {
-          result.refreshFailed++;
-        }
+        // Shared with the dashboard's global refresh and the per-customer
+        // Renew / Check (renewal.js), so the cron keeps the usage delta in
+        // step with used_gb instead of silently leaving a stale comparison
+        // behind. A failed check still writes nothing at all.
+        const out = await checkCustomerRow(r, { fetchSubscription, quotaSummary, updateRow });
+        if (out.ok) result.refreshed++;
+        else result.refreshFailed++;
       }));
     }
-    rows = (await listAll()).filter((r) => !r.revoked);
+    rows = (await listAll()).filter((r) => !r.revoked && !isSystemGeneratedRow(r));
   }
 
   // 2. Decide, then send only what is new.

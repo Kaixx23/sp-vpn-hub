@@ -1,5 +1,13 @@
 # SP VPN Hub — supplier-leak fix + customer link registry
 
+> **Business source of truth**
+>
+> Live business repository: `Kaixx23/sp-vpn-hub`  
+> Live business branch: `arena/01a0e3a9-sp-vpn-hub`  
+> Live site: `https://sp-vpn.netlify.app/`
+>
+> Future AI/coding sessions should read [`BUSINESS_SOURCE_OF_TRUTH.md`](./BUSINESS_SOURCE_OF_TRUTH.md) before making changes. The live business code is on `arena/01a0e3a9-sp-vpn-hub`, not necessarily `main`.
+
 Drop-in replacement for `sp-global` that fixes the supplier-link leak and adds a
 token registry (the database your dashboard will sit on).
 
@@ -148,6 +156,47 @@ back real expiry + used/total GB. That's the supplier's own
 worker's existing `quotaSummary()` — no new parsing, and you get quota tracking
 for free. Refresh runs at concurrency 6 so your supplier never sees a burst.
 
+### Renew / Check — one customer at a time
+
+Renewing happens on the supplier's panel, by hand, one customer at a time. The
+dashboard's job is to confirm it landed. Every active row has a **Renew / Check**
+button that re-reads **only that customer's** saved subscription and persists
+what the supplier now reports:
+
+```
+Renewed: expiry updated to 2026-10-29     ·  Usage reset by 44.5 GB
+Checked: expiry remains 2026-10-17        ·  No new usage since last check
+Checked: expiry remains 2026-10-08        ·  +25.0 GB used since last check
+```
+
+It is **read-only against the supplier** — a single GET, no body, nothing can be
+purchased or renewed by pressing it. It only verifies a renewal you already
+completed. The global `⟳ Refresh quota` still does the same for everyone at
+once; this narrows it to one row so you are not hammering the panel with 80
+fetches to check one person.
+
+### Usage change since the previous check
+
+Each successful check compares the new used-GB against the used-GB from the
+**immediately previous successful check** and persists the difference:
+
+| Situation | Shown |
+|---|---|
+| used more data | `+5.0 GB used since last check` |
+| unchanged | `No new usage since last check` |
+| supplier reset the counter after a renewal | `Usage reset by 190.0 GB` |
+| first ever successful check | nothing — there is no previous value to compare |
+
+The comparison is stored, not computed on the fly, so it stays on screen until
+that customer is next checked successfully.
+
+**A failed check writes nothing.** If the panel is down or answers without a
+parsable `STATUS=` line, the row keeps its previous expiry, quota, used-GB *and*
+its previous delta, and `checked_at` is not bumped — a flaky supplier can never
+destroy your last known-good numbers. That is true for the per-customer button,
+the global refresh and the reminder cron alike: all three share one code path
+(`renewal.js → checkCustomerRow()`).
+
 A link with **no recorded expiry is surfaced separately**, never counted as
 healthy — an unknown must not hide a renewal.
 
@@ -162,10 +211,34 @@ One table. The leak fix and the dashboard are the same database.
 token            TEXT PRIMARY KEY     -- 24 random bytes, hex
 supplier_url     TEXT NOT NULL        -- the secret; never leaves the server
 label, customer, plan, price, currency, billing_cycle, paid_until, notes
-supplier_expires, total_gb, used_gb, checked_at   -- written by /admin/refresh
+account_email, account_password       -- the supplier-panel login you renew with
+supplier_expires, total_gb, used_gb, checked_at   -- written by a check
+prev_used_gb     REAL                 -- used_gb at the previous successful check
+usage_delta_gb   REAL                 -- used_gb - prev_used_gb (NULL = first check)
 revoked          INTEGER              -- 1 = link is dead
 created_at       TEXT
 ```
+
+**Migrations are additive only.** `token-store.js` holds an `ADDED_COLUMNS` list
+and runs `ALTER TABLE links ADD COLUMN` for anything missing on every boot,
+guarded by `PRAGMA table_info` and a duplicate-column catch. No table is ever
+dropped or recreated and no existing row is rewritten, so deploying a schema
+change to a live Turso database with paying customers in it is a non-event.
+
+The same two columns are checked in as reviewable SQL at
+`migrations/001-usage-delta.sql`, should you prefer to apply them ahead of the
+deploy:
+
+```bash
+turso db shell your-db < migrations/001-usage-delta.sql
+# or, against whatever TOKEN_STORE_URL points at:
+npm run migrate
+```
+
+`test/migration.test.mjs` proves this: it builds a database on the *previous*
+production schema, fills it with production-shaped rows, boots the new store
+against it, and asserts every original column and every original value is
+byte-identical afterwards.
 
 ## Reminders
 
@@ -234,7 +307,8 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/dashboard.json` | GET | Stats + customers, for the client |
 | `/admin/mint` | POST | `link=` + customer fields → `{ token, oneLink }` |
 | `/admin/customer` | POST | Edit a customer's details |
-| `/admin/refresh` | GET | Pull live quota + expiry from the supplier |
+| `/admin/refresh` | GET | Pull live quota + expiry for **every** active customer |
+| `/admin/link/<t>?action=renew` | GET | Re-check **one** customer: persists expiry, quota and the usage delta |
 | `/admin/reminders` | GET | Reminder history (kind, date, message text) |
 | `/admin/reminders` | POST | Run a reminder pass now |
 | `/admin/reminders/run` | GET | Same, as a GET — for platform crons |
@@ -243,90 +317,7 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/link/<t>?action=rotate` | GET | Kill + reissue, carries the customer's details |
 | `/admin/link/<t>?action=delete` | GET | Remove the row entirely |
 
-| `/diag?t=<t>` | GET | Self-service diagnosis — what format *this* client gets, supplier latency, YAML sanity |
-
 `/admin/*` has **no authentication yet** — see *Before you deploy*.
-
----
-
-## Clash / Clash Mi troubleshooting
-
-Symptom: the ONE link works in Shadowrocket, but a mihomo client (Clash Mi,
-Clash Verge, FlClash, ClashX Meta…) shows a **timeout** on import or every node
-times out after importing.
-
-There are only three possible causes, and each has a switch:
-
-1. **The client got the wrong format.** Clash cores can only read mihomo YAML; a
-   base64 node list makes them fail with a parse/timeout style error. Format is
-   picked from the `User-Agent`, so a client with an unusual UA needs an
-   explicit hint:
-
-   ```
-   https://<host>/all/SP%20VPN?t=<token>&fmt=yaml     # always YAML
-   https://<host>/all/SP%20VPN.yaml?t=<token>         # same, via extension
-   https://<host>/all/SP%20VPN?t=<token>&fmt=sr       # always base64
-   ```
-
-2. **The profile needed a GeoIP download before it could connect.** The old
-   generator always emitted `GEOIP,CN` / `GEOIP,PRIVATE` rules and
-   `dns.fallback-filter.geoip: true`. On a fresh install the core must first
-   download the GeoIP database *through the network the user cannot reach yet*,
-   which surfaces as a timeout. The default profile is now **geo-free**
-   (private ranges are literal `IP-CIDR` rules).
-
-3. **The profile pinned China-only DNS.** `223.5.5.5` / `119.29.29.29` are only
-   fast inside China; anywhere else they are slow or dropped, and since mihomo
-   resolves the node hostnames with them, *every* connection and latency test
-   times out even though the profile imported fine. The default profile now
-   uses `1.1.1.1 / 8.8.8.8 / 9.9.9.9` and sets `proxy-server-nameserver`.
-
-   Really on a Chinese ISP? Append **`&cn=1`** to get the old CN-optimized
-   profile (CN resolvers, `GEOIP,CN,DIRECT`, background geodata updates).
-
-### "Auto Speed doesn't pick anything"
-
-Traffic enters the top `select` group (`🚀 <brand>`), and mihomo points a
-`select` group at its **first member** on a fresh load. `⚡ Auto Speed` is
-emitted first in every selector, so a freshly imported profile auto-selects it
-for every customer — no tapping required.
-
-The one thing that used to defeat that was `profile.store-selected: true`,
-which restores whatever node the user last tapped, forever. It is now **off by
-default**: every import *and* every auto-update re-arms Auto Speed. Append
-**`&remember=1`** if you'd rather a manual pick survived updates.
-
-Auto Speed itself is `url-test` with `interval: 300`, `tolerance: 80` (it only
-switches for a >80 ms improvement, which stops it flapping) and `lazy: true`
-(it probes while it is the active selection).
-
-### A whole family of nodes shows "connect error"
-
-That is upstream, not the profile: those nodes share one hostname and it is
-unreachable (supplier down, host blocked by the ISP, or a CDN front that got
-banned). `/diag?t=<token>` lists nodes per server host, which makes a dead
-family obvious at a glance.
-
-Two mitigations ship in the profile:
-
-* `lazy: true` + `expected-status: 204` + `max-failed-times: 3` on the auto /
-  failover groups, so the core stops dialling dead nodes it isn't using.
-* **`&exclude=<regex>` / `&include=<regex>`** (case-insensitive, matched on the
-  English node name) build a profile from the nodes that still work:
-
-  ```
-  https://<host>/all/SP%20VPN?t=<token>&fmt=yaml&exclude=telecom
-  https://<host>/all/SP%20VPN?t=<token>&fmt=yaml&include=japan|korea
-  ```
-
-  Filtering everything out returns a clear `400` instead of a broken profile,
-  and an invalid regex is ignored rather than breaking the customer's link.
-
-Not sure which one you're hitting? Open `/diag?t=<token>` **in the failing app's
-own browser/WebView** (or curl it with that app's UA) — it reports the detected
-client family, the format it would be served, supplier latency and whether the
-generated YAML passes mihomo's import-time checks. It never echoes the supplier
-URL.
 
 ---
 
@@ -358,9 +349,18 @@ npm test
 - `test/opaque-token.test.mjs` — **40 checks**: leak closed, opaque links serve
   every client type, legacy links still work, revocation is immediate, rotation,
   admin redaction, DB-outage fallback.
-- `test/dashboard.test.mjs` — **42 checks**: the renewal maths in `summarise()`,
-  live quota refresh, the dashboard routes, customer editing, and that no route
-  ever leaks a supplier URL.
+- `test/dashboard.test.mjs` — **93 checks**: the renewal maths in `summarise()`,
+  live quota refresh, the dashboard routes, customer editing, panel account
+  fields, profit, health, and that no route ever leaks a supplier URL.
+- `test/migration.test.mjs` — **34 checks**: the additive migration applied to a
+  database built on the *previous* production schema, asserting every existing
+  column and value survives byte-identically and that re-running is a no-op.
+- `test/renewal.test.mjs` — **151 checks**: per-customer Renew / Check (changed
+  vs unchanged expiry), usage increase / unchanged / reset, no delta on the
+  first check, failed checks overwriting nothing, the global refresh still
+  working and persisting deltas, revoked + unknown + direct-node customers
+  handled safely, the action being read-only against the supplier, and supplier
+  URLs staying redacted from every admin API.
 - `test/reminders.test.mjs` — **45 checks**: day maths, which reminders are due,
   cron idempotency (three passes in one day send once; tomorrow fires again),
   a dead channel not losing the reminder, and the worker routes.
@@ -400,6 +400,71 @@ TOKEN_STORE_AUTH_TOKEN=...
 
 If you stay on Vercel, add `export const runtime = "edge"` to `api/index.js` to
 avoid Node cold starts.
+
+---
+
+## Redeploying from a brand-new repo
+
+Nothing in this project is pinned to a particular repository, site name, domain
+or account:
+
+* every customer-facing URL is built at request time from the incoming `Host`
+  header (`x-forwarded-proto` + `url.host`), so the one-links rebrand themselves
+  to whatever domain serves them;
+* all storage is chosen from environment variables (`TOKEN_STORE_URL`,
+  `TOKEN_STORE_AUTH_TOKEN`) or a D1 binding — nothing is compiled in;
+* there is no build step, no CDN and no external asset to re-point.
+
+So a fresh repo is a copy-and-push, and the deploy is four environment
+variables. See `.env.example`.
+
+**1. Create the new repo**
+
+```bash
+# from a clean checkout of the branch you want to ship
+git clone --depth 1 <this-repo> sp-vpn-hub-new && cd sp-vpn-hub-new
+rm -rf .git && git init && git add -A && git commit -m "SP VPN Hub"
+gh repo create <you>/<new-repo> --private --source=. --push
+```
+
+**2. Point a new Netlify site at it**
+
+Netlify → *Add new site* → *Import an existing project* → pick the new repo.
+`netlify.toml` already supplies everything: functions directory, `NODE_VERSION
+20`, the esbuild bundler, `@libsql/client` kept external (it ships a native
+binding esbuild cannot bundle), and the catch-all redirect to the function.
+Leave the build command empty and the publish directory as-is.
+
+**3. Choose the database**
+
+| Goal | What to set |
+|---|---|
+| **Keep every existing customer** | Point `TOKEN_STORE_URL` / `TOKEN_STORE_AUTH_TOKEN` at the **same Turso database** the old site uses. The new site picks up all customers instantly — the database is the source of truth, not the repo. |
+| **Start clean** | `turso db create <new-db>`, use its URL + token. The schema is created on first request. |
+| **Copy the data to a new database** | `npm run backup > customers.json` against the old one, then `node bin/backup.mjs --restore customers.json` against the new one. |
+
+Set them in Netlify → *Site configuration* → *Environment variables*, then
+redeploy.
+
+> Two sites pointed at one Turso database is fine — it is a normal shared
+> SQLite server, and every write here is a single-row upsert. It is also the
+> zero-downtime cutover: bring the new site up on the same database, check it,
+> then move the domain.
+
+**4. Verify before you cut over**
+
+```bash
+curl -s https://<new-site>.netlify.app/healthz                 # -> ok
+curl -s https://<new-site>.netlify.app/admin/dashboard.json | head -c 200
+```
+
+The dashboard's health pill and the `store` field in `dashboard.json` name the
+active backend. If it says `memory`, `TOKEN_STORE_URL` was not picked up and
+customers will vanish on the next cold start — fix that before sending anyone
+a link. It should read `turso`.
+
+⚠ **`/admin/*` has no authentication.** A new public URL is a new unprotected
+dashboard. See *Before you deploy*.
 
 ---
 
