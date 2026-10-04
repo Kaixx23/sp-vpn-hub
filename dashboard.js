@@ -87,6 +87,15 @@ export function summarise(rows) {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// Inline scripts live in a raw-text element: HTML entities such as &quot; and
+// &gt; are not decoded there. Escape only sequences that can terminate or mangle
+// the script tag; otherwise the dashboard client must remain real JavaScript.
+const scriptEsc = (s) => String(s)
+  .replace(/<\/script/gi, "<\\/script")
+  .replace(/<!--/g, "<\\!--")
+  .replace(/\u2028/g, "\\u2028")
+  .replace(/\u2029/g, "\\u2029");
+
 export function dashboardPage(host = "") {
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8">
@@ -235,7 +244,7 @@ export function dashboardPage(host = "") {
 </div>
 
 <div id="toast" class="toast" hidden role="status"></div>
-<script>${CLIENT.replace(/<\/script/gi, "<\\/script")}</script>
+<script>${scriptEsc(CLIENT)}</script>
 </body></html>`;
 }
 
