@@ -326,7 +326,7 @@ console.log("\n[11] revoked, unknown and non-checkable customers are handled saf
   // an unsupported action is still rejected clearly
   const badAction = await get("/admin/link/" + ali + "?action=explode");
   ok(badAction.status === 400, `unknown action -> 400 (got ${badAction.status})`);
-  ok((await badAction.text()).includes("renew | rotate | revoke | delete"), "the error lists renew alongside the existing actions");
+  ok((await badAction.text()).includes("renew | paid | unpaid | rotate | revoke | delete"), "the error lists renew and the billing actions alongside the existing ones");
 }
 
 // ---------------------------------------------------------------------------

@@ -977,6 +977,19 @@ async function adminGate(request, env, path, url) {
   });
 }
 
+// Where "Mark paid" should push paid_until when no explicit date is given:
+// the supplier expiry if it is still ahead of us, otherwise one billing cycle
+// from today so a customer paying for a fresh month is not instantly overdue.
+const CYCLE_DAYS = { weekly: 7, monthly: 30, quarterly: 91, yearly: 365, annual: 365 };
+function paidThroughManual(row, now = new Date()) {
+  const today = new Date(now.toISOString().slice(0, 10) + "T00:00:00Z");
+  const exp = row && row.supplier_expires ? Date.parse(String(row.supplier_expires).slice(0, 10) + "T00:00:00Z") : NaN;
+  if (!Number.isNaN(exp) && exp >= today.getTime()) return String(row.supplier_expires).slice(0, 10);
+  const days = CYCLE_DAYS[String((row && row.billing_cycle) || "monthly").toLowerCase()] || 30;
+  return new Date(today.getTime() + days * 864e5).toISOString().slice(0, 10);
+}
+
+
 export default {
   async fetch(request, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
@@ -1301,6 +1314,8 @@ export default {
               ...base,
               ok: true,
               renewed: out.expiryChanged,
+              marked_paid: out.markedPaid,
+              paid_until: out.paidUntil,
               supplier_expires: out.row.supplier_expires ?? null,
               used_gb: out.row.used_gb ?? null,
               usage_delta_gb: out.usageDeltaGb,
@@ -1316,6 +1331,7 @@ export default {
           updated,
           failed,
           renewed: done.filter((x) => x.ok && x.renewed).length,
+          marked_paid: done.filter((x) => x.ok && x.marked_paid).length,
           results: done,
         });
       }
@@ -1342,6 +1358,9 @@ export default {
             token: t,
             renewed: out.expiryChanged,
             expiry_changed: out.expiryChanged,
+            marked_paid: out.markedPaid,
+            paid_until: out.paidUntil,
+            previous_paid_until: out.previous.paid_until,
             previous_expiry: out.previous.supplier_expires,
             supplier_expires: out.row.supplier_expires ?? null,
             previous_used_gb: out.previous.used_gb,
@@ -1356,6 +1375,31 @@ export default {
             // dashboard table without a full reload — and without ever
             // carrying the supplier URL.
             customer: redact(out.row),
+          });
+        }
+        if (action === "paid" || action === "unpaid") {
+          // Manual billing switch: "they paid me" without touching the
+          // supplier. Marking paid moves paid_until to the date the customer
+          // is covered through — by default the supplier expiry, or one
+          // billing cycle out when there is no expiry to lean on.
+          const cur = (await storeList()).find((r) => r.token === t);
+          if (!cur) return json({ ok: false, token: t, error: "unknown token" }, 404);
+          if (action === "unpaid") {
+            const cleared = await storeUpdate(t, { paid_until: null });
+            return json({ ok: true, token: t, paid: false, paid_until: null, customer: redact(cleared) });
+          }
+          const asked = (url.searchParams.get("until") || "").slice(0, 10);
+          const until = /^\d{4}-\d{2}-\d{2}$/.test(asked)
+            ? asked
+            : paidThroughManual(cur, new Date());
+          const updatedRow = await storeUpdate(t, { paid_until: until });
+          return json({
+            ok: true,
+            token: t,
+            paid: true,
+            paid_until: until,
+            previous_paid_until: cur.paid_until || null,
+            customer: redact(updatedRow),
           });
         }
         if (action === "rotate") {
@@ -1381,7 +1425,7 @@ export default {
           const gone = await storeRemove(t);
           return gone ? json({ token: t, deleted: true }) : json({ error: "unknown token" }, 404);
         }
-        return json({ error: "action must be renew | rotate | revoke | delete" }, 400);
+        return json({ error: "action must be renew | paid | unpaid | rotate | revoke | delete" }, 400);
       }
       if (path === "/admin/reminders/run") {
         // GET so a platform cron can hit it directly (Vercel/Netlify crons

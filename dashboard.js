@@ -433,7 +433,13 @@ function render() {
     const generatedRow = isGenerated(r);
     const name = displayName(r);
     const one = oneLinkOf(r);
-    const paid = r.paid_until ? prettyDate(r.paid_until) + (daysTo(r.paid_until) < 0 ? ' <span class="pill red">unpaid</span>' : '') : '<span class="dim">Not recorded</span>';
+    const paidDays = daysTo(r.paid_until);
+    const isPaid = r.paid_until != null && paidDays !== null && paidDays >= 0;
+    const paid = r.paid_until
+      ? prettyDate(r.paid_until) + (paidDays < 0
+          ? ' <span class="pill red">unpaid</span>'
+          : ' <span class="pill green">paid</span>')
+      : '<span class="dim">Not recorded</span>';
     return '<tr class="' + (r.revoked ? "revoked " : "") + (generatedRow ? "generated" : "") + '">' +
       '<td><div class="customer-cell"><span class="avatar">' + esc(initials(name)) + '</span><div><div class="nm">' + esc(name) + '</div>' +
         '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + (generatedRow ? ' · generated' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + (generatedRow ? '<div class="sub">Not counted as a customer or profit.</div>' : '') + '</div></div></td>' +
@@ -442,7 +448,7 @@ function render() {
       '<td class="usage-cell">' + quotaCell(r) + '</td>' +
       '<td class="paid-cell">' + paid + '</td>' +
       '<td class="link-cell"><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span><span class="link-caption"><svg viewBox="0 0 20 20" fill="none"><path d="M7.5 12.5 12.5 7.5M6 14a3 3 0 0 1 0-4.2l1.6-1.6M14 6a3 3 0 0 1 0 4.2l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> private link</span></td>' +
-      '<td class="actions-cell">' + (r.revoked || generatedRow ? "" : actionButton("renew", r.token, "Renew / Check")) + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, generatedRow ? "Convert/Edit" : "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
+      '<td class="actions-cell">' + (r.revoked || generatedRow ? "" : actionButton("renew", r.token, "Renew / Check")) + (generatedRow ? "" : actionButton(isPaid ? "unpaid" : "paid", r.token, isPaid ? "Mark unpaid" : "Mark paid")) + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, generatedRow ? "Convert/Edit" : "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
       '</tr>';
   }).join("") : '<tr><td colspan="7" class="loading">No customers match these filters.</td></tr>';
 }
@@ -664,7 +670,8 @@ $("#rows").addEventListener("click", async (e) => {
       const response = await fetch("/admin/link/" + b.dataset.t + "?action=renew");
       const j = await response.json().catch(() => ({}));
       if (response.ok && j.ok) {
-        toast(name + " — " + j.message + (j.usage_message ? " · " + j.usage_message : ""), 6000);
+        toast(name + " — " + j.message + (j.usage_message ? " · " + j.usage_message : "") +
+          (j.marked_paid ? " · marked paid through " + prettyDate(j.paid_until) : ""), 6000);
         await load();
         return;
       }
@@ -673,6 +680,29 @@ $("#rows").addEventListener("click", async (e) => {
       toast("Could not check " + name + ": " + err.message, 6000);
     }
     b.disabled = false; b.textContent = "Renew / Check";
+    return;
+  }
+  if (a === "paid" || a === "unpaid") {
+    const row = DATA.find((r) => r.token === b.dataset.t);
+    const name = (row && (row.customer || row.label)) || "this customer";
+    if (a === "unpaid" && !confirm("Mark " + name + " as not paid? This clears their paid-through date.")) return;
+    const label = b.textContent;
+    b.disabled = true; b.textContent = a === "paid" ? "Saving…" : "Clearing…";
+    try {
+      const response = await fetch("/admin/link/" + b.dataset.t + "?action=" + a);
+      const j = await response.json().catch(() => ({}));
+      if (response.ok && j.ok) {
+        toast(a === "paid"
+          ? name + " marked paid through " + prettyDate(j.paid_until)
+          : name + " marked unpaid", 5000);
+        await load();
+        return;
+      }
+      toast("Could not update " + name + ": " + (j.error || ("HTTP " + response.status)), 6000);
+    } catch (err) {
+      toast("Could not update " + name + ": " + err.message, 6000);
+    }
+    b.disabled = false; b.textContent = label;
     return;
   }
   if (a === "revoke") {
