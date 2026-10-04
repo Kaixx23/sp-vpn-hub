@@ -112,6 +112,7 @@ export function dashboardPage(host = "") {
         <span class="btn-label">Refresh data</span>
       </button>
       <button id="add" class="btn btn-primary"><span class="plus" aria-hidden="true">＋</span> Add customer</button>
+      <a id="logout" class="btn btn-secondary" href="/admin/logout" title="Sign out of the admin dashboard" aria-label="Sign out">🔓<span class="btn-label"> Sign out</span></a>
     </div>
   </div>
 </header>
@@ -278,6 +279,29 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 @media(max-width:1020px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}.hero{grid-template-columns:1fr;padding-left:34px}.hero-art{right:-80px;opacity:.58}.hero-copy{max-width:560px}.top-actions .live-status{display:none}}
 @media(max-width:760px){.pillbtn{font-size:0;padding:9px}.pillbtn:before{content:"●";font-size:10px}.wrap{padding-left:18px;padding-right:18px}.topbar-inner{min-height:68px}.brand{min-width:0}.top-actions{gap:7px}.btn{padding:10px}.btn-secondary .btn-label{display:none}.page-main{padding-top:25px;padding-bottom:55px}.hero{min-height:285px;margin-bottom:18px;padding:27px 23px;align-items:start;border-radius:18px}.hero h2{font-size:32px;max-width:390px}.hero-art{right:-105px;top:73px;opacity:.5;transform:scale(.86);transform-origin:top right}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:18px}.stat{min-height:119px;padding:14px}.stat-value{margin-top:14px;font-size:24px}.customer-panel{padding:21px 14px 0;border-radius:17px}.panel-heading{align-items:flex-start;padding:0 4px 18px}.panel-heading h2{font-size:21px}.panel-subtitle{max-width:230px}.tracked-count{display:none}.toolbar{align-items:stretch;flex-wrap:wrap;padding:8px}.search-field{flex-basis:100%;height:31px}.toolbar-spacer{display:none}.select-wrap{flex:1}.toolbar select{width:100%;min-width:0}.results-meta{width:100%;padding:0 2px;text-align:left}.tablewrap{margin:0 -1px}.sheet{padding:22px 18px}.toast{right:20px;bottom:20px}}
 @media(max-width:480px){.brand-copy span{font-size:9px}.top-actions .btn-primary{padding:10px 11px}.hero{min-height:300px}.hero-lede{font-size:13px}.hero-art{right:-141px;top:91px}.two{grid-template-columns:1fr;gap:0}.sheet-heading{margin-bottom:18px}.macts{flex-direction:column-reverse}.macts .btn{width:100%}}
+a#logout{display:inline-flex;align-items:center;gap:6px;text-decoration:none}
+/* --- mobile horizontal-overflow fix: only the table may scroll sideways --- */
+html,body{max-width:100%;overflow-x:clip}
+@supports not (overflow:clip){html,body{overflow-x:hidden}}
+.topbar,.topbar-inner,.page-main,.wrap,.hero,.stats,.customer-panel,.toolbar,.tablewrap{max-width:100%;min-width:0}
+.hero{overflow:hidden}
+.tablewrap{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;background:var(--bg-deep)}
+.tablewrap table{background:rgba(10,8,9,.48)}
+.tablewrap thead th{background:#120d0f}
+@media(max-width:760px){
+.tablewrap{margin:0;box-shadow:inset -16px 0 16px -16px rgba(0,0,0,.75)}
+.tablewrap table{min-width:940px;font-size:11px}
+.tablewrap th,.tablewrap td{padding:11px 10px}
+.usage-cell{width:150px;min-width:150px}
+.lnk{max-width:140px}
+.link-cell{min-width:150px}
+.customer-cell{min-width:140px}
+.hero-art{display:none}
+}
+@media(max-width:480px){
+.tablewrap table{min-width:860px}
+.toast{right:12px;left:12px;max-width:none}
+}
 `;
 
 const CLIENT = `
@@ -409,7 +433,13 @@ function render() {
     const generatedRow = isGenerated(r);
     const name = displayName(r);
     const one = oneLinkOf(r);
-    const paid = r.paid_until ? prettyDate(r.paid_until) + (daysTo(r.paid_until) < 0 ? ' <span class="pill red">unpaid</span>' : '') : '<span class="dim">Not recorded</span>';
+    const paidDays = daysTo(r.paid_until);
+    const isPaid = r.paid_until != null && paidDays !== null && paidDays >= 0;
+    const paid = r.paid_until
+      ? prettyDate(r.paid_until) + (paidDays < 0
+          ? ' <span class="pill red">unpaid</span>'
+          : ' <span class="pill green">paid</span>')
+      : '<span class="dim">Not recorded</span>';
     return '<tr class="' + (r.revoked ? "revoked " : "") + (generatedRow ? "generated" : "") + '">' +
       '<td><div class="customer-cell"><span class="avatar">' + esc(initials(name)) + '</span><div><div class="nm">' + esc(name) + '</div>' +
         '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + (generatedRow ? ' · generated' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + (generatedRow ? '<div class="sub">Not counted as a customer or profit.</div>' : '') + '</div></div></td>' +
@@ -418,7 +448,7 @@ function render() {
       '<td class="usage-cell">' + quotaCell(r) + '</td>' +
       '<td class="paid-cell">' + paid + '</td>' +
       '<td class="link-cell"><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span><span class="link-caption"><svg viewBox="0 0 20 20" fill="none"><path d="M7.5 12.5 12.5 7.5M6 14a3 3 0 0 1 0-4.2l1.6-1.6M14 6a3 3 0 0 1 0 4.2l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> private link</span></td>' +
-      '<td class="actions-cell">' + (r.revoked || generatedRow ? "" : actionButton("renew", r.token, "Renew / Check")) + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, generatedRow ? "Convert/Edit" : "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
+      '<td class="actions-cell">' + (r.revoked || generatedRow ? "" : actionButton("renew", r.token, "Renew / Check")) + (generatedRow ? "" : actionButton(isPaid ? "unpaid" : "paid", r.token, isPaid ? "Mark unpaid" : "Mark paid")) + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, generatedRow ? "Convert/Edit" : "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
       '</tr>';
   }).join("") : '<tr><td colspan="7" class="loading">No customers match these filters.</td></tr>';
 }
@@ -640,7 +670,8 @@ $("#rows").addEventListener("click", async (e) => {
       const response = await fetch("/admin/link/" + b.dataset.t + "?action=renew");
       const j = await response.json().catch(() => ({}));
       if (response.ok && j.ok) {
-        toast(name + " — " + j.message + (j.usage_message ? " · " + j.usage_message : ""), 6000);
+        toast(name + " — " + j.message + (j.usage_message ? " · " + j.usage_message : "") +
+          (j.marked_paid ? " · marked paid through " + prettyDate(j.paid_until) : ""), 6000);
         await load();
         return;
       }
@@ -649,6 +680,29 @@ $("#rows").addEventListener("click", async (e) => {
       toast("Could not check " + name + ": " + err.message, 6000);
     }
     b.disabled = false; b.textContent = "Renew / Check";
+    return;
+  }
+  if (a === "paid" || a === "unpaid") {
+    const row = DATA.find((r) => r.token === b.dataset.t);
+    const name = (row && (row.customer || row.label)) || "this customer";
+    if (a === "unpaid" && !confirm("Mark " + name + " as not paid? This clears their paid-through date.")) return;
+    const label = b.textContent;
+    b.disabled = true; b.textContent = a === "paid" ? "Saving…" : "Clearing…";
+    try {
+      const response = await fetch("/admin/link/" + b.dataset.t + "?action=" + a);
+      const j = await response.json().catch(() => ({}));
+      if (response.ok && j.ok) {
+        toast(a === "paid"
+          ? name + " marked paid through " + prettyDate(j.paid_until)
+          : name + " marked unpaid", 5000);
+        await load();
+        return;
+      }
+      toast("Could not update " + name + ": " + (j.error || ("HTTP " + response.status)), 6000);
+    } catch (err) {
+      toast("Could not update " + name + ": " + err.message, 6000);
+    }
+    b.disabled = false; b.textContent = label;
     return;
   }
   if (a === "revoke") {

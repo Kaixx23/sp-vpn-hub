@@ -8,3 +8,4 @@ preview.db*
 *.backup.json
 customers.json
 .env
+.preview/
