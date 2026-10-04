@@ -128,6 +128,11 @@ console.log("\n[5] /admin — the page itself");
   ok(html.includes("<!doctype html>"), "serves a full HTML document");
   ok(html.includes("reseller dashboard"), "renders the dashboard title");
   ok(html.includes("dashboard.json"), "client fetches dashboard.json");
+  const inlineScript = html.match(/<script>([\s\S]*?)<\/script>/)?.[1] || "";
+  ok(inlineScript.includes("const $ = (s) => document.querySelector(s);"), "inline client JS is not entity-escaped");
+  try { new Function(inlineScript); ok(true, "inline client JS parses in the browser"); }
+  catch (err) { ok(false, "inline client JS parses in the browser: " + err.message); }
+  ok(html.includes("[hidden]{display:none!important}"), "hidden modal and toast stay hidden on first paint");
   ok(!html.includes("<script src="), "no external script tags (no CDN — loads from China)");
   ok(!html.includes("http://") && !html.includes("https://cdn"), "no CDN references at all");
   ok(html.includes("Refresh quota"), "has the refresh control");
