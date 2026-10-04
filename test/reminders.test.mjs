@@ -5,7 +5,6 @@
 import worker, { fetchSubscription, quotaSummary } from "../sp-vpn-worker.js";
 import * as store from "../token-store.js";
 import { daysUntil, dueReminders, makeChannel, messageFor, runReminders, runRemindersFromEnv } from "../reminders.js";
-import { ADMIN_ENV, ADMIN_COOKIE } from "./admin-session.mjs";
 
 let failures = 0, checks = 0;
 const ok = (cond, msg) => {
@@ -169,11 +168,11 @@ console.log("\n[8] end-to-end through the worker route");
   await store.ensureInit();
   await store.mint("https://panel.example/sub?who=bao", "Bao", { customer: "Bao", supplier_expires: day(2) });
   const HOST = "https://sp.example.com";
-  const run = await worker.fetch(new Request(HOST + "/admin/reminders", { method: "POST", body: "", headers: { cookie: ADMIN_COOKIE } }), ADMIN_ENV, {});
+  const run = await worker.fetch(new Request(HOST + "/admin/reminders", { method: "POST", body: "" }), {}, {});
   const jr = JSON.parse(await run.text());
   ok(run.status === 200, `POST /admin/reminders 200 (got ${run.status})`);
   ok(jr.sent.length >= 1, `route sent ${jr.sent.length} reminder(s)`);
-  const hist = await worker.fetch(new Request(HOST + "/admin/reminders", { headers: { cookie: ADMIN_COOKIE } }), ADMIN_ENV, {});
+  const hist = await worker.fetch(new Request(HOST + "/admin/reminders"), {}, {});
   const jh = JSON.parse(await hist.text());
   ok(hist.status === 200 && jh.count >= 1, `GET /admin/reminders returns history (${jh.count})`);
 }

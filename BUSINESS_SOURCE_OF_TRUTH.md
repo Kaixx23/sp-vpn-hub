@@ -46,17 +46,6 @@ This branch includes the working business system:
 
 Production secrets live in Netlify environment variables. Do **not** commit tokens or credentials into Git.
 
-Admin dashboard lock (**required** — without it every `/admin` route refuses to
-open, because it would otherwise expose customer data and private `?t=` tokens
-to anyone with the URL):
-
-```env
-ADMIN_PASSWORD=a-long-random-password
-```
-
-Sign in at `/admin/login`; the session cookie lasts 30 days. Sign out from the
-button in the dashboard header or by visiting `/admin/logout`.
-
 Minimum required storage variables:
 
 ```env
