@@ -16,6 +16,8 @@ const P = {
   chen:  panel(3.2, 196.1, 200, day(-4)),
   devi:  panel(24.8, 30.1, 100, day(21)),
   emil:  panel(1.1, 4.4, 200, day(140)),
+  riz:   panel(20.28, 0, 512, day(30)),   // the 512GB / 12 RMB plan
+  kai:   panel(150.9, 300.2, 1024, day(60)), // the 1024GB / 16 RMB plan
 };
 createServer((q, r) => {
   const w = new URL(q.url, "http://x").searchParams.get("who");

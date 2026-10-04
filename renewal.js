@@ -1,0 +1,265 @@
+// ============================================================================
+// RENEWAL — re-check ONE customer's supplier subscription.
+//
+// The reseller renews a customer's plan on the supplier panel by hand. This
+// module is the other half of that: it re-reads that single customer's saved
+// supplier subscription, persists whatever the supplier now reports (expiry,
+// total quota, used quota, checked-at) and reports two things in plain words:
+//
+//   1. did the expiry move?          -> "Renewed: expiry updated to <date>"
+//                                       "Checked: expiry remains <date>"
+//   2. how did usage move since the
+//      previous SUCCESSFUL check?    -> "+5.0 GB used since last check"
+//                                       "No new usage since last check"
+//                                       "Usage reset by 190.0 GB"
+//
+// It NEVER buys or renews anything. It is a read of the supplier plus a write
+// to our own row — nothing more.
+//
+// Design notes that matter:
+//
+//  * FAILURE IS A NO-OP. If the supplier cannot be reached, or replies without
+//    a parsable STATUS line, nothing is written. The row keeps its previous
+//    expiry, quota, used_gb and usage_delta_gb, so a flaky panel can never
+//    destroy the last known-good numbers or the delta the dashboard is showing.
+//
+//  * THE PREVIOUS VALUE IS THE ROW ITSELF. Because a failed check writes
+//    nothing, `row.used_gb` is by definition the used-GB of the immediately
+//    previous *successful* check. `prev_used_gb` is persisted alongside the
+//    delta purely so the number stays auditable after the fact.
+//
+//  * NO SUPPLIER URL EVER LEAVES. Errors are scrubbed of the URL and its host
+//    before they are returned, because these strings are rendered straight
+//    into the admin dashboard.
+//
+//  * ONE CODE PATH. The per-customer "Renew / Check" button, the global
+//    "Refresh data" button and the reminder cron all call checkCustomerRow(),
+//    so the usage delta is calculated and persisted identically by all three.
+// ============================================================================
+
+/**
+ * Usage moves below this many GB count as "no new usage". Supplier panels
+ * report to 2 decimals, so anything under half of the last digit is noise.
+ */
+export const USAGE_EPSILON = 0.005;
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+const numOrNull = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * Classify a persisted delta.
+ *   "first"    — no previous successful check, so there is nothing to compare
+ *   "same"     — usage did not move
+ *   "increase" — the customer used more data
+ *   "reset"    — the supplier reset the counter (typical right after a renewal)
+ */
+export function usageKind(deltaGb) {
+  const d = numOrNull(deltaGb);
+  if (d === null) return "first";
+  if (Math.abs(d) < USAGE_EPSILON) return "same";
+  return d > 0 ? "increase" : "reset";
+}
+
+/**
+ * The sentence the dashboard shows under "Data usage".
+ * `null` on the very first successful check — there is no previous value, so
+ * claiming "no new usage" would be a lie.
+ */
+export function usageMessage(deltaGb) {
+  const kind = usageKind(deltaGb);
+  if (kind === "first") return null;
+  if (kind === "same") return "No new usage since last check";
+  const d = Number(deltaGb);
+  if (kind === "increase") return "+" + d.toFixed(1) + " GB used since last check";
+  return "Usage reset by " + Math.abs(d).toFixed(1) + " GB";
+}
+
+/** The sentence the dashboard shows after a Renew / Check. */
+export function renewalMessage(expiryChanged, expiry) {
+  if (!expiry) {
+    return expiryChanged
+      ? "Renewed: expiry updated (the supplier did not report a date)"
+      : "Checked: the supplier still reports no expiry date";
+  }
+  return expiryChanged
+    ? "Renewed: expiry updated to " + expiry
+    : "Checked: expiry remains " + expiry;
+}
+
+/**
+ * Strip the supplier URL (and its host) out of anything we are about to hand
+ * back to the dashboard. The whole point of the opaque-token design is that
+ * the supplier URL never leaves the server — an error string is not an excuse.
+ */
+export function scrubSupplier(text, supplierUrl) {
+  let out = String(text ?? "");
+  const url = String(supplierUrl || "");
+  if (url) {
+    out = out.split(url).join("the supplier subscription");
+    let host = "";
+    try { host = new URL(url).host; } catch (e) { host = ""; }
+    if (host) out = out.split(host).join("the supplier");
+  }
+  // Belt and braces: no scheme-prefixed URL of any kind survives.
+  return out.replace(/[a-z0-9+.-]+:\/\/\S+/gi, "<link>").slice(0, 300);
+}
+
+/**
+ * Re-check ONE row against its supplier and persist the result.
+ *
+ * @param row   the full store row (must carry token + supplier_url)
+ * @param deps  { fetchSubscription, quotaSummary, updateRow, now? }
+ * @returns on success
+ *   { ok: true, row, previous, expiryChanged, usageDeltaGb, usageKind,
+ *     message, usageMessage }
+ * on failure (nothing was written)
+ *   { ok: false, code, error }
+ */
+
+// Decide the new paid-through date after a check, or null to leave it alone.
+// Marks the customer paid only when the supplier expiry actually moved FORWARD
+// into the future — a date that merely stayed put, or one already in the past,
+// means nothing was renewed and nothing was paid for.
+export function paidThroughOnRenewal({ previousExpiry, newExpiry, paidUntil, now }) {
+  const at = (d) => {
+    if (!d) return null;
+    const t = Date.parse(String(d).slice(0, 10) + "T00:00:00Z");
+    return Number.isNaN(t) ? null : t;
+  };
+  const next = at(newExpiry);
+  if (next === null) return null;
+
+  const today = Date.parse(
+    (now instanceof Date ? now : new Date()).toISOString().slice(0, 10) + "T00:00:00Z",
+  );
+  if (next < today) return null; // renewed into the past is not a renewal
+
+  const prev = at(previousExpiry);
+  if (prev !== null && next <= prev) return null; // expiry did not move forward
+
+  const paid = at(paidUntil);
+  if (paid !== null && paid >= next) return null; // already paid at least this far
+
+  return String(newExpiry).slice(0, 10);
+}
+
+export async function checkCustomerRow(row, deps) {
+  const { fetchSubscription, quotaSummary, updateRow } = deps;
+  const now = deps.now || (() => new Date());
+
+  if (!row || !row.token) {
+    return { ok: false, code: 404, error: "unknown customer" };
+  }
+  if (row.revoked) {
+    return {
+      ok: false,
+      code: 409,
+      error: "this link is revoked — nothing was checked. Rotate or re-create it first.",
+    };
+  }
+
+  const supplierUrl = String(row.supplier_url || "");
+  if (!supplierUrl) {
+    return { ok: false, code: 422, error: "no supplier subscription is saved for this customer" };
+  }
+  // Two shapes are not checkable, and both are normal: a "direct:" blob of
+  // pasted nodes, and a bare node link (vless://, trojan://, vmess://) minted
+  // straight from /admin/mint. Neither has a supplier panel behind it, so
+  // there is no expiry or quota to read — say so instead of failing obscurely.
+  if (supplierUrl.startsWith("direct:") || !/^https?:\/\//i.test(supplierUrl)) {
+    return {
+      ok: false,
+      code: 422,
+      error: "this customer holds a direct node list, not a supplier subscription — there is nothing to check",
+    };
+  }
+
+  let summary = null;
+  try {
+    const { status } = await fetchSubscription(supplierUrl);
+    summary = quotaSummary(status);
+  } catch (e) {
+    return {
+      ok: false,
+      code: 502,
+      error: "could not check the supplier subscription: " +
+        scrubSupplier(e && e.message ? e.message : e, supplierUrl),
+    };
+  }
+  if (!summary) {
+    return {
+      ok: false,
+      code: 502,
+      error: "the supplier replied but reported no quota or expiry — nothing was changed",
+    };
+  }
+
+  const previousUsed = numOrNull(row.used_gb);
+  const previousExpiry = row.supplier_expires || null;
+  const previousTotal = numOrNull(row.total_gb);
+
+  const used = round2(summary.up + summary.down);
+  // null on the first successful check: there is genuinely nothing to compare.
+  const delta = previousUsed === null ? null : round2(used - previousUsed);
+  const checkedAt = now().toISOString();
+
+  const patch = {
+    supplier_expires: summary.exp || null,
+    total_gb: summary.tot,
+    used_gb: used,
+    prev_used_gb: previousUsed,
+    usage_delta_gb: delta,
+    checked_at: checkedAt,
+  };
+
+  // Renewing with the supplier pushes the expiry date forward — that IS the
+  // proof the customer paid, so the billing side should follow automatically
+  // instead of leaving the row sitting in the "unpaid" pile until someone
+  // edits it by hand. Only ever moves paid_until forwards: a manual entry that
+  // already reaches further out (a customer paid 3 months up front) is kept.
+  const paidUntilUpdate = paidThroughOnRenewal({
+    previousExpiry,
+    newExpiry: patch.supplier_expires,
+    paidUntil: row.paid_until || null,
+    now: now(),
+  });
+  if (paidUntilUpdate) patch.paid_until = paidUntilUpdate;
+
+  let updated;
+  try {
+    updated = await updateRow(row.token, patch);
+  } catch (e) {
+    return {
+      ok: false,
+      code: 500,
+      error: "the supplier was read but the result could not be saved: " +
+        scrubSupplier(e && e.message ? e.message : e, supplierUrl),
+    };
+  }
+  if (!updated) return { ok: false, code: 404, error: "unknown customer" };
+
+  const expiryChanged = (previousExpiry || null) !== (patch.supplier_expires || null);
+
+  return {
+    ok: true,
+    row: updated,
+    previous: {
+      supplier_expires: previousExpiry,
+      used_gb: previousUsed,
+      total_gb: previousTotal,
+      paid_until: row.paid_until || null,
+    },
+    expiryChanged,
+    markedPaid: Boolean(paidUntilUpdate),
+    paidUntil: updated.paid_until ?? null,
+    usageDeltaGb: delta,
+    usageKind: usageKind(delta),
+    message: renewalMessage(expiryChanged, patch.supplier_expires),
+    usageMessage: usageMessage(delta),
+  };
+}
