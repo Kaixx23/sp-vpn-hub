@@ -365,6 +365,9 @@ npm test
   cron idempotency (three passes in one day send once; tomorrow fires again),
   a dead channel not losing the reminder, and the worker routes.
 - `test/leak-proof.mjs` — the before/after attack, side by side.
+- `test/cf-node-probe.test.mjs` — **87 checks** for the node probe: parsers, VLESS/Trojan bytes,
+  WebSocket framing, IP sampling, labels, scoring, and a full end-to-end run against a local fake
+  edgetunnel (TLS → WebSocket → VLESS/Trojan), including wrong-UUID rejection and no secret leaks.
 - `test/bench.mjs` — the latency numbers below.
 
 ## Rebuilding the patched worker
@@ -413,6 +416,32 @@ avoid Node cold starts.
 
 Note: **legacy tokens cannot be revoked.** They carry their own URL, so there's
 nothing to look up. That's the reason to migrate them rather than leave them.
+
+---
+
+## Running your own nodes (edgetunnel research + node probe)
+
+**[`docs/edgetunnel-research.md`](docs/edgetunnel-research.md)** covers:
+- how cmliu/edgetunnel turns a Cloudflare Worker into VLESS nodes, with code references;
+- what the current subscription contains;
+- why the best entry IP depends on the customer's ISP (Mobile → HKG, Telecom → SIN, Unicom → US West);
+- the free-plan capacity math for 50–200 customers;
+- Cloudflare's terms and the October 2026 enforcement wave;
+- the recommended long-term setup: your own VPS nodes behind a multi-user panel, with each customer's panel
+  link plugged into this hub as the supplier URL. That gives every customer a unique UUID, which is the gap
+  described under "What this does NOT fix" below.
+
+**`bin/cf-node-probe.mjs`** ranks Cloudflare entry IPs for an edgetunnel Worker, **measured from the network
+it runs on**. Run it on a mainland-China line, VPN off, at the evening peak. It needs no dependencies.
+
+```bash
+npm run probe -- --sub "https://<worker-domain>/sub?token=<TOKEN>" --sample 300 --isp mobile --top 5
+```
+
+It checks each IP in three stages: TCP ping, then a TLS edge trace (which Cloudflare colo the IP lands on),
+then real VLESS sessions through your Worker (real delay, ProxyIP health, download speed). It writes the
+winners as edgetunnel `ADD.txt` lines such as `104.18.x.x:443#香港•移动 CF01`. The carrier word means this hub
+groups them automatically. The UUID and token are never written to disk.
 
 ---
 

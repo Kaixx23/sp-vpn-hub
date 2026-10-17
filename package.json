@@ -5,9 +5,10 @@
   "private": true,
   "scripts": {
     "patch": "node bin/apply-patch.mjs",
-    "test": "node test/full-proof.mjs && node test/opaque-token.test.mjs && node test/dashboard.test.mjs && node test/reminders.test.mjs && node test/leak-proof.mjs",
+    "test": "node test/full-proof.mjs && node test/opaque-token.test.mjs && node test/dashboard.test.mjs && node test/reminders.test.mjs && node test/leak-proof.mjs && node test/cf-node-probe.test.mjs",
     "dev": "node --watch bin/server.mjs",
-    "demo": "node bin/demo-supplier.mjs"
+    "demo": "node bin/demo-supplier.mjs",
+    "probe": "node bin/cf-node-probe.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0"

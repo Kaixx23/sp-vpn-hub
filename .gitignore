@@ -2,3 +2,9 @@ node_modules/
 tokens.db
 tokens.db-journal
 *.log
+
+# cf-node-probe / CloudflareSpeedTest outputs (measurements; keep them out of git)
+best-ADD.txt
+*-ADD.txt
+*-report.json
+result.csv
