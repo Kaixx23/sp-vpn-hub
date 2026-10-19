@@ -152,7 +152,13 @@ export function dashboardPage(host = "") {
         <h2 id="customers-title">Customer links</h2>
         <p class="panel-subtitle">Check updates supplier dates only. Use Pay to record each customer’s payment separately.</p>
       </div>
-      <div class="tracked-count"><strong id="activeCount">—</strong><span>accounts tracked</span></div>
+      <div class="panel-heading-side">
+        <button type="button" id="find-shared" class="btn btn-secondary" title="Read-only scan: find customers backed by the same supplier subscription">
+          <span class="btn-symbol" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="M13.5 16.2v-1.1a3 3 0 0 0-3-3H5.8a3 3 0 0 0-3 3v1.1M8.2 9.1a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM13.1 3.3a3 3 0 0 1 0 5.8M14.2 12.2h.8a3 3 0 0 1 3 3v1" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/></svg></span>
+          <span class="btn-label">Find shared links</span>
+        </button>
+        <div class="tracked-count"><strong id="activeCount">—</strong><span>accounts tracked</span></div>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -270,6 +276,17 @@ export function dashboardPage(host = "") {
     </form>
   </div>
 </div>
+<div id="shared-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="shared-title">
+  <div class="sheet shared-sheet">
+    <div class="sheet-heading">
+      <div><p class="eyebrow"><span class="eyebrow-line"></span> SHARED SUBSCRIPTIONS</p><h2 id="shared-title">Find shared links</h2><p id="shared-help" class="sheet-help">Read-only scan of saved customer records. Nothing is changed, renewed or revoked.</p></div>
+      <button type="button" id="shared-close" class="icon-button" aria-label="Close dialog">×</button>
+    </div>
+    <div id="shared-body" aria-live="polite"></div>
+    <div class="macts"><button type="button" id="shared-done" class="btn btn-primary">Done</button></div>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden role="status"></div>
 <script>${scriptEsc(CLIENT)}</script>
 </body></html>`;
@@ -342,6 +359,30 @@ html,body{max-width:100%;overflow-x:clip}
 .tablewrap table{min-width:860px}
 .toast{right:12px;left:12px;max-width:none}
 }
+.panel-heading-side{display:flex;align-items:center;gap:16px;padding-bottom:2px;flex-wrap:wrap}
+.shared-users-btn{margin-top:7px}
+.shared-sheet{max-width:640px}
+.shared-state{padding:26px 12px;text-align:center;color:var(--muted);font-size:12px;line-height:1.65}
+.shared-note{margin-top:14px;padding:11px 13px;border:1px solid var(--line);border-radius:10px;background:rgba(10,8,9,.62);color:var(--muted);font-size:11px;line-height:1.6}
+.shared-group{border:1px solid var(--line);border-radius:13px;background:rgba(10,8,9,.48);padding:14px 15px;margin-bottom:12px}
+.shared-group-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.shared-group-head .account-name{font-size:13px}
+.shared-count{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--mint);background:var(--mint-soft);border-radius:999px;padding:5px 9px;white-space:nowrap}
+.shared-members{list-style:none;margin:0;padding:0}
+.shared-member{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line);font-size:11px;line-height:1.5;flex-wrap:wrap}
+.shared-member:last-child{border-bottom:0}
+.shared-member.shared-selected{background:rgba(255,77,87,.08);border-radius:9px;padding-left:10px;padding-right:10px;border-bottom-color:transparent;margin-bottom:2px}
+.shared-member .who{min-width:130px;font-weight:750;color:var(--text)}
+.shared-member .who .sub{font-weight:400;margin-top:2px}
+.shared-member .meta{flex:1;color:var(--muted);min-width:160px}
+.shared-member .meta b{color:var(--muted-strong);font-weight:700}
+.shared-revoked{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+.shared-revoked summary{cursor:pointer;color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;padding:4px 0}
+.shared-revoked .shared-member{opacity:.65}
+.shared-warning{display:flex;gap:9px;align-items:flex-start;padding:10px 12px;border:1px solid rgba(247,201,107,.35);border-radius:10px;background:rgba(247,201,107,.08);color:#f9d98d;font-size:11px;line-height:1.55;margin-bottom:9px}
+.shared-warning .pill{flex:none}
+.shared-retry{margin-top:10px}
+@media(max-width:760px){.panel-heading-side{gap:10px}.shared-sheet{padding:22px 16px}.shared-member{gap:7px}.shared-member .meta{min-width:100%;flex-basis:100%}}
 [hidden]{display:none!important}
 `;
 
@@ -495,7 +536,7 @@ function render() {
     const paid = paymentCell(r);
     return '<tr class="' + (r.revoked ? "revoked " : "") + (generatedRow ? "generated" : "") + '">' +
       '<td><div class="customer-cell"><span class="avatar">' + esc(initials(name)) + '</span><div><div class="nm">' + esc(name) + '</div>' +
-        (generatedRow ? '' : '<div class="customer-type"><span class="pill ' + (r.customer_type === 'shared' ? 'amber">Shared link' : 'gray">Individual') + '</span></div><div class="supplier-account"><span class="sub">Supplier account</span>' + accountCell(r) + '</div>') +
+        (generatedRow ? '' : '<div class="customer-type"><span class="pill ' + (r.customer_type === 'shared' ? 'amber">Shared link' : 'gray">Individual') + '</span></div><div class="supplier-account"><span class="sub">Supplier account</span>' + accountCell(r) + '<div class="shared-users-btn">' + actionButton("shared-users", r.token, "Find shared users") + '</div></div>') +
         '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + (generatedRow ? ' · generated' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + (generatedRow ? '<div class="sub">Not counted as a customer or profit.</div>' : '') + '</div></div></td>' +
       '<td class="plan-cell">' + esc(r.plan || (generatedRow ? "Not a customer record" : "No plan set")) + '<div class="sub">' + (generatedRow ? "Created by quota/tool page" : (esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : ""))) + '</div></td>' +
       '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + esc(prettyDate(r.supplier_expires) || "Not checked") + '</div>' + (r.revoked || generatedRow ? "" : actionButton("check", r.token, "Check")) + '</td>' +
@@ -818,6 +859,7 @@ $("#rows").addEventListener("click", async (e) => {
     return;
   }
   if (a === "edit") { openModal(DATA.find((r) => r.token === b.dataset.t)); return; }
+  if (a === "shared-users") { openShared(b, b.dataset.t); return; }
   if (b.disabled) return;
   if (a === "pay") { openPay(DATA.find((r) => r.token === b.dataset.t)); return; }
   if (a === "check") {
@@ -888,6 +930,130 @@ $("#rows").addEventListener("click", async (e) => {
     try { await navigator.clipboard.writeText(location.origin + "/all/SP%20VPN?t=" + j.newToken); toast("Rotated — new link copied"); }
     catch (err) { toast("Rotated: " + j.newToken); }
   }
+});
+
+// ---- Find shared links / Find shared users (read-only discovery) -----------
+let sharedSeq = 0, sharedContext = null, sharedOpener = null;
+
+function sharedLoading() {
+  $("#shared-body").innerHTML = '<div class="loading"><span class="loader"></span> Scanning saved customer records…</div>';
+}
+
+function sharedErrorBox() {
+  // Keep sharedContext intact so Retry re-runs the same selected customer.
+  $("#shared-body").innerHTML =
+    '<div class="shared-state">Could not run the shared-link scan.<br>No customer data was changed.</div>' +
+    '<div class="macts"><button type="button" id="shared-retry" class="btn btn-secondary shared-retry">↻ Try again</button></div>';
+}
+
+function sharedWarnings(list) {
+  if (!list || !list.length) return "";
+  return list.map((u) =>
+    '<div class="shared-warning"><span class="pill amber">Needs review</span><div>' +
+    esc(u.name || "Unnamed customer") + " — " + esc(u.reason_detail || "The saved link could not be resolved.") +
+    "</div></div>").join("");
+}
+
+function sharedMember(m) {
+  const paid = m.paid_state === "paid";
+  return '<li class="shared-member' + (m.selected ? " shared-selected" : "") + '">' +
+    '<div class="who">' + esc(m.name) + (m.selected ? ' <span class="pill green">Selected</span>' : "") +
+    '<div class="sub">' + esc(m.customer_type === "shared" ? "Shared link record" : "Individual record") +
+    (m.revoked ? ' · <span class="pill gray">revoked</span>' : "") + "</div></div>" +
+    '<div class="meta"><b>' + esc(m.plan || "No plan set") + "</b>" +
+    '<div class="sub">Payment: <span class="pill ' + (paid ? 'green">Paid' : 'red">Unpaid') + "</span> " +
+    esc(m.paid_until ? "until " + m.paid_until : "no payment recorded") + "</div>" +
+    '<div class="sub">Supplier expiry (last checked): ' + esc(m.supplier_expires || "Not checked") + "</div></div></li>";
+}
+
+function sharedGroup(g) {
+  const head = '<div class="shared-group-head"><div><div class="account-name">' + esc(g.account.name) + "</div>" +
+    '<div class="sub">' + esc(g.account.host) + (g.account.email && g.account.email !== g.account.name ? " · " + esc(g.account.email) : "") + "</div></div>" +
+    '<span class="shared-count">' + g.active_count + " active · " + g.revoked_count + " revoked</span></div>";
+  const members = '<ul class="shared-members">' + g.active.map(sharedMember).join("") + "</ul>";
+  const revoked = g.revoked.length
+    ? '<details class="shared-revoked"><summary>Revoked / old records (' + g.revoked.length + ") — not counted as active people</summary>" +
+      '<ul class="shared-members">' + g.revoked.map(sharedMember).join("") + "</ul></details>"
+    : "";
+  return '<div class="shared-group">' + head + members + revoked + "</div>";
+}
+
+function renderSharedReport(j, token) {
+  let html = sharedWarnings(j.unresolved);
+  if (token) {
+    if (j.selected && j.selected.resolved === false) {
+      html += '<div class="shared-warning"><span class="pill amber">Needs review</span><div>' +
+        esc(j.selected.name) + " — " + esc(j.selected.reason_detail || "The saved link could not be resolved.") +
+        "<br>This record is not claimed to have an independent subscription.</div></div>";
+    } else if (j.group) {
+      const others = j.other_active_count;
+      html += '<div class="shared-state" style="padding:6px 2px 12px;text-align:left">' +
+        (others === 0
+          ? "<b>No other active customer records found</b> sharing this supplier link."
+          : "<b>" + others + " other active customer record" + (others === 1 ? "" : "s") +
+            "</b> share this supplier link. A supplier renewal reaches everyone listed here together.") +
+        "</div>" + sharedGroup(j.group);
+    } else {
+      html += '<div class="shared-state">No other active customer records found.</div>';
+    }
+  } else if (j.groups && j.groups.length) {
+    html += '<div class="shared-state" style="padding:4px 2px 12px;text-align:left">' +
+      j.groups.length + " supplier subscription" + (j.groups.length === 1 ? "" : "s") +
+      " are used by two or more active customer records. Separate private links do not separate the supplier subscription: each group is renewed together.</div>";
+    html += j.groups.map(sharedGroup).join("");
+  } else {
+    html += '<div class="shared-state">No shared supplier subscriptions found. Every active customer record currently resolves to its own supplier subscription.</div>';
+  }
+  html += '<div class="shared-note">' + esc(j.note || "") + "</div>";
+  $("#shared-body").innerHTML = html;
+}
+
+async function runSharedScan() {
+  const ctx = sharedContext;
+  const mySeq = ++sharedSeq;
+  sharedLoading();
+  try {
+    const path = "/admin/shared-users" + (ctx && ctx.token ? "?token=" + encodeURIComponent(ctx.token) : "");
+    const r = await fetch(path);
+    const j = await r.json().catch(() => ({}));
+    if (mySeq !== sharedSeq || $("#shared-modal").hidden) return; // closed or superseded
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    renderSharedReport(j, ctx && ctx.token);
+  } catch (err) {
+    if (mySeq !== sharedSeq || $("#shared-modal").hidden) return;
+    sharedErrorBox();
+  }
+}
+
+function openShared(button, token) {
+  sharedOpener = button;
+  sharedContext = token ? { token: token } : { all: true };
+  $("#shared-title").textContent = token ? "Find shared users" : "Find shared links";
+  $("#shared-help").textContent = token
+    ? "Read-only view of the saved customer records backed by the same supplier subscription."
+    : "Read-only scan of every saved customer record, ignoring the current search and filters.";
+  $("#shared-modal").hidden = false;
+  runSharedScan();
+}
+
+function closeShared() {
+  sharedSeq++; // any reply still in flight is now stale and must not render
+  $("#shared-modal").hidden = true;
+  if (sharedOpener && typeof sharedOpener.focus === "function") {
+    try { sharedOpener.focus(); } catch (e) {}
+  }
+  sharedOpener = null;
+}
+
+$("#find-shared").addEventListener("click", (e) => openShared(e.currentTarget, null));
+$("#shared-close").addEventListener("click", closeShared);
+$("#shared-done").addEventListener("click", closeShared);
+$("#shared-modal").addEventListener("click", (e) => { if (e.target === $("#shared-modal")) closeShared(); });
+$("#shared-body").addEventListener("click", (e) => {
+  if (e.target.closest("#shared-retry")) runSharedScan();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#shared-modal").hidden) closeShared();
 });
 
 

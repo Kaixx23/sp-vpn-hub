@@ -17,6 +17,7 @@ import {
 } from "./token-store.js";
 import { dashboardPage, summarise, isSystemGeneratedRow } from "./dashboard.js";
 import { customerType, validCustomerType, supplierKey, supplierAccounts, resolveCustomerLink, validPaidUntil } from "./customer-accounts.js";
+import { sharedUsersReport, sharedUsersForToken } from "./shared-users.js";
 import { PLAN_CATALOG, profitOf } from "./plans.js";
 import { checkCustomerRow, usageKind, usageMessage } from "./renewal.js";
 import { runRemindersFromEnv } from "./reminders.js";
@@ -878,6 +879,10 @@ export default {
             return json({ error: e.status ? e.message : "Could not look up the supplier account." }, e.status || 500);
           }
         }
+        if (path === "/admin/shared-users") {
+          // Discovery is read-only and GET-based; never accept a POST body here.
+          return json({ error: "Shared-user discovery supports GET only." }, 405, { Allow: "GET", "Cache-Control": "no-store" });
+        }
         if (path === "/admin/mint") {
           const type = data.customer_type || "individual";
           if (!validCustomerType(type)) return json({ error: "customer_type must be individual or shared" }, 400);
@@ -1291,6 +1296,28 @@ export default {
         const rows = await storeList();
         const accounts = supplierAccounts(rows);
         return json({ count: rows.length, links: rows.map((r) => redact(r, accounts)) });
+      }
+      if (path === "/admin/shared-users") {
+        // Read-only discovery. No supplier/network calls and no writes happen
+        // anywhere in this path: the helper groups rows already in memory.
+        const noStore = { "Cache-Control": "no-store" };
+        if (request.method !== "GET") {
+          return json({ error: "Shared-user discovery supports GET only." }, 405, { ...noStore, Allow: "GET" });
+        }
+        const tokenParam = url.searchParams.get("token");
+        try {
+          const rows = await storeList();
+          if (tokenParam !== null) {
+            if (!tokenParam.trim()) return json({ error: "token parameter must not be empty." }, 400, noStore);
+            const report = sharedUsersForToken(rows, host, tokenParam.trim());
+            if (!report) return json({ error: "Unknown customer record." }, 404, noStore);
+            return json(report, 200, noStore);
+          }
+          return json(sharedUsersReport(rows, host), 200, noStore);
+        } catch (e) {
+          // Generic, safe message: never echo a supplier URL, token or key.
+          return json({ error: "Could not load customer data. Please try again." }, 500, noStore);
+        }
       }
 
       if (path === "/") return html(homePage());
