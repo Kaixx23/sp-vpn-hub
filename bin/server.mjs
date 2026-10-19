@@ -14,12 +14,13 @@ createServer(async (req, res) => {
   const chunks = [];
   for await (const c of req) chunks.push(c);
   const body = chunks.length ? Buffer.concat(chunks).toString("utf8") : null;
-  const url = `http://localhost:${PORT}${req.url}`;
-  // The worker builds absolute links from x-forwarded-proto, defaulting to
-  // https. Locally that would print "https://localhost:8787" in the client
-  // packs, so set it explicitly. Vercel/Netlify/Cloudflare send it themselves.
+  // Preserve the browser-facing host so copied/shared links also work through
+  // a preview proxy. localhost here would point at the user's own computer.
   const headers = new Headers(req.headers);
-  if (!headers.has("x-forwarded-proto")) headers.set("x-forwarded-proto", "http");
+  const proto = (headers.get("x-forwarded-proto") || "http").split(",")[0].trim();
+  const host = (headers.get("x-forwarded-host") || headers.get("host") || `localhost:${PORT}`).split(",")[0].trim();
+  const url = `${proto}://${host}${req.url}`;
+  headers.set("x-forwarded-proto", proto);
   const r = await worker.fetch(new Request(url, { method: req.method, headers, body }), {}, {});
   res.statusCode = r.status;
   r.headers.forEach((v, k) => res.setHeader(k, v));

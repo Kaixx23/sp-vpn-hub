@@ -60,7 +60,7 @@ console.log("\n[1] summarise() — the renewal maths");
   ok(s.expiring7 === 1, `expiring ≤7d catches the 4-day link (got ${s.expiring7})`);
   ok(s.expiring30 === 1, `expiring 8–30d catches the 20-day link (got ${s.expiring30})`);
   ok(s.unknownExpiry === 1, `unknown expiry surfaced, not counted as healthy (got ${s.unknownExpiry})`);
-  ok(s.unpaid === 1, `unpaid = paid_until in the past (got ${s.unpaid})`);
+  ok(s.unpaid === 2, `unpaid includes missing payments and paid_until in the past (got ${s.unpaid})`);
   ok(s.mrr === 85, `MRR sums ACTIVE prices only, ignoring the revoked 99 (got ${s.mrr})`);
   ok(s.legacy === 1, `legacy links counted (got ${s.legacy})`);
 }
@@ -75,10 +75,12 @@ for (const [who, name, price, paid] of [
   const r = await post("/admin/mint", {
     link: `https://panel.example/sub?who=${who}`,
     customer: name, plan: "200GB / 3mo", price, currency: "USD",
-    billing_cycle: "quarterly", paid_until: paid, label: name, notes: "tg @" + name,
+    billing_cycle: "quarterly", label: name, notes: "tg @" + name,
   });
   const j = JSON.parse(await r.text());
   tokens[who] = j.token;
+  // Historical payments remain valid on upgrade; new payments use Pay.
+  await store.updateRow(j.token, { paid_until: paid });
   ok(r.status === 200 && j.token, `${name}: minted with customer data`);
 }
 
@@ -131,7 +133,9 @@ console.log("\n[5] /admin — the page itself");
   ok(!html.includes("<script src="), "no external script tags (no CDN — loads from China)");
   ok(!html.includes("http://") && !html.includes("https://cdn"), "no CDN references at all");
   ok(html.includes("Refresh quota"), "has the refresh control");
-  ok(html.includes("renew / check"), "has a per-customer renewal check control");
+  ok(html.includes('data-a="check"'), "has a per-customer supplier check control");
+  ok(html.includes('data-a="pay"'), "has a separate per-customer Pay control");
+  ok(html.includes("Shared link"), "offers a shared-link customer type");
   ok(html.includes("GB used since last check"), "shows usage increase from the previous check");
   const alias = await get("/admin/dashboard");
   ok(alias.status === 200, "GET /admin/dashboard alias works too");
@@ -139,10 +143,11 @@ console.log("\n[5] /admin — the page itself");
 
 console.log("\n[6] editing a customer");
 {
-  const r = await post("/admin/customer", { token: tokens.healthy, customer: "Ali Hassan", plan: "500GB / 6mo", price: "30", paid_until: day(180) });
+  const r = await post("/admin/customer", { token: tokens.healthy, customer: "Ali Hassan", plan: "500GB / 6mo", price: "30" });
   ok(r.status === 200, `edit returned 200 (got ${r.status})`);
   const j = JSON.parse(await r.text());
   ok(j.customer === "Ali Hassan" && j.price === 30, `fields persisted (${j.customer}, ${j.price})`);
+  ok(j.paid_until === day(30), "editing customer details never changes their payment");
   const bad = await post("/admin/customer", { token: "0".repeat(48), customer: "X" });
   ok(bad.status === 404, `unknown token -> 404 (got ${bad.status})`);
 }
