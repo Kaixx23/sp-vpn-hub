@@ -20,6 +20,8 @@ export function supplierHost(link) {
   catch { return "direct-node-list"; }
 }
 
+const generatedRow = (r) => !r.customer && ["quota-page", "seller-tool"].includes(r.label);
+
 export function supplierAccounts(rows) {
   const groups = new Map();
   // Keep the original account's identity even when its link has been rotated.
@@ -31,14 +33,17 @@ export function supplierAccounts(rows) {
     groups.get(key).push(row);
   }
   return new Map([...groups].map(([key, members]) => {
-    const owner = members.find((r) => customerType(r) === "individual") || members[0];
-    const named = [owner, ...members].find((r) => r.supplier_account);
+    const customers = members.filter((r) => !generatedRow(r));
+    const candidates = customers.length ? customers : members;
+    const owner = candidates.find((r) => customerType(r) === "individual") || candidates[0];
+    const named = [owner, ...candidates].find((r) => r.supplier_account || r.account_email);
     const label = owner.customer || (!["seller-tool", "quota-page", "legacy"].includes(owner.label) && owner.label);
     return [key, {
       id: owner.token,
-      name: named?.supplier_account || label || "Account " + owner.token.slice(0, 8),
+      name: named?.supplier_account || named?.account_email || label || "Account " + owner.token.slice(0, 8),
+      email: owner.account_email || null,
       host: supplierHost(owner.supplier_url),
-      customers: members.filter((r) => !r.revoked).length,
+      customers: customers.filter((r) => !r.revoked).length,
     }];
   }));
 }
@@ -81,7 +86,7 @@ export function resolveCustomerLink(input, host, rows, type = "individual") {
   if (type === "shared" && (!account || !rows.some((r) => !r.revoked && supplierKey(r.supplier_url) === key))) {
     throw inputError("No active customer uses this link yet. Add the original customer and supplier account first.");
   }
-  return { supplierUrl, account };
+  return { supplierUrl, account, sourceRow: account ? rows.find((r) => r.token === account.id) : null };
 }
 
 /** Pay records a deliberate paid-through date, never a supplier-derived flag. */

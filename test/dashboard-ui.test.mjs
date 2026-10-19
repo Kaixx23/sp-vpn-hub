@@ -36,6 +36,7 @@ test("dashboard: add original, inherit shared account, Check without paying, the
   const dom = new JSDOM(html, {
     url: HOST + "/admin", runScripts: "dangerously", virtualConsole: console,
     beforeParse(window) {
+      window.confirm = () => true;
       window.fetch = async (path, init = {}) => {
         calls.push({ path, method: init.method || "GET", body: init.body || "" });
         assert.ok(String(path).startsWith("/"), "browser requests must be relative, never localhost");
@@ -55,7 +56,7 @@ test("dashboard: add original, inherit shared account, Check without paying, the
   const change = (field, value) => { field.value = value; field.dispatchEvent(new window.Event("change", { bubbles: true })); };
   const input = (field, value) => { field.value = value; field.dispatchEvent(new window.Event("input", { bubbles: true })); };
   const rowFor = (token) => $(`[data-a="pay"][data-t="${token}"]`)?.closest("tr");
-  const paymentPill = (token) => rowFor(token)?.cells[5].querySelector(".pill")?.textContent;
+  const paymentPill = (token) => rowFor(token)?.querySelector(".paid-cell .pill")?.textContent;
   const payRequests = () => calls.filter((c) => c.path.includes("action=pay"));
 
   await waitFor(() => $("#meta").textContent.includes("0 of 0"), "initial render");
@@ -71,6 +72,8 @@ test("dashboard: add original, inherit shared account, Check without paying, the
   input(f.link, SUPPLIER);
   input(f.customer, "Aisha");
   input(f.supplier_account, "Supplier account 01");
+  input(f.account_email, "supplier01@example.test");
+  input(f.account_password, "test-only-panel-password");
   click("#save");
   await waitFor(() => $("#meta").textContent.includes("1 of 1"), "original customer created");
   const first = (await store.listAll()).find((r) => r.customer === "Aisha");
@@ -88,26 +91,31 @@ test("dashboard: add original, inherit shared account, Check without paying, the
   input(f.customer, "Bella");
   await waitFor(() => f.supplier_account.value === "Supplier account 01", "shared-account lookup");
   assert.match($("#shared-account").textContent, /currently used by 1/);
+  assert.equal(f.account_email.value, "supplier01@example.test");
+  assert.equal(f.account_email.readOnly, true);
+  assert.equal(f.account_password.value, "", "lookup never returns the supplier password");
   click("#save");
   await waitFor(() => $("#meta").textContent.includes("2 of 2"), "shared customer created");
   const second = (await store.listAll()).find((r) => r.customer === "Bella");
   assert.equal(second.customer_type, "shared");
   assert.equal(second.supplier_url, first.supplier_url);
   assert.equal(second.supplier_account, "Supplier account 01");
+  assert.equal(second.account_email, first.account_email);
+  assert.equal(second.account_password, first.account_password);
   assert.notEqual(first.token, second.token);
-  assert.match(rowFor(second.token).cells[0].textContent, /Shared link/);
-  assert.match(rowFor(second.token).cells[1].textContent, /Supplier account 01/);
+  assert.match(rowFor(second.token).querySelector(".customer-cell").textContent, /Shared link/);
+  assert.match(rowFor(second.token).querySelector(".supplier-account").textContent, /Supplier account 01/);
   assert.equal(paymentPill(second.token), "Unpaid");
   click("#cancel");
 
   click(`[data-a="check"][data-t="${first.token}"]`);
-  await waitFor(() => rowFor(first.token).cells[3].textContent.includes(expiry), "single check");
+  await waitFor(() => rowFor(first.token).querySelector(".renewal-cell").textContent.includes("35d left"), "single check");
   assert.equal(paymentPill(first.token), "Unpaid");
   assert.equal(paymentPill(second.token), "Unpaid");
   assert.match($("#toast").textContent, /Payment unchanged/);
   expiry = day(60);
   click("#refresh");
-  await waitFor(() => rowFor(second.token).cells[3].textContent.includes(expiry), "bulk refresh");
+  await waitFor(() => rowFor(second.token).querySelector(".renewal-cell").textContent.includes("60d left"), "bulk refresh");
   assert.equal(paymentPill(first.token), "Unpaid");
   assert.equal(paymentPill(second.token), "Unpaid");
   assert.equal(payRequests().length, 0);
@@ -142,6 +150,13 @@ test("dashboard: add original, inherit shared account, Check without paying, the
   click("#pay-save");
   await waitFor(() => paymentPill(first.token) === "Paid", "payment retry");
   assert.equal((await store.backend().get(second.token)).paid_until, day(20));
+  click(`[data-a="unpaid"][data-t="${first.token}"]`);
+  await waitFor(() => paymentPill(first.token) === "Unpaid", "explicit unpaid correction");
+  assert.equal(paymentPill(second.token), "Paid");
+  assert.equal(calls.find((c) => c.path.includes("action=unpaid")).method, "POST");
+  click(`[data-a="pay"][data-t="${first.token}"]`);
+  click("#pay-save");
+  await waitFor(() => paymentPill(first.token) === "Paid", "record corrected payment");
 
   change($("#filter"), "shared");
   assert.match($("#meta").textContent, /1 of 2/);
@@ -157,10 +172,11 @@ test("dashboard: add original, inherit shared account, Check without paying, the
   assert.equal(f.supplier_account.readOnly, false);
   input(f.supplier_account, "New <img src=x onerror=alert(1)> account");
   click("#save");
-  await waitFor(() => $("#modal").hidden, "account rename");
+  await waitFor(() => rowFor(second.token).querySelector(".supplier-account").textContent.includes("New <img"), "account rename");
+  click("#cancel");
   for (const token of [first.token, second.token]) {
-    assert.match(rowFor(token).cells[1].textContent, /New <img/);
-    assert.equal(rowFor(token).cells[1].querySelector("img"), null, "account labels are escaped");
+    assert.match(rowFor(token).querySelector(".supplier-account").textContent, /New <img/);
+    assert.equal(rowFor(token).querySelector(".supplier-account").querySelector("img"), null, "account labels are escaped");
     assert.equal(paymentPill(token), "Paid", "account edits do not alter payments");
   }
   click(`[data-a="edit"][data-t="${second.token}"]`);

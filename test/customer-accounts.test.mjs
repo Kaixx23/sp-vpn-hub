@@ -331,3 +331,31 @@ test("Worker requests use the supplied D1 binding for persistent customer/accoun
   assert.equal(shared.paid_until, day(30));
   assert.equal(rows.find((r) => r.customer === "Runtime original").paid_until, null);
 });
+
+test("existing panel-account email and password are inherited without re-entering them", async () => {
+  await reset();
+  await store.mint(SUPPLIER, "quota-page"); // anonymous checks aren't account owners
+  const first = await mint({
+    link: SUPPLIER, customer: "Original customer", account_email: "supplier01@example.test",
+    account_password: "test-only-account-password",
+  });
+  const preview = await jsonOK(post("/admin/shared-link", { link: first.oneLink }));
+  assert.equal(preview.account.name, "supplier01@example.test");
+  assert.equal(preview.account.email, "supplier01@example.test");
+  assert.equal(preview.account.id, first.token, "anonymous quota checks cannot own the supplier account");
+  assert.equal(preview.account.customers, 1);
+  assert.ok(!JSON.stringify(preview).includes("test-only-account-password"));
+  const second = await mint({
+    link: first.oneLink, customer: "Shared customer", customer_type: "shared",
+    account_email: "wrong@example.test", account_password: "ignore stale form values",
+  });
+  const row = await store.backend().get(second.token);
+  assert.equal(row.account_email, "supplier01@example.test");
+  assert.equal(row.account_password, "test-only-account-password");
+  assert.equal(row.paid_until, undefined);
+  await jsonOK(post("/admin/customer", { token: first.token, account_email: "renamed@example.test" }));
+  await jsonOK(get(`/admin/link/${first.token}?action=delete`));
+  const surviving = await jsonOK(post("/admin/shared-link", { link: second.oneLink }));
+  assert.equal(surviving.account.name, "renamed@example.test");
+  assert.equal(surviving.account.email, "renamed@example.test");
+});
