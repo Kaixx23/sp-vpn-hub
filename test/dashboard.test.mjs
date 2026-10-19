@@ -74,7 +74,7 @@ console.log("\n[1] summarise() — the renewal maths");
   ok(s.expiring7 === 1, `expiring ≤7d catches the 4-day link (got ${s.expiring7})`);
   ok(s.expiring30 === 1, `expiring 8–30d catches the 20-day link (got ${s.expiring30})`);
   ok(s.unknownExpiry === 1, `unknown expiry surfaced, not counted as healthy (got ${s.unknownExpiry})`);
-  ok(s.unpaid === 1, `unpaid = paid_until in the past (got ${s.unpaid})`);
+  ok(s.unpaid === 2, `unpaid includes missing payments and expired paid-through dates (got ${s.unpaid})`);
   ok(s.mrr === 85, `MRR sums ACTIVE prices only, ignoring the revoked 99 (got ${s.mrr})`);
   ok(s.legacy === 1, `legacy links counted (got ${s.legacy})`);
 
@@ -104,10 +104,11 @@ for (const [who, name, price, paid] of [
   const r = await post("/admin/mint", {
     link: `https://panel.example/sub?who=${who}`,
     customer: name, plan: "200GB / 3mo", price, currency: "USD",
-    billing_cycle: "quarterly", paid_until: paid, label: name, notes: "tg @" + name,
+    billing_cycle: "quarterly", label: name, notes: "tg @" + name,
   });
   const j = JSON.parse(await r.text());
   tokens[who] = j.token;
+  await store.updateRow(j.token, { paid_until: paid }); // historical payment fixture
   ok(r.status === 200 && j.token, `${name}: minted with customer data`);
 }
 const anonymousQuotaToken = await store.mint("https://panel.example/sub?who=healthy", "quota-page");
@@ -167,7 +168,8 @@ console.log("\n[5] /admin — the page itself");
   ok(html.includes('id="close"') && html.includes('function closeModal()'), "customer popup has reliable close controls");
   ok(html.includes('e.key === "Escape"') && html.includes('e.target === $("#modal")'), "customer popup closes on Escape and backdrop click");
   ok(html.includes("QR Maker") && html.includes('actionButton("qr"'), "dashboard exposes QR maker and per-row QR buttons");
-  ok(html.includes("Renew / Check"), "has a per-customer renewal check control");
+  ok(html.includes('actionButton("check"'), "has a per-customer supplier check control");
+  ok(html.includes('actionButton("pay"'), "has a separate Pay control");
   ok(html.includes("Here is your official SP Connect link") && html.includes("Thank you for choosing SP Connect! ❤️"),
     "ready-to-send SP Connect message template present in the page");
   ok(html.includes("j.oneLink") && html.includes("📋 Copy ready message") && html.includes("📋 Copy one-link"),
@@ -215,7 +217,7 @@ console.log("\n[5] /admin — the page itself");
 
 console.log("\n[6] editing a customer");
 {
-  const r = await post("/admin/customer", { token: tokens.healthy, customer: "Ali Hassan", plan: "500GB / 6mo", price: "30", paid_until: day(180) });
+  const r = await post("/admin/customer", { token: tokens.healthy, customer: "Ali Hassan", plan: "500GB / 6mo", price: "30" });
   ok(r.status === 200, `edit returned 200 (got ${r.status})`);
   const j = JSON.parse(await r.text());
   ok(j.customer === "Ali Hassan" && j.price === 30, `fields persisted (${j.customer}, ${j.price})`);

@@ -23,6 +23,8 @@ const TOKEN_BYTES = 24; // 24 bytes -> 48 hex chars
 // defaulted so existing rows stay valid.
 export const ADDED_COLUMNS = [
   ["customer", "TEXT"],
+  ["customer_type", "TEXT NOT NULL DEFAULT 'individual'"],
+  ["supplier_account", "TEXT"],
   ["plan", "TEXT"],
   ["price", "REAL"],
   ["currency", "TEXT"],
@@ -52,6 +54,8 @@ export const LINKS_DDL = `CREATE TABLE IF NOT EXISTS links (
   revoked          INTEGER NOT NULL DEFAULT 0,
   created_at       TEXT NOT NULL,
   customer         TEXT,
+  customer_type    TEXT NOT NULL DEFAULT 'individual',
+  supplier_account TEXT,
   plan             TEXT,
   price            REAL,
   currency         TEXT,
@@ -70,7 +74,7 @@ export const LINKS_DDL = `CREATE TABLE IF NOT EXISTS links (
 
 export const COLUMNS = [
   "token", "supplier_url", "label", "revoked", "created_at",
-  "customer", "plan", "price", "currency", "billing_cycle", "paid_until",
+  "customer", "customer_type", "supplier_account", "plan", "price", "currency", "billing_cycle", "paid_until",
   "notes", "supplier_expires", "total_gb", "used_gb", "checked_at",
   "account_email", "account_password", "prev_used_gb", "usage_delta_gb",
 ];
@@ -112,7 +116,7 @@ async function migrate(db, kind) {
   }
 }
 
-const norm = (r) => (r ? { ...r, revoked: !!r.revoked } : null);
+const norm = (r) => (r ? { ...r, customer_type: r.customer_type || "individual", revoked: !!r.revoked } : null);
 
 // ---------------------------------------------------------------- cache ----
 // Sits in front of the backend so a database blip degrades to "serve slightly
@@ -220,7 +224,7 @@ export class LibsqlBackend {
       sql: `INSERT INTO links (${COLUMNS.join(", ")})
             VALUES (${COLUMNS.map(() => "?").join(", ")})
             ON CONFLICT(token) DO UPDATE SET supplier_url=excluded.supplier_url`,
-      args: COLUMNS.map((c) => row[c] ?? null),
+      args: COLUMNS.map((c) => (c === "customer_type" ? row[c] || "individual" : row[c] ?? null)),
     });
   }
   async list() {
@@ -228,14 +232,14 @@ export class LibsqlBackend {
     return r.rows.map(norm);
   }
   async update(token, patch) {
-    const cur = await this.get(token);
-    if (!cur) return null;
-    const next = { ...cur, ...patch };
-    await this.db.execute({
-      sql: `UPDATE links SET ${COLUMNS.filter((c) => c !== "token").map((c) => `${c}=?`).join(", ")} WHERE token=?`,
-      args: [...COLUMNS.filter((c) => c !== "token").map((c) => next[c] ?? null), token],
+    // Update only the requested fields. A quota refresh must not overwrite a
+    // payment (or a customer edit) that was saved while the refresh was running.
+    const cols = COLUMNS.filter((c) => c !== "token" && Object.hasOwn(patch, c));
+    if (cols.length) await this.db.execute({
+      sql: `UPDATE links SET ${cols.map((c) => `${c}=?`).join(", ")} WHERE token=?`,
+      args: [...cols.map((c) => patch[c] ?? null), token],
     });
-    return norm(next);
+    return this.get(token);
   }
   async del(token) {
     const r = await this.db.execute({ sql: "DELETE FROM links WHERE token = ?", args: [token] });
@@ -282,7 +286,7 @@ export class D1Backend {
       .prepare(`INSERT INTO links (${COLUMNS.join(", ")})
                 VALUES (${COLUMNS.map(() => "?").join(", ")})
                 ON CONFLICT(token) DO UPDATE SET supplier_url=excluded.supplier_url`)
-      .bind(...COLUMNS.map((c) => row[c] ?? null))
+      .bind(...COLUMNS.map((c) => (c === "customer_type" ? row[c] || "individual" : row[c] ?? null)))
       .run();
   }
   async list() {
@@ -290,15 +294,12 @@ export class D1Backend {
     return (results || []).map(norm);
   }
   async update(token, patch) {
-    const cur = await this.get(token);
-    if (!cur) return null;
-    const next = { ...cur, ...patch };
-    const cols = COLUMNS.filter((c) => c !== "token");
-    await this.db
+    const cols = COLUMNS.filter((c) => c !== "token" && Object.hasOwn(patch, c));
+    if (cols.length) await this.db
       .prepare(`UPDATE links SET ${cols.map((c) => `${c}=?`).join(", ")} WHERE token=?`)
-      .bind(...cols.map((c) => next[c] ?? null), token)
+      .bind(...cols.map((c) => patch[c] ?? null), token)
       .run();
-    return norm(next);
+    return this.get(token);
   }
   async del(token) {
     const r = await this.db.prepare("DELETE FROM links WHERE token = ?").bind(token).run();
@@ -331,18 +332,19 @@ export function pickBackend(env = {}) {
   return new MemoryBackend();
 }
 
-export function backend() {
+export function backend(runtimeEnv = {}) {
   if (!_backend) {
-    // `process` may not exist (Cloudflare Workers) — never throw here.
+    // D1 bindings arrive on the Worker request, not process.env. Node runtimes
+    // still use process.env; an explicit test/local backend remains untouched.
     let env = {};
     try { env = (typeof process !== "undefined" && process.env) || {}; } catch (e) { env = {}; }
-    _backend = pickBackend(env);
+    _backend = pickBackend({ ...env, ...runtimeEnv });
   }
   return _backend;
 }
 
-export async function ensureInit() {
-  if (!_initPromise) _initPromise = backend().init();
+export async function ensureInit(runtimeEnv) {
+  if (!_initPromise) _initPromise = backend(runtimeEnv).init();
   return _initPromise;
 }
 

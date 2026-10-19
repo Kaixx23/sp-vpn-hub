@@ -16,6 +16,7 @@ import {
   backend as storeBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise, isSystemGeneratedRow } from "./dashboard.js";
+import { customerType, validCustomerType, supplierKey, supplierAccounts, resolveCustomerLink, validPaidUntil } from "./customer-accounts.js";
 import { PLAN_CATALOG, profitOf } from "./plans.js";
 import { checkCustomerRow, usageKind, usageMessage } from "./renewal.js";
 import { runRemindersFromEnv } from "./reminders.js";
@@ -747,20 +748,22 @@ const plainErr = (msg, code = 502) => new Response(msg + "\n", {
 
 // Standard subscription headers (subconverter spec): Clash Verge / v2rayNG show
 // live quota + expiry next to the profile, and "home page" links to the quota page.
-const json = (obj, code = 200) =>
+const json = (obj, code = 200, headers = {}) =>
   new Response(JSON.stringify(obj, null, 2) + "\n", {
     status: code,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: { "Content-Type": "application/json; charset=utf-8", ...headers },
   });
 // The admin output must never hand back a supplier URL in full — that is the
 // exact secret this whole change exists to protect. Host only.
 const generatedKind = (r) => r.label === "quota-page" ? "quota-page" : r.label === "seller-tool" ? "seller-tool" : null;
-const redact = (r) => ({
+const redact = (r, accounts = supplierAccounts([r])) => ({
   token: r.token,
   label: r.label,
   system_generated: isSystemGeneratedRow(r),
   system_kind: isSystemGeneratedRow(r) ? generatedKind(r) : null,
   customer: r.customer || null,
+  customer_type: customerType(r),
+  supplier_account: accounts.get(supplierKey(r.supplier_url)) || null,
   plan: r.plan || null,
   price: r.price ?? null,
   currency: r.currency || null,
@@ -811,22 +814,10 @@ function subHeaders(status, pageUrl) {
 }
 
 
-// Where "Mark paid" should push paid_until when no explicit date is given:
-// the supplier expiry if it is still ahead of us, otherwise one billing cycle
-// from today so a customer paying for a fresh month is not instantly overdue.
-const CYCLE_DAYS = { weekly: 7, monthly: 30, quarterly: 91, yearly: 365, annual: 365 };
-function paidThroughManual(row, now = new Date()) {
-  const today = new Date(now.toISOString().slice(0, 10) + "T00:00:00Z");
-  const exp = row && row.supplier_expires ? Date.parse(String(row.supplier_expires).slice(0, 10) + "T00:00:00Z") : NaN;
-  if (!Number.isNaN(exp) && exp >= today.getTime()) return String(row.supplier_expires).slice(0, 10);
-  const days = CYCLE_DAYS[String((row && row.billing_cycle) || "monthly").toLowerCase()] || 30;
-  return new Date(today.getTime() + days * 864e5).toISOString().slice(0, 10);
-}
-
 export default {
   async fetch(request, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
-    await storeInit().catch(() => {}); // a backend hiccup must not 500 every route
+    await storeInit(env).catch(() => {}); // a backend hiccup must not 500 every route
     // m0 is declared here rather than down with the route variables: the admin
     // routes use it, and a let-declaration further down would be hoisted into
     // a temporal dead zone.
@@ -879,12 +870,22 @@ export default {
             return json({ ok: false, error: String(e.message || e) }, 502);
           }
         }
-        if (path === "/admin/mint") {
-          const link = (data.link || "").trim();
-          const label = (data.label || "").trim().slice(0, 200) || null;
-          if (!/^(https?:\/\/|[a-z0-9+.-]+:\/\/)/i.test(link)) {
-            return json({ error: "link must be a subscription URL or node link" }, 400);
+        if (path === "/admin/shared-link") {
+          try {
+            const source = resolveCustomerLink(data.link, host, await storeList(), "shared");
+            return json({ account: source.account });
+          } catch (e) {
+            return json({ error: e.status ? e.message : "Could not look up the supplier account." }, e.status || 500);
           }
+        }
+        if (path === "/admin/mint") {
+          const type = data.customer_type || "individual";
+          if (!validCustomerType(type)) return json({ error: "customer_type must be individual or shared" }, 400);
+          if (data.paid_until) return json({ error: "Create the customer first, then use Pay to record their payment." }, 400);
+          const label = (data.label || "").trim().slice(0, 200) || null;
+          let source;
+          try { source = resolveCustomerLink(data.link, host, await storeList(), type); }
+          catch (e) { return json({ error: e.status ? e.message : "Could not look up the supplier account." }, e.status || 500); }
           const num = (v) => (v === "" || v === undefined || v === null ? null : Number(v));
           const txt = (v) => (v ? String(v).trim().slice(0, 200) : null);
           // Details detected up front by POST /admin/inspect (the dashboard's
@@ -899,19 +900,34 @@ export default {
             used_gb: gb(data.used_gb),
           };
           const hasDetected = detected.supplier_expires != null || detected.total_gb != null || detected.used_gb != null;
-          const token = await storeMint(link, label, {
+          const token = await storeMint(source.supplierUrl, label, {
             customer: txt(data.customer),
+            customer_type: type,
+            supplier_account: type === "shared" ? source.sourceRow?.supplier_account || null : txt(data.supplier_account) || source.sourceRow?.supplier_account || null,
             plan: txt(data.plan),
             price: num(data.price),
             currency: txt(data.currency),
             billing_cycle: txt(data.billing_cycle),
-            paid_until: txt(data.paid_until),
             notes: txt(data.notes),
-            account_email: txt(data.account_email),
-            account_password: txt(data.account_password),
+            account_email: type === "shared" ? source.sourceRow?.account_email || null : txt(data.account_email),
+            account_password: type === "shared" ? source.sourceRow?.account_password || null : txt(data.account_password),
             ...(hasDetected ? { ...detected, checked_at: new Date().toISOString() } : {}),
           });
           return json({ token, oneLink: `${host}/all/${encodeURIComponent(brand)}?t=${token}` });
+        }
+        if ((m0 = path.match(/^\/admin\/link\/([^/]+)$/)) && ["pay", "paid", "unpaid"].includes(url.searchParams.get("action"))) {
+          const t = m0[1];
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === t);
+          if (!cur) return json({ error: "unknown token" }, 404);
+          if (cur.revoked) return json({ error: "cannot record payment for a revoked customer" }, 400);
+          const unpaid = url.searchParams.get("action") === "unpaid";
+          const paidUntil = unpaid ? null : (data.paid_until || "").trim();
+          if (!unpaid && !validPaidUntil(paidUntil)) return json({ error: "Choose a valid paid-until date (today or later)." }, 400);
+          // Deliberately update ONE customer by token, not everyone on the
+          // supplier URL. Do not fetch the supplier or infer that they paid.
+          const updated = await storeUpdate(t, { paid_until: paidUntil });
+          return updated ? json({ ...redact(updated, supplierAccounts(rows)), ok: true, paid: !unpaid, customer: redact(updated, supplierAccounts(rows)) }) : json({ error: "unknown token" }, 404);
         }
         if (path === "/admin/reminders") {
           const out = await runRemindersFromEnv(env || {}, {
@@ -921,14 +937,34 @@ export default {
           return json(out);
         }
         if (path === "/admin/customer") {
+          if (data.paid_until !== undefined) return json({ error: "Use Pay to record a customer's payment." }, 400);
+          if (data.customer_type !== undefined && !validCustomerType(data.customer_type)) {
+            return json({ error: "customer_type must be individual or shared" }, 400);
+          }
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === data.token);
+          if (!cur) return json({ error: "unknown token" }, 404);
           const patchObj = {};
-          for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password"]) {
+          for (const k of ["customer", "customer_type", "plan", "currency", "billing_cycle", "notes", "label"]) {
             if (data[k] !== undefined) patchObj[k] = data[k] ? String(data[k]).trim().slice(0, 200) : null;
           }
           if (data.price !== undefined) patchObj.price = data.price === "" ? null : Number(data.price);
           if (data.revoked !== undefined) patchObj.revoked = data.revoked === "1";
-          const updated = await storeUpdate(data.token || "", patchObj);
-          return updated ? json(redact(updated)) : json({ error: "unknown token" }, 404);
+          // An account name belongs to the supplier link. Renaming it on the
+          // original customer also updates its shared customers, not billing.
+          if ((data.customer_type || customerType(cur)) === "individual") {
+            const accountPatch = {};
+            for (const key of ["supplier_account", "account_email", "account_password"]) {
+              if (data[key] !== undefined) accountPatch[key] = String(data[key]).trim().slice(0, 200) || null;
+            }
+            if (Object.keys(accountPatch).length) {
+              for (const row of rows.filter((r) => supplierKey(r.supplier_url) === supplierKey(cur.supplier_url))) {
+                await storeUpdate(row.token, accountPatch);
+              }
+            }
+          }
+          const updated = await storeUpdate(cur.token, patchObj);
+          return updated ? json(redact(updated, supplierAccounts(await storeList()))) : json({ error: "unknown token" }, 404);
         }
         if (path === "/") {
           const link = (data.link || "").trim();
@@ -952,11 +988,12 @@ export default {
       }
       if (path === "/admin/dashboard.json") {
         const rows = await storeList();
+        const accounts = supplierAccounts(rows);
         // `store` names the active backend ("turso" | "sqlite-file" | "memory" |
         // "d1") so a misconfigured deploy is visible from the dashboard itself:
         // "memory" means TOKEN_STORE_URL was NOT picked up and links will not
         // survive a cold start.
-        return json({ generated: new Date().toISOString(), store: storeBackend().name, stats: summarise(rows), customers: rows.map(redact) });
+        return json({ generated: new Date().toISOString(), store: storeBackend().name, stats: summarise(rows), customers: rows.map((r) => redact(r, accounts)) });
       }
       if (path === "/admin/health") {
         // Live health of the whole pipeline: token store -> supplier -> the
@@ -1167,12 +1204,14 @@ export default {
       if ((m0 = path.match(/^\/admin\/link\/([^/]+)$/))) {
         const t = m0[1];
         const action = url.searchParams.get("action");
-        if (action === "renew") {
+        if (["pay", "paid", "unpaid"].includes(action)) return json({ error: "Use POST to update a payment." }, 405, { Allow: "POST" });
+        if (action === "check" || action === "renew") {
           // "Renew / Check" — you renewed this ONE customer with the supplier
           // by hand; this verifies it landed. It re-reads only this customer's
           // saved subscription and persists what the supplier now reports.
           // It never buys, renews or changes anything on the supplier side.
-          const cur = (await storeList()).find((r) => r.token === t);
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === t);
           if (!cur) return json({ ok: false, token: t, error: "unknown token" }, 404);
           const out = await checkCustomerRow(cur, {
             fetchSubscription, quotaSummary, updateRow: storeUpdate,
@@ -1184,6 +1223,12 @@ export default {
             ok: true,
             token: t,
             renewed: out.expiryChanged,
+            expiryChanged: out.expiryChanged,
+            expiry: out.row.supplier_expires ?? null,
+            previousExpiry: out.previous.supplier_expires,
+            usageDeltaGb: out.usageDeltaGb,
+            usedGb: out.row.used_gb ?? null,
+            previousUsedGb: out.previous.used_gb,
             expiry_changed: out.expiryChanged,
             marked_paid: out.markedPaid,
             paid_until: out.paidUntil,
@@ -1201,32 +1246,7 @@ export default {
             // Redacted so the refreshed row can be merged straight into the
             // dashboard table without a full reload — and without ever
             // carrying the supplier URL.
-            customer: redact(out.row),
-          });
-        }
-        if (action === "paid" || action === "unpaid") {
-          // Manual billing switch: "they paid me" without touching the
-          // supplier. Marking paid moves paid_until to the date the customer
-          // is covered through — by default the supplier expiry, or one
-          // billing cycle out when there is no expiry to lean on.
-          const cur = (await storeList()).find((r) => r.token === t);
-          if (!cur) return json({ ok: false, token: t, error: "unknown token" }, 404);
-          if (action === "unpaid") {
-            const cleared = await storeUpdate(t, { paid_until: null });
-            return json({ ok: true, token: t, paid: false, paid_until: null, customer: redact(cleared) });
-          }
-          const asked = (url.searchParams.get("until") || "").slice(0, 10);
-          const until = /^\d{4}-\d{2}-\d{2}$/.test(asked)
-            ? asked
-            : paidThroughManual(cur, new Date());
-          const updatedRow = await storeUpdate(t, { paid_until: until });
-          return json({
-            ok: true,
-            token: t,
-            paid: true,
-            paid_until: until,
-            previous_paid_until: cur.paid_until || null,
-            customer: redact(updatedRow),
+            customer: redact(out.row, supplierAccounts(rows)),
           });
         }
         if (action === "rotate") {
@@ -1237,7 +1257,7 @@ export default {
           const carry = {};
           // prev_used_gb / usage_delta_gb ride along so a rotated link keeps
           // the usage comparison it had; everything else is unchanged.
-          for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "checked_at", "prev_used_gb", "usage_delta_gb"]) {
+          for (const k of ["customer", "customer_type", "supplier_account", "account_email", "account_password", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "checked_at", "prev_used_gb", "usage_delta_gb"]) {
             if (cur[k] != null) carry[k] = cur[k];
           }
           const fresh = await storeMint(cur.supplier_url, cur.label, carry);
@@ -1252,7 +1272,7 @@ export default {
           const gone = await storeRemove(t);
           return gone ? json({ token: t, deleted: true }) : json({ error: "unknown token" }, 404);
         }
-        return json({ error: "action must be renew | paid | unpaid | rotate | revoke | delete" }, 400);
+        return json({ error: "action must be check | renew | pay/paid/unpaid (POST) | rotate | revoke | delete" }, 400);
       }
       if (path === "/admin/reminders/run") {
         // GET so a platform cron can hit it directly (Vercel/Netlify crons
@@ -1269,7 +1289,8 @@ export default {
       }
       if (path === "/admin/links") {
         const rows = await storeList();
-        return json({ count: rows.length, links: rows.map(redact) });
+        const accounts = supplierAccounts(rows);
+        return json({ count: rows.length, links: rows.map((r) => redact(r, accounts)) });
       }
 
       if (path === "/") return html(homePage());
@@ -1334,6 +1355,7 @@ export default {
       }
       return html(errorPage("Not found"));
     } catch (e) {
+      if (path?.startsWith("/admin/")) return json({ error: "Could not save or load customer data. Please try again." }, 500);
       // subscription endpoints: return a plain-text error with a 5xx status so
       // Clash/v2ray apps display the actual reason instead of failing to parse HTML
       if (/^\/(all|sub|sr|share)\//.test(path)) {
@@ -1350,7 +1372,7 @@ export default {
   // see README → Scheduling.
   async scheduled(event, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
-    await storeInit().catch(() => {});
+    await storeInit(env).catch(() => {});
     await runRemindersFromEnv(env || {}, {
       listAll: storeList, updateRow: storeUpdate,
       hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,

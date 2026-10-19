@@ -2,8 +2,8 @@
 
 > **Business source of truth**
 >
-> Live business repository: `Kaixx23/sp-vpn-hub`  
-> Live business branch: `arena/01a0e3a9-sp-vpn-hub`  
+> Live business repository: `Kaixx23/sp-vpn-hub`
+> Live business branch: `arena/01a0e3a9-sp-vpn-hub`
 > Live site: `https://sp-vpn.netlify.app/`
 >
 > Future AI/coding sessions should read [`BUSINESS_SOURCE_OF_TRUTH.md`](./BUSINESS_SOURCE_OF_TRUTH.md) before making changes. The live business code is on `arena/01a0e3a9-sp-vpn-hub`, not necessarily `main`.
@@ -156,10 +156,10 @@ back real expiry + used/total GB. That's the supplier's own
 worker's existing `quotaSummary()` — no new parsing, and you get quota tracking
 for free. Refresh runs at concurrency 6 so your supplier never sees a burst.
 
-### Renew / Check — one customer at a time
+### Check — one customer at a time
 
 Renewing happens on the supplier's panel, by hand, one customer at a time. The
-dashboard's job is to confirm it landed. Every active row has a **Renew / Check**
+dashboard's job is to confirm it landed. Every active row has a **Check**
 button that re-reads **only that customer's** saved subscription and persists
 what the supplier now reports:
 
@@ -201,7 +201,58 @@ A link with **no recorded expiry is surfaced separately**, never counted as
 healthy — an unknown must not hide a renewal.
 
 `＋ Add customer` mints a link and stores name / plan / price / currency /
-billing cycle / paid-until / notes in one step, returning the ready-to-send link.
+billing cycle / notes in one step, returning the ready-to-send link.
+
+### Individual and shared customers
+
+1. Add the **first customer** as **Individual customer**. Paste the original
+   supplier link and enter the **Supplier account** name or email (not a password).
+2. Add the **second customer** as **Shared link**. Paste the first customer's
+   SP VPN one-link, or the same registered supplier URL. The form finds and shows
+   the existing supplier account automatically; you do not have to enter it again.
+   Existing **Panel account email / password** fields are inherited server-side
+   from the original customer too. The lookup preview does not return the password.
+3. Save. Both customer rows show the **same supplier account**, while retaining
+   their own name, plan, price, notes and payment record. A third customer can
+   also share the second customer's link.
+
+The new customer gets a separate opaque link backed by the **same underlying
+supplier URL**, not a chain of links fetching each other. Revoking or rotating
+one customer's link does not revoke the others. Quota/expiry belong to the
+supplier account; shared quota is **not per-person usage**.
+
+Accounts are matched by the complete supplier URL, **not just its hostname**:
+two subscriptions on the same supplier panel stay separate. Only the account
+label, host, opaque account identifier and active customer count are displayed;
+the supplier URL and its secret query parameters stay on the server. You can
+search by account name and filter Individual or Shared customers. Editing an
+individual customer's account name renames it for the customers sharing that
+supplier link without changing their payments.
+
+### Check is not Pay
+
+- **Check** on a customer reads the supplier's current expiry and quota only.
+  **Refresh quota** and scheduled reminder refreshes do the same. A later
+  supplier expiry **never records payment**, even for an individual customer.
+- **Pay** opens a confirmation for that customer. Confirm their **Paid until**
+  date and press **Pay — mark as paid**. It changes **only that customer's**
+  payment record, not the other people sharing the supplier account. This is
+  bookkeeping: it does not charge anyone or renew the supplier subscription.
+- New customers are **Unpaid / No payment recorded** until Pay is confirmed.
+  A recorded date through today or later shows **Paid**; once that date passes,
+  the customer is **Unpaid** again, regardless of the supplier expiry.
+- **Mark unpaid** explicitly clears only the selected customer’s recorded date,
+  useful for correcting a payment that was previously marked automatically.
+- Adding/editing customer details cannot mark a payment. Existing recorded
+  `paid_until` dates are preserved during upgrade; new payments go through the
+  Pay action. API clients must stop sending `paid_until` to `/admin/mint` or
+  `/admin/customer` and use the POST Pay route instead.
+
+`＋ Add customer` stores the customer type / supplier account / name / plan /
+price / currency / billing cycle / notes and returns the ready-to-send link.
+Existing customers default to Individual; their link and recorded payment dates stay
+intact. You can change their type with **edit**. Database columns are added
+on startup for SQLite/Turso and D1; no destructive reset is needed.
 
 ### Data model
 
@@ -210,7 +261,8 @@ One table. The leak fix and the dashboard are the same database.
 ```
 token            TEXT PRIMARY KEY     -- 24 random bytes, hex
 supplier_url     TEXT NOT NULL        -- the secret; never leaves the server
-label, customer, plan, price, currency, billing_cycle, paid_until, notes
+label, customer, customer_type, supplier_account
+plan, price, currency, billing_cycle, paid_until, notes
 account_email, account_password       -- the supplier-panel login you renew with
 supplier_expires, total_gb, used_gb, checked_at   -- written by a check
 prev_used_gb     REAL                 -- used_gb at the previous successful check
@@ -308,7 +360,10 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/mint` | POST | `link=` + customer fields → `{ token, oneLink }` |
 | `/admin/customer` | POST | Edit a customer's details |
 | `/admin/refresh` | GET | Pull live quota + expiry for **every** active customer |
-| `/admin/link/<t>?action=renew` | GET | Re-check **one** customer: persists expiry, quota and the usage delta |
+| `/admin/link/<t>?action=check` | GET | Check supplier expiry/quota only; `renew` remains an alias; never marks paid |
+| `/admin/link/<t>?action=pay` | POST | `paid_until=YYYY-MM-DD` → record a payment for this customer only (today or later) |
+| `/admin/link/<t>?action=unpaid` | POST | Explicitly clear only this customer's payment date |
+| `/admin/shared-link` | POST | `link=` → find the original customer's supplier account without returning its secret URL/password |
 | `/admin/reminders` | GET | Reminder history (kind, date, message text) |
 | `/admin/reminders` | POST | Run a reminder pass now |
 | `/admin/reminders/run` | GET | Same, as a GET — for platform crons |
@@ -355,6 +410,8 @@ npm test
 - `test/migration.test.mjs` — **34 checks**: the additive migration applied to a
   database built on the *previous* production schema, asserting every existing
   column and value survives byte-identically and that re-running is a no-op.
+- `test/customer-accounts.test.mjs` — shared account/credential inheritance, payment isolation across checks and reminders, additive migrations and concurrent SQL updates.
+- `test/dashboard-ui.test.mjs` — real client/worker interaction: original + shared customer creation, Pay/cancel/retry/Mark unpaid, safe account display and filtering.
 - `test/renewal.test.mjs` — **151 checks**: per-customer Renew / Check (changed
   vs unchanged expiry), usage increase / unchanged / reset, no delta on the
   first check, failed checks overwriting nothing, the global refresh still

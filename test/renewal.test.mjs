@@ -325,7 +325,7 @@ console.log("\n[11] revoked, unknown and non-checkable customers are handled saf
   // an unsupported action is still rejected clearly
   const badAction = await get("/admin/link/" + ali + "?action=explode");
   ok(badAction.status === 400, `unknown action -> 400 (got ${badAction.status})`);
-  ok((await badAction.text()).includes("renew | paid | unpaid | rotate | revoke | delete"), "the error lists renew and the billing actions alongside the existing ones");
+  ok((await badAction.text()).includes("check | renew | pay/paid/unpaid (POST) | rotate | revoke | delete"), "the error lists renew and the billing actions alongside the existing ones");
 }
 
 // ---------------------------------------------------------------------------
@@ -419,8 +419,8 @@ console.log("\n[15] the dashboard renders the new control without losing the old
     ok(html.includes('"' + action + '"'), `existing row action "${action}" still wired up`);
 
   // …plus the new one.
-  ok(html.includes("Renew / Check"), "the per-customer Renew / Check button is rendered");
-  ok(html.includes("action=renew"), "it calls the single-customer renew endpoint");
+  ok(html.includes('actionButton("check"'), "the per-customer Check button is rendered");
+  ok(html.includes("action=check"), "it calls the supplier-only check endpoint");
   ok(html.includes("usage_message"), "the usage comparison sentence is rendered from the API");
 
   // The global refresh control is untouched.

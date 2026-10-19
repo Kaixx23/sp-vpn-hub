@@ -48,8 +48,8 @@ export function summarise(rows) {
   // dashboard surfaces it separately so it can't hide a renewal.
   const unknownExp = active.filter((r) => !r.supplier_expires);
 
-  const withPaid = active.map((r) => ({ r, d: day(r.paid_until) })).filter((x) => x.d !== null);
-  const unpaid = withPaid.filter((x) => x.d < 0);
+  // Supplier renewal is not a customer payment, especially on shared accounts.
+  const unpaid = active.filter((r) => { const d = day(r.paid_until); return d === null || d < 0; });
 
   const mrr = active.reduce((sum, r) => sum + (Number(r.price) || 0), 0);
   const quotable = active.filter((r) => r.total_gb > 0);
@@ -116,7 +116,7 @@ export function dashboardPage(host = "") {
       <button id="healthpill" class="pillbtn" title="System health — click for details" aria-label="System health">● checking…</button>
       <span class="live-status"><i></i><span>Live workspace</span></span>
       <a href="/qr" class="btn btn-secondary" style="text-decoration:none" title="Open QR Code Maker">📱 QR Maker</a>
-      <button id="refresh" class="btn btn-secondary" aria-label="Refresh quota" title="Fetch live quota &amp; expiry from the supplier">
+      <button id="refresh" class="btn btn-secondary" aria-label="Refresh quota" title="Check supplier quota and expiry only; payments stay unchanged">
         <span class="btn-symbol" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="M16.7 8A7 7 0 0 0 4.2 5.5L3 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M3 3.5V7h3.5M3.3 12A7 7 0 0 0 15.8 14.5L17 13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 16.5V13h-3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>
         <span class="btn-label">Refresh data</span>
       </button>
@@ -150,7 +150,7 @@ export function dashboardPage(host = "") {
       <div>
         <p class="eyebrow"><span class="eyebrow-line"></span> YOUR NETWORK</p>
         <h2 id="customers-title">Customer links</h2>
-        <p class="panel-subtitle">Manage access, billing, and subscription health from one place.</p>
+        <p class="panel-subtitle">Check updates supplier dates only. Use Pay to record each customer’s payment separately.</p>
       </div>
       <div class="tracked-count"><strong id="activeCount">—</strong><span>accounts tracked</span></div>
     </div>
@@ -158,7 +158,7 @@ export function dashboardPage(host = "") {
     <div class="toolbar">
       <label class="search-field" for="q">
         <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8.8" cy="8.8" r="5.3" stroke="currentColor" stroke-width="1.7"/><path d="m13 13 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-        <input id="q" type="search" placeholder="Search customers, plans, or tokens…" autocomplete="off">
+        <input id="q" type="search" placeholder="Search customers, supplier accounts, plans…" autocomplete="off">
       </label>
       <div class="toolbar-spacer"></div>
       <label class="select-wrap"><span class="sr-only">Filter customer links</span><select id="filter" aria-label="Filter customer links">
@@ -168,6 +168,9 @@ export function dashboardPage(host = "") {
         <option value="all-links">All links</option>
         <option value="expiring">Expiring ≤ 30 days</option>
         <option value="overdue">Overdue</option>
+        <option value="unpaid">Unpaid</option>
+        <option value="shared">Shared link customers</option>
+        <option value="individual">Individual customers</option>
         <option value="legacy">Legacy links</option>
         <option value="revoked">Revoked</option>
       </select></label>
@@ -183,7 +186,7 @@ export function dashboardPage(host = "") {
     <div class="tablewrap">
       <table>
         <thead><tr>
-          <th>Customer</th><th>Plan &amp; billing</th><th>Renewal</th><th>Data usage</th><th>Paid through</th><th>Share link</th><th><span class="sr-only">Actions</span></th>
+          <th>Customer</th><th>Plan &amp; billing</th><th>Renewal</th><th>Data usage</th><th>Payment</th><th>Share link</th><th><span class="sr-only">Actions</span></th>
         </tr></thead>
         <tbody id="rows"><tr><td colspan="7" class="loading"><span class="loader"></span> Loading your customers…</td></tr></tbody>
       </table>
@@ -204,10 +207,20 @@ export function dashboardPage(host = "") {
       <input type="hidden" name="total_gb">
       <input type="hidden" name="used_gb">
       <div class="form-section"><p class="form-section-title">Connection</p>
-        <label>Supplier link <span class="req">*</span>
-          <textarea name="link" rows="2" placeholder="https://your-supplier/api/v1/client/subscribe?token=…"></textarea>
-          <small class="field-hint">Stored securely on the server. It is never included in customer links.</small>
-        </label>
+      <label>Customer type
+        <select name="customer_type" id="customer-type">
+          <option value="individual">Individual customer — original supplier link</option>
+          <option value="shared">Shared link — use an existing customer's account</option>
+        </select>
+      </label>
+      <label><span id="link-label">Original supplier link</span> <span class="req">*</span>
+        <textarea name="link" rows="2" required placeholder="https://your-supplier/api/v1/client/subscribe?token=…"></textarea>
+      </label>
+      <div id="shared-account" class="account-info" aria-live="polite" hidden></div>
+      <label>Supplier account
+        <input name="supplier_account" placeholder="Account name or email — not a password">
+      </label>
+      <p id="account-help" class="dim">Name the supplier account used by this link. Shared customers will inherit it.</p>
         <div id="peek" class="peek" hidden></div>
       </div>
       <div class="form-section"><p class="form-section-title">Customer details</p>
@@ -219,10 +232,8 @@ export function dashboardPage(host = "") {
           <label>Price <input name="price" type="number" step="0.01" placeholder="15.00"></label>
           <label>Currency <input name="currency" placeholder="USD"></label>
         </div>
-        <div class="two">
-          <label>Billing cycle <input name="billing_cycle" placeholder="monthly"></label>
-          <label>Paid until <input name="paid_until" type="date"></label>
-        </div>
+        <label>Billing cycle <input name="billing_cycle" placeholder="monthly"></label>
+        <p class="field-hint">Payment is recorded separately with this customer's Pay button after saving.</p>
         <div class="two">
           <label>Panel account email <input name="account_email" type="email" placeholder="customer@gmail.com" title="Supplier panel login used to renew this customer"></label>
           <label>Panel password <input name="account_password" value="${esc(PANEL_PASSWORD_DEFAULT)}" title="Shared supplier panel password"></label>
@@ -243,12 +254,34 @@ export function dashboardPage(host = "") {
   </div>
 </div>
 
+<div id="pay-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="pay-title" hidden>
+  <div class="sheet">
+    <h2 id="pay-title">Record payment</h2>
+    <p id="pay-info" class="dim"></p>
+    <form id="pay-form">
+      <input type="hidden" name="token">
+      <label>Paid until <span class="req">*</span><input name="paid_until" type="date" required></label>
+      <p class="dim">Confirm the date this customer has paid through. This records payment only; it does not charge them or renew the supplier account. Other customers stay unchanged.</p>
+      <div id="pay-result" class="result" role="alert"></div>
+      <div class="macts">
+        <button type="button" id="pay-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="submit" id="pay-save" class="btn btn-primary">Pay — mark as paid</button>
+      </div>
+    </form>
+  </div>
+</div>
 <div id="toast" class="toast" hidden role="status"></div>
 <script>${scriptEsc(CLIENT)}</script>
 </body></html>`;
 }
 
 const CSS = `
+.account-info{padding:12px;border:1px solid var(--line);border-radius:10px;margin-bottom:12px;font-size:12px;line-height:1.6}
+.account-name{overflow-wrap:anywhere;font-size:12px;font-weight:600}
+.supplier-account{margin-top:7px;max-width:220px;padding-top:6px;border-top:1px solid var(--line)}
+.customer-type{margin-top:5px}.paid-cell .mini,.renewal-cell .mini{margin-top:7px}
+input:read-only{opacity:.75}
+
 :root{
   --bg:#0a0808;--bg-deep:#050405;--surface:#141013;--surface-raised:#1a1418;--surface-soft:#100c0e;
   --line:rgba(255,110,122,.13);--line-strong:rgba(255,110,122,.22);--text:#f6f1f2;--muted:#a08e96;
@@ -309,10 +342,12 @@ html,body{max-width:100%;overflow-x:clip}
 .tablewrap table{min-width:860px}
 .toast{right:12px;left:12px;max-width:none}
 }
+[hidden]{display:none!important}
 `;
 
 const CLIENT = `
 let DATA = [], FILTER = "all", SORT = "expiry", Q = "";
+let EDIT_ROW = null, sharedTimer, sharedSequence = 0;
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
@@ -389,9 +424,22 @@ function quotaCell(r) {
     '<div class="sub">' + left.toFixed(1) + ' / ' + total + ' GB remaining</div>' + d;
 }
 
+function paymentCell(r) {
+  const paid = daysTo(r.paid_until);
+  return '<span class="pill ' + (paid !== null && paid >= 0 ? 'green">Paid' : 'red">Unpaid') + '</span>' +
+    '<div class="sub">' + (r.paid_until ? 'Until ' + esc(r.paid_until) : 'No payment recorded') + '</div>';
+}
+
+function accountCell(r) {
+  const a = r.supplier_account;
+  if (!a) return '<span class="dim">No account recorded</span>';
+  return '<div class="account-name">' + esc(a.name) + '</div>' + (a.email && a.email !== a.name ? '<div class="sub">' + esc(a.email) + '</div>' : '') + '<div class="sub">' + esc(a.host) + ' · ' +
+    esc(a.id.slice(0, 8)) + '</div><div class="sub">' + a.customers + ' customer' + (a.customers === 1 ? '' : 's') + '</div>';
+}
+
 function needsAction(r) {
   const e = daysTo(r.supplier_expires), p = daysTo(r.paid_until);
-  return r.revoked || e === null || e <= 30 || (p !== null && p < 0) || r.legacy;
+  return r.revoked || e === null || e <= 30 || (p === null || p < 0) || r.legacy;
 }
 
 function isGenerated(r) { return !!(r && !r.customer && (r.system_generated || r.label === "quota-page" || r.label === "seller-tool")); }
@@ -402,11 +450,13 @@ function rowsToShow() {
   if (FILTER === "generated") rs = rs.filter(isGenerated);
   else if (FILTER !== "all-links") rs = rs.filter((r) => !isGenerated(r));
   const q = Q.toLowerCase();
-  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes, r.account_email, displayName(r)]
+  if (q) rs = rs.filter((r) => [r.customer, r.label, r.plan, r.token, r.notes, r.account_email, r.supplier_account?.name, r.supplier_account?.host, displayName(r)]
     .some((v) => String(v || "").toLowerCase().includes(q)));
   if (FILTER === "action") rs = rs.filter(needsAction);
   if (FILTER === "expiring") rs = rs.filter((r) => { const d = daysTo(r.supplier_expires); return d !== null && d >= 0 && d <= 30; });
   if (FILTER === "overdue") rs = rs.filter((r) => { const d = daysTo(r.supplier_expires); return d !== null && d < 0; });
+  if (FILTER === "unpaid") rs = rs.filter((r) => !r.revoked && (daysTo(r.paid_until) === null || daysTo(r.paid_until) < 0));
+  if (FILTER === "shared" || FILTER === "individual") rs = rs.filter((r) => r.customer_type === FILTER);
   if (FILTER === "legacy") rs = rs.filter((r) => r.legacy);
   if (FILTER === "revoked") rs = rs.filter((r) => r.revoked);
   const num = (v) => (v == null ? -Infinity : Number(v));
@@ -442,20 +492,17 @@ function render() {
     const one = oneLinkOf(r);
     const paidDays = daysTo(r.paid_until);
     const isPaid = r.paid_until != null && paidDays !== null && paidDays >= 0;
-    const paid = r.paid_until
-      ? prettyDate(r.paid_until) + (paidDays < 0
-          ? ' <span class="pill red">unpaid</span>'
-          : ' <span class="pill green">paid</span>')
-      : '<span class="dim">Not recorded</span>';
+    const paid = paymentCell(r);
     return '<tr class="' + (r.revoked ? "revoked " : "") + (generatedRow ? "generated" : "") + '">' +
       '<td><div class="customer-cell"><span class="avatar">' + esc(initials(name)) + '</span><div><div class="nm">' + esc(name) + '</div>' +
+        (generatedRow ? '' : '<div class="customer-type"><span class="pill ' + (r.customer_type === 'shared' ? 'amber">Shared link' : 'gray">Individual') + '</span></div><div class="supplier-account"><span class="sub">Supplier account</span>' + accountCell(r) + '</div>') +
         '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + (generatedRow ? ' · generated' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + (generatedRow ? '<div class="sub">Not counted as a customer or profit.</div>' : '') + '</div></div></td>' +
       '<td class="plan-cell">' + esc(r.plan || (generatedRow ? "Not a customer record" : "No plan set")) + '<div class="sub">' + (generatedRow ? "Created by quota/tool page" : (esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : ""))) + '</div></td>' +
-      '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + esc(prettyDate(r.supplier_expires) || "Not checked") + '</div></td>' +
+      '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + esc(prettyDate(r.supplier_expires) || "Not checked") + '</div>' + (r.revoked || generatedRow ? "" : actionButton("check", r.token, "Check")) + '</td>' +
       '<td class="usage-cell">' + quotaCell(r) + '</td>' +
-      '<td class="paid-cell">' + paid + '</td>' +
+      '<td class="paid-cell">' + paid + (r.revoked || generatedRow ? "" : actionButton("pay", r.token, "Pay") + (isPaid ? actionButton("unpaid", r.token, "Mark unpaid") : "")) + '</td>' +
       '<td class="link-cell"><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span><span class="link-caption"><svg viewBox="0 0 20 20" fill="none"><path d="M7.5 12.5 12.5 7.5M6 14a3 3 0 0 1 0-4.2l1.6-1.6M14 6a3 3 0 0 1 0 4.2l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> private link</span></td>' +
-      '<td class="actions-cell">' + (r.revoked || generatedRow ? "" : actionButton("renew", r.token, "Renew / Check")) + (generatedRow ? "" : actionButton(isPaid ? "unpaid" : "paid", r.token, isPaid ? "Mark unpaid" : "Mark paid")) + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, generatedRow ? "Convert/Edit" : "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
+      '<td class="actions-cell">' + actionButton("copy", one, "Copy") + actionButton("qr", one, "QR") + actionButton("edit", r.token, generatedRow ? "Convert/Edit" : "Edit") + actionButton("rotate", r.token, "Rotate") + (r.revoked ? "" : actionButton("revoke", r.token, "Revoke", true)) + actionButton("delete", r.token, "Delete", true) + '</td>' +
       '</tr>';
   }).join("") : '<tr><td colspan="7" class="loading">No customers match these filters.</td></tr>';
 }
@@ -468,7 +515,7 @@ function renderStats(s) {
     card(s.expiring7, "Expiring soon", s.expiring7 ? "bad" : "good", ICONS.alert, "within the next 7 days") +
     card(s.expiring30, "Renewal window", s.expiring30 ? "warn" : "good", ICONS.calendar, "8–30 days from now") +
     card(s.overdue, "Expired / overdue", s.overdue ? "bad" : "good", ICONS.warning, "needs a follow-up") +
-    card(s.unpaid, "Unpaid", s.unpaid ? "bad" : "good", ICONS.coin, "past the paid-through date") +
+    card(s.unpaid, "Unpaid", s.unpaid ? "bad" : "good", ICONS.coin, "not recorded or overdue") +
     card(s.unknownExpiry, "Expiry unknown", s.unknownExpiry ? "warn" : "good", ICONS.calendar, "refresh to check status") +
     card((s.mrr || 0).toFixed(2), "Revenue / month", "", ICONS.coin, "active plans · before costs") +
     card(s.profitMonthly == null ? "—" : s.profitMonthly.toFixed(2), "Profit / month", s.profitMonthly == null ? "" : s.profitMonthly > 0 ? "good" : s.profitMonthly < 0 ? "bad" : "", ICONS.coin, "after catalogue cost") +
@@ -507,7 +554,7 @@ $("#refresh").addEventListener("click", async (e) => {
   try {
     const response = await fetch("/admin/refresh");
     const j = await response.json();
-    toast("Updated " + j.updated + " of " + j.checked + (j.failed ? " · " + j.failed + " failed" : ""));
+    toast("Payments unchanged. Updated " + j.updated + " of " + j.checked + (j.failed ? " · " + j.failed + " failed" : ""));
     await load();
   } catch (err) { toast("Refresh failed: " + err.message); }
   button.disabled = false; if (label) label.textContent = "Refresh data";
@@ -550,7 +597,6 @@ async function peek(link) {
     if (j.nodes) bits.push(j.nodes + " node" + (j.nodes === 1 ? "" : "s"));
     peekSay(bits.length ? "✓ " + bits.join(" · ") : "✓ link readable, but it carries no quota/expiry info", "ok");
     if (!f.elements.link.disabled) {
-      if (j.expires && !f.elements.paid_until.value) f.elements.paid_until.value = j.expires;
       if (j.total_gb > 0 && !f.elements.plan.value) f.elements.plan.value = j.total_gb + "GB";
       if (j.pricing) {
         if (!f.elements.price.value) f.elements.price.value = j.pricing.price;
@@ -568,15 +614,81 @@ async function peek(link) {
   }
 }
 
+function syncCustomerType() {
+  const f = $("#form").elements;
+  const shared = f.customer_type.value === "shared";
+  f.supplier_account.readOnly = shared;
+  f.account_email.readOnly = shared;
+  f.account_password.readOnly = shared;
+  clearTimeout(peekTimer); peekReq++; peekPromise = null;
+  if (!EDIT_ROW) {
+    for (const key of ["supplier_expires", "total_gb", "used_gb"]) f[key].value = "";
+    peekSay("");
+    if (shared) { f.account_email.value = ""; f.account_password.value = ""; }
+    else if (!f.account_password.value) f.account_password.value = f.account_password.defaultValue;
+  }
+  $("#link-label").textContent = shared ? "Existing customer's link" : "Original supplier link";
+  f.link.placeholder = shared ? "Paste the first customer's SP VPN link (or their registered supplier URL)" : "https://your-supplier/api/v1/client/subscribe?token=…";
+  $("#account-help").textContent = shared
+    ? "The supplier account is inherited automatically. This customer keeps a separate payment record."
+    : "Name the supplier account used by this link. Shared customers will inherit it.";
+  $("#shared-account").hidden = !shared;
+  clearTimeout(sharedTimer); sharedSequence++;
+  if (!shared) return;
+  if (EDIT_ROW) {
+    $("#shared-account").textContent = "Uses supplier account: " + (EDIT_ROW.supplier_account?.name || "Not recorded");
+    return;
+  }
+  f.supplier_account.value = "";
+  $("#shared-account").textContent = "Paste the original customer's link to find their supplier account.";
+  if (f.link.value.trim()) lookupSharedAccount();
+}
+
+async function lookupSharedAccount() {
+  const f = $("#form").elements;
+  if (EDIT_ROW || f.customer_type.value !== "shared") return;
+  const seq = ++sharedSequence;
+  f.supplier_account.value = "";
+  const box = $("#shared-account");
+  if (!f.link.value.trim()) { box.textContent = "Paste the original customer's link to find their supplier account."; return; }
+  box.textContent = "Finding supplier account…";
+  try {
+    const response = await fetch("/admin/shared-link", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ link: f.link.value.trim() }).toString(),
+    });
+    const j = await response.json();
+    if (seq !== sharedSequence) return;
+    if (!response.ok) throw new Error(j.error || ("HTTP " + response.status));
+    f.supplier_account.value = j.account.name;
+    f.account_email.value = j.account.email || "";
+    box.textContent = "Supplier account: " + j.account.name + " · " + j.account.host +
+      " · currently used by " + j.account.customers + " customer(s). Payment is tracked separately.";
+  } catch (err) {
+    if (seq === sharedSequence) box.textContent = err.message;
+  }
+}
+
+$("#customer-type").addEventListener("change", syncCustomerType);
 $("#form").elements.link.addEventListener("input", () => {
-  clearTimeout(peekTimer);
-  const v = $("#form").elements.link.value.trim();
-  if (!v || !/^[a-z0-9+.-]+:\\/\\//i.test(v)) { peekReq++; peekSay(""); return; }
+  clearTimeout(peekTimer); clearTimeout(sharedTimer);
+  peekReq++; sharedSequence++; peekPromise = null;
+  const f = $("#form").elements;
+  for (const key of ["supplier_expires", "total_gb", "used_gb"]) f[key].value = "";
+  if (f.customer_type.value === "shared") {
+    f.supplier_account.value = ""; f.account_email.value = "";
+    $("#shared-account").textContent = "Finding supplier account…";
+    sharedTimer = setTimeout(lookupSharedAccount, 300);
+    return;
+  }
+  const v = f.link.value.trim();
+  if (!v) { peekSay(""); return; }
   peekTimer = setTimeout(() => peek(v), 700);
 });
 
-function closeModal() { $("#modal").hidden = true; }
+function closeModal() { $("#modal").hidden = true; clearTimeout(peekTimer); clearTimeout(sharedTimer); peekReq++; sharedSequence++; peekPromise = null; }
 function openModal(row) {
+  EDIT_ROW = row;
   const f = $("#form"); f.reset(); $("#result").textContent = ""; $("#result").className = "result";
   clearTimeout(peekTimer); peekReq++; peekPromise = null; peekSay("");
   if (row && (row.supplier_expires || row.total_gb || row.used_gb != null)) {
@@ -589,15 +701,18 @@ function openModal(row) {
   $("#mhelp").textContent = row ? "Update the details you use to keep this account on track." : "Create a private link and keep its billing details close by.";
   f.elements.token.value = row ? row.token : "";
   f.elements.link.disabled = !!row;
+  f.elements.customer_type.value = row?.customer_type || "individual";
+  f.elements.supplier_account.value = row?.supplier_account?.name || "";
   $("#save").disabled = false;
   $("#save").textContent = row ? "Save changes" : "Create private link";
   $("#cancel").textContent = "Cancel";
   if (row) {
-    for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "label", "account_email", "account_password", "supplier_expires", "total_gb", "used_gb"])
+    for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "notes", "label", "account_email", "account_password", "supplier_expires", "total_gb", "used_gb"])
       if (row[k] != null && f.elements[k]) f.elements[k].value = row[k];
   } else {
     f.elements.link.disabled = false;
   }
+  syncCustomerType();
   $("#modal").hidden = false;
   setTimeout(() => (row ? f.elements.customer : f.elements.link).focus(), 0);
 }
@@ -607,13 +722,50 @@ $("#close").addEventListener("click", closeModal);
 $("#modal").addEventListener("click", (e) => { if (e.target === $("#modal")) closeModal(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#modal").hidden) closeModal(); });
 
+function openPay(row) {
+  const form = $("#pay-form"), f = form.elements;
+  form.reset(); f.token.value = row.token;
+  const today = new Date().toISOString().slice(0, 10);
+  f.paid_until.min = today;
+  // A suggestion only: nothing is saved until Pay is explicitly confirmed.
+  f.paid_until.value = [row.paid_until, row.supplier_expires].filter((d) => d && d >= today).sort().pop() || "";
+  $("#pay-title").textContent = "Record payment — " + (row.customer || row.label || "customer");
+  $("#pay-info").textContent = "Previously paid until: " + (row.paid_until || "not recorded") +
+    ". Supplier expiry (last checked): " + (row.supplier_expires || "unknown") + ".";
+  $("#pay-result").textContent = "";
+  $("#pay-save").disabled = false;
+  $("#pay-modal").hidden = false;
+  f.paid_until.focus();
+}
+$("#pay-cancel").addEventListener("click", () => ($("#pay-modal").hidden = true));
+$("#pay-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target, f = form.elements, button = $("#pay-save"), result = $("#pay-result");
+  if (button.disabled || !form.reportValidity()) return;
+  button.disabled = true; $("#pay-cancel").disabled = true; result.textContent = "";
+  try {
+    const response = await fetch("/admin/link/" + encodeURIComponent(f.token.value) + "?action=pay", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ paid_until: f.paid_until.value }).toString(),
+    });
+    const j = await response.json();
+    if (!response.ok) throw new Error(j.error || ("HTTP " + response.status));
+    $("#pay-modal").hidden = true;
+    toast("Payment recorded for this customer only, until " + j.paid_until);
+    try { await load(); } catch (err) { toast("Payment saved. Reload the dashboard to see it."); }
+  } catch (err) {
+    result.className = "result err"; result.textContent = err.message;
+  } finally { button.disabled = false; $("#pay-cancel").disabled = false; }
+});
+
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
   const editing = !!f.elements.token.value;
   const res = $("#result"), save = $("#save");
+  if (save.disabled) return;
   save.disabled = true;
-  if (!editing && peekPromise) {
+  if (!editing && f.elements.customer_type.value === "individual" && peekPromise) {
     res.className = "result"; res.textContent = "Reading the link before saving…";
     try { await peekPromise; } catch (err) {}
     if ($("#modal").hidden) return;
@@ -632,8 +784,8 @@ $("#form").addEventListener("submit", async (e) => {
     res.innerHTML = (editing ? "Saved ✓ — the customer's one-link" : "Created ✓ — send this ready message to the customer") +
       ':<div class="onelink">' + esc(link) + '</div>' +
       (msg ? '<div class="msgbox">' + esc(msg) + '</div>' : "") +
-      '<div class="mcpy"><button class="btn btn-primary" data-copy="' + esc(link) + '" data-label="📋 Copy one-link">📋 Copy one-link</button>' +
-      (msg ? '<button class="btn btn-secondary" data-copy="' + esc(msg) + '" data-label="📋 Copy ready message">📋 Copy ready message</button>' : "") + '</div>';
+      '<div class="mcpy"><button type="button" class="btn btn-primary" data-copy="' + esc(link) + '" data-label="📋 Copy one-link">📋 Copy one-link</button>' +
+      (msg ? '<button type="button" class="btn btn-secondary" data-copy="' + esc(msg) + '" data-label="📋 Copy ready message">📋 Copy ready message</button>' : "") + '</div>';
     await load();
     if (!editing) { save.disabled = true; save.textContent = "Created ✓"; }
     $("#cancel").textContent = "Close";
@@ -666,7 +818,9 @@ $("#rows").addEventListener("click", async (e) => {
     return;
   }
   if (a === "edit") { openModal(DATA.find((r) => r.token === b.dataset.t)); return; }
-  if (a === "renew") {
+  if (b.disabled) return;
+  if (a === "pay") { openPay(DATA.find((r) => r.token === b.dataset.t)); return; }
+  if (a === "check") {
     // You already renewed this customer with the supplier by hand. This only
     // re-reads THAT ONE customer's subscription and reports what it now says.
     // It cannot buy or renew anything.
@@ -674,11 +828,11 @@ $("#rows").addEventListener("click", async (e) => {
     const name = (row && (row.customer || row.label)) || "this customer";
     b.disabled = true; b.textContent = "Checking…";
     try {
-      const response = await fetch("/admin/link/" + b.dataset.t + "?action=renew");
+      const response = await fetch("/admin/link/" + b.dataset.t + "?action=check");
       const j = await response.json().catch(() => ({}));
       if (response.ok && j.ok) {
         toast(name + " — " + j.message + (j.usage_message ? " · " + j.usage_message : "") +
-          (j.marked_paid ? " · marked paid through " + prettyDate(j.paid_until) : ""), 6000);
+          " · Payment unchanged.", 6000);
         await load();
         return;
       }
@@ -686,17 +840,17 @@ $("#rows").addEventListener("click", async (e) => {
     } catch (err) {
       toast("Could not check " + name + ": " + err.message, 6000);
     }
-    b.disabled = false; b.textContent = "Renew / Check";
+    b.disabled = false; b.textContent = "Check";
     return;
   }
-  if (a === "paid" || a === "unpaid") {
+  if (a === "unpaid") {
     const row = DATA.find((r) => r.token === b.dataset.t);
     const name = (row && (row.customer || row.label)) || "this customer";
     if (a === "unpaid" && !confirm("Mark " + name + " as not paid? This clears their paid-through date.")) return;
     const label = b.textContent;
     b.disabled = true; b.textContent = a === "paid" ? "Saving…" : "Clearing…";
     try {
-      const response = await fetch("/admin/link/" + b.dataset.t + "?action=" + a);
+      const response = await fetch("/admin/link/" + b.dataset.t + "?action=" + a, { method: "POST" });
       const j = await response.json().catch(() => ({}));
       if (response.ok && j.ok) {
         toast(a === "paid"

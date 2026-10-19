@@ -109,7 +109,9 @@ const afterRows = await snap();
 ok(afterCols.includes("prev_used_gb"), "prev_used_gb was added");
 ok(afterCols.includes("usage_delta_gb"), "usage_delta_gb was added");
 ok(beforeCols.every((c) => afterCols.includes(c)), "every pre-existing column survived");
-ok(afterCols.length === beforeCols.length + 2, `exactly two columns added (${beforeCols.length} -> ${afterCols.length})`);
+ok(afterCols.length === beforeCols.length + 4, `four additive columns: usage tracking + customer sharing (${beforeCols.length} -> ${afterCols.length})`);
+ok(afterCols.includes("customer_type") && afterCols.includes("supplier_account"), "shared-account columns were added");
+ok(afterRows.every((r) => r.customer_type === "individual" && r.supplier_account === null), "existing rows default to Individual without changing their account or payment data");
 
 console.log("\n[3] not one byte of existing customer data changed");
 ok(afterRows.length === beforeRows.length, `row count unchanged (${beforeRows.length} -> ${afterRows.length})`);

@@ -121,32 +121,9 @@ export function scrubSupplier(text, supplierUrl) {
  *   { ok: false, code, error }
  */
 
-// Decide the new paid-through date after a check, or null to leave it alone.
-// Marks the customer paid only when the supplier expiry actually moved FORWARD
-// into the future — a date that merely stayed put, or one already in the past,
-// means nothing was renewed and nothing was paid for.
-export function paidThroughOnRenewal({ previousExpiry, newExpiry, paidUntil, now }) {
-  const at = (d) => {
-    if (!d) return null;
-    const t = Date.parse(String(d).slice(0, 10) + "T00:00:00Z");
-    return Number.isNaN(t) ? null : t;
-  };
-  const next = at(newExpiry);
-  if (next === null) return null;
-
-  const today = Date.parse(
-    (now instanceof Date ? now : new Date()).toISOString().slice(0, 10) + "T00:00:00Z",
-  );
-  if (next < today) return null; // renewed into the past is not a renewal
-
-  const prev = at(previousExpiry);
-  if (prev !== null && next <= prev) return null; // expiry did not move forward
-
-  const paid = at(paidUntil);
-  if (paid !== null && paid >= next) return null; // already paid at least this far
-
-  return String(newExpiry).slice(0, 10);
-}
+// A supplier renewal is never evidence of an individual customer's payment.
+// Keep the old export for callers, but it can no longer infer a payment.
+export function paidThroughOnRenewal() { return null; }
 
 export async function checkCustomerRow(row, deps) {
   const { fetchSubscription, quotaSummary, updateRow } = deps;
@@ -217,18 +194,8 @@ export async function checkCustomerRow(row, deps) {
     checked_at: checkedAt,
   };
 
-  // Renewing with the supplier pushes the expiry date forward — that IS the
-  // proof the customer paid, so the billing side should follow automatically
-  // instead of leaving the row sitting in the "unpaid" pile until someone
-  // edits it by hand. Only ever moves paid_until forwards: a manual entry that
-  // already reaches further out (a customer paid 3 months up front) is kept.
-  const paidUntilUpdate = paidThroughOnRenewal({
-    previousExpiry,
-    newExpiry: patch.supplier_expires,
-    paidUntil: row.paid_until || null,
-    now: now(),
-  });
-  if (paidUntilUpdate) patch.paid_until = paidUntilUpdate;
+  // Only supplier data belongs in this patch. Several customers can share
+  // this subscription, and each payment must be confirmed separately with Pay.
 
   let updated;
   try {
@@ -255,7 +222,7 @@ export async function checkCustomerRow(row, deps) {
       paid_until: row.paid_until || null,
     },
     expiryChanged,
-    markedPaid: Boolean(paidUntilUpdate),
+    markedPaid: false,
     paidUntil: updated.paid_until ?? null,
     usageDeltaGb: delta,
     usageKind: usageKind(delta),
