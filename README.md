@@ -229,6 +229,45 @@ search by account name and filter Individual or Shared customers. Editing an
 individual customer's account name renames it for the customers sharing that
 supplier link without changing their payments.
 
+### Find shared links / Find shared users (discovery only)
+
+Two read-only buttons answer one question: *which saved customers are backed by
+the same supplier subscription?*
+
+- **Find shared links** sits above the customer table and scans **every** saved
+  record, ignoring the current search box and filters. It lists each supplier
+  subscription used by **two or more active customer records**.
+- **Find shared users** is on every real customer row, next to its supplier
+  account. It shows that customer's group, highlights the selected customer and
+  states how many **other active** records share the link
+  ("No other active customer records found" when none do).
+
+Matching uses the **complete underlying supplier subscription URL** — including
+its account-identifying query parameters, with fragments ignored — never the
+hostname, account email/label, plan, dates, customer-type label or the
+customer's outward-facing opaque link. Historical duplicates still marked
+*Individual* are still grouped correctly. Older records whose saved
+`supplier_url` is another customer's Hub link (`/all/…?t=`, `/sr/…?t=`,
+`/q/<token>`, `/sub/<token>` — including `.yaml`/`.txt`/`.conf`/`.json`
+suffixes — and `/share/<token>`) are followed in memory, including nested and
+legacy base64 Hub links, until the original supplier source is found. Missing
+originals, invalid links, cycles and chains deeper than eight hops are flagged
+**Needs review** rather than being treated as independent subscriptions.
+
+The scan is strictly read-only: it makes no supplier/network requests, performs
+no database writes, and never renews, revokes, rotates, deletes, relabels
+records or infers a payment. Revoked/rotated records are shown separately
+(collapsed) and never counted as additional active people; anonymous
+quota-page/seller-tool records are excluded entirely. Reports contain only safe
+account metadata (label, host), customer names, plan, payment status/date and
+last-checked supplier expiry — supplier URLs, upstream tokens, panel passwords
+and raw matching keys never leave the server, including in errors. The dialog
+explains that it finds **registered customer records, not live devices**:
+someone who received a copied link but was never added to the dashboard cannot
+be identified. Separating access for a shared subscription is a separate, later
+task — different private Hub links do not make renewals independent while they
+point at the same supplier subscription.
+
 ### Check is not Pay
 
 - **Check** on a customer reads the supplier's current expiry and quota only.
@@ -364,6 +403,8 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/link/<t>?action=pay` | POST | `paid_until=YYYY-MM-DD` → record a payment for this customer only (today or later) |
 | `/admin/link/<t>?action=unpaid` | POST | Explicitly clear only this customer's payment date |
 | `/admin/shared-link` | POST | `link=` → find the original customer's supplier account without returning its secret URL/password |
+| `/admin/shared-users` | GET | Read-only groups of customers sharing one supplier subscription (groups with ≥2 active records); `Cache-Control: no-store` |
+| `/admin/shared-users?token=<customer-token>` | GET | One customer's group, including unique/revoked records and `Needs review` warnings. 404 unknown/non-customer token, 400 empty token, 405 + `Allow: GET` for other methods |
 | `/admin/reminders` | GET | Reminder history (kind, date, message text) |
 | `/admin/reminders` | POST | Run a reminder pass now |
 | `/admin/reminders/run` | GET | Same, as a GET — for platform crons |
@@ -412,6 +453,7 @@ npm test
   column and value survives byte-identically and that re-running is a no-op.
 - `test/customer-accounts.test.mjs` — shared account/credential inheritance, payment isolation across checks and reminders, additive migrations and concurrent SQL updates.
 - `test/dashboard-ui.test.mjs` — real client/worker interaction: original + shared customer creation, Pay/cancel/retry/Mark unpaid, safe account display and filtering.
+- `test/shared-users.test.mjs` — the read-only shared-link finder: complete-URL matching (including rows mislabeled Individual), same-host/different-token separation, nested/copied/legacy Hub-link resolution, revoked/rotated/generated record handling, missing/cyclic/too-deep chains, leak and no-write/no-network guarantees, HTTP status semantics, and the real dashboard dialog (filter independence, escaping, hidden-on-load, retry, stale replies, Escape and focus restore).
 - `test/renewal.test.mjs` — **151 checks**: per-customer Renew / Check (changed
   vs unchanged expiry), usage increase / unchanged / reset, no delta on the
   first check, failed checks overwriting nothing, the global refresh still
