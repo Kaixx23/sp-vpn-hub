@@ -27,6 +27,7 @@ import {
   listReminders as storeListReminders,
 } from "./token-store.js";
 import { generateQrSvg, qrMakerPage } from "./qr.js";
+import { fetchSupplierPolicy, policyUrl } from "./supplier-policy.js";
 
 // ---------------- translation ----------------
 const INFO_PREFIX = [
@@ -499,7 +500,8 @@ function buildYaml(status, proxies, brand, opts = {}) {
   // "half my nodes are broken" tickets.
   const infoCount = branded.length - realNodes.length;
   const nodeWord = realNodes.length === 1 ? "node" : "nodes";
-  L.push(`# ${realNodes.length} ${nodeWord}${infoCount ? ` + ${infoCount} quota info link(s)` : ""} · ${cn
+  if (opts.supplierPolicy) L.push(`# DNS and routing: supplier policy${opts.supplierPolicy.omittedBrandRule ? " (one supplier-identifying domain rule omitted)" : ""}`);
+  L.push(`# ${realNodes.length} ${nodeWord}${infoCount ? ` + ${infoCount} quota info link(s)` : ""} · ${opts.supplierPolicy ? "supplier DNS and routing" : cn
     ? "CN-optimized: auto speed-test, fallback, carrier lines, CN-direct rules (?cn=1)"
     : "global profile: auto speed-test, fallback, carrier lines, no GeoIP download needed"}`);
   L.push(`# refreshed ${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC`);
@@ -522,39 +524,44 @@ function buildYaml(status, proxies, brand, opts = {}) {
   L.push("tcp-concurrent: true");
   L.push("profile:");
   L.push("  store-selected: " + (remember ? "true" : "false"));
-  L.push("dns:");
-  L.push("  enable: true");
-  L.push("  ipv6: true");
-  // Both from the panel, and both about local/DIRECT lookups rather than the
-  // tunnel: use-hosts lets /etc-hosts entries win, respect-rules is what makes a
-  // domain matched by a DIRECT rule get its REAL address instead of a fake-ip —
-  // the classic "fake-ip broke my LAN/CN app" fix, and it matters on the ?cn=1
-  // profile where GEOIP,CN,DIRECT is in play.
-  L.push("  use-hosts: true");
-  L.push("  respect-rules: true");
-  L.push("  enhanced-mode: fake-ip");
-  L.push("  fake-ip-range: 198.18.0.1/16");
-  L.push('  fake-ip-filter: ["*.lan", "*.local", "+.msftconnecttest.com", "+.msftncsi.com", "time.*.com", "+.pool.ntp.org"]');
-  if (cn) {
-    L.push("  default-nameserver: [223.5.5.5, 119.29.29.29]");
-    L.push("  nameserver: [223.5.5.5, 119.29.29.29]");
-    L.push("  proxy-server-nameserver: [223.5.5.5, 119.29.29.29]");
-    L.push("  fallback: [tls://8.8.8.8:853, tls://1.1.1.1:853]");
-    L.push("  fallback-filter:");
-    L.push("    geoip: true");
-    L.push("    geoip-code: CN");
+  if (opts.supplierPolicy) {
+    // JSON is valid YAML; serialising keeps untrusted scalar values quoted.
+    L.push("dns: " + JSON.stringify(opts.supplierPolicy.dns));
   } else {
-    // Plain-UDP public resolvers only: reachable from every country, no DoH/DoT
-    // handshake to stall behind, and no GeoIP database needed.
-    L.push("  default-nameserver: [1.1.1.1, 8.8.8.8, 9.9.9.9]");
-    L.push("  nameserver: [1.1.1.1, 8.8.8.8, 9.9.9.9]");
-    // Without this mihomo resolves the NODE hostnames with the entries above
-    // too; naming it explicitly keeps that path working even if a user edits
-    // `nameserver` later. This is the setting whose absence produces the
-    // classic "profile imported, every node times out".
-    L.push("  proxy-server-nameserver: [1.1.1.1, 8.8.8.8]");
+    L.push("dns:");
+    L.push("  enable: true");
+    L.push("  ipv6: true");
+    // Both from the panel, and both about local/DIRECT lookups rather than the
+    // tunnel: use-hosts lets /etc-hosts entries win, respect-rules is what makes a
+    // domain matched by a DIRECT rule get its REAL address instead of a fake-ip —
+    // the classic "fake-ip broke my LAN/CN app" fix, and it matters on the ?cn=1
+    // profile where GEOIP,CN,DIRECT is in play.
+    L.push("  use-hosts: true");
+    L.push("  respect-rules: true");
+    L.push("  enhanced-mode: fake-ip");
+    L.push("  fake-ip-range: 198.18.0.1/16");
+    L.push('  fake-ip-filter: ["*.lan", "*.local", "+.msftconnecttest.com", "+.msftncsi.com", "time.*.com", "+.pool.ntp.org"]');
+    if (cn) {
+      L.push("  default-nameserver: [223.5.5.5, 119.29.29.29]");
+      L.push("  nameserver: [223.5.5.5, 119.29.29.29]");
+      L.push("  proxy-server-nameserver: [223.5.5.5, 119.29.29.29]");
+      L.push("  fallback: [tls://8.8.8.8:853, tls://1.1.1.1:853]");
+      L.push("  fallback-filter:");
+      L.push("    geoip: true");
+      L.push("    geoip-code: CN");
+    } else {
+      // Plain-UDP public resolvers only: reachable from every country, no DoH/DoT
+      // handshake to stall behind, and no GeoIP database needed.
+      L.push("  default-nameserver: [1.1.1.1, 8.8.8.8, 9.9.9.9]");
+      L.push("  nameserver: [1.1.1.1, 8.8.8.8, 9.9.9.9]");
+      // Without this mihomo resolves the NODE hostnames with the entries above
+      // too; naming it explicitly keeps that path working even if a user edits
+      // `nameserver` later. This is the setting whose absence produces the
+      // classic "profile imported, every node times out".
+      L.push("  proxy-server-nameserver: [1.1.1.1, 8.8.8.8]");
+    }
   }
-  if (cn) {
+  if (cn && !opts.supplierPolicy) {
     // GEOIP rules below need the mmdb; let the core refresh it in the
     // background instead of blocking the first connection.
     L.push("geo-auto-update: true");
@@ -607,7 +614,11 @@ function buildYaml(status, proxies, brand, opts = {}) {
   L.push("  type: select");
   L.push("  proxies: [DIRECT, REJECT]");
   L.push("rules:");
-  if (cn) {
+  if (opts.supplierPolicy) {
+    for (const parts of opts.supplierPolicy.rules) {
+      L.push("  - " + yq(parts.map(part => part === null ? TOP : part).join(",")));
+    }
+  } else if (cn) {
     L.push("  - GEOIP,PRIVATE,DIRECT,no-resolve");
     L.push("  - DOMAIN-SUFFIX,cn,DIRECT");
     L.push("  - GEOIP,CN,DIRECT");
@@ -624,7 +635,7 @@ function buildYaml(status, proxies, brand, opts = {}) {
     L.push("  - IP-CIDR6,fc00::/7,DIRECT,no-resolve");
     L.push("  - IP-CIDR6,fe80::/10,DIRECT,no-resolve");
   }
-  L.push("  - MATCH," + TOP);
+  if (!opts.supplierPolicy) L.push("  - MATCH," + TOP);
   L.push("proxies:");
   for (const p of branded) {
     const net = normNet(p.net, p.proto);
@@ -715,7 +726,9 @@ function splitYamlSections(y) {
   const hay = "\n" + y;
   const i = hay.lastIndexOf("\nproxies:\n");
   if (i < 0) return { groups: y, proxies: "" };
-  return { groups: hay.slice(0, i + 1), proxies: hay.slice(i + 1) };
+  const beforeProxies = hay.slice(0, i + 1);
+  const rulesAt = beforeProxies.lastIndexOf("\nrules:\n");
+  return { groups: rulesAt < 0 ? beforeProxies : beforeProxies.slice(0, rulesAt + 1), proxies: hay.slice(i + 1) };
 }
 
 /**
@@ -725,6 +738,7 @@ function splitYamlSections(y) {
  */
 export function checkProfile(y, opts = {}) {
   const cn = !!opts.cn;
+  const supplierPolicy = !!opts.supplierPolicy;
   const problems = [];
   const bad = (code, msg) => problems.push({ code, msg });
   const sec = splitYamlSections(y);
@@ -732,23 +746,23 @@ export function checkProfile(y, opts = {}) {
   // 1. No geodata dependency. GEOIP rules + fallback-filter.geoip force the
   //    core to download geoip.metadb *through the network the user cannot
   //    reach yet* — which surfaces as a timeout on import, not an error.
-  if (!cn && (/(^|\n)\s*-\s*GEOIP,/.test(y) || /geoip:\s*true/.test(y))) {
+  if (!supplierPolicy && !cn && (/(^|\n)\s*-\s*GEOIP,/.test(y) || /geoip:\s*true/.test(y))) {
     bad("needs-geoip", "profile requires a GeoIP download before first connection");
   }
-  if (cn && !/-\s*GEOIP,CN,DIRECT/.test(y)) bad("cn-missing-geoip", "?cn=1 profile lost its GEOIP,CN rule");
+  if (!supplierPolicy && cn && !/-\s*GEOIP,CN,DIRECT/.test(y)) bad("cn-missing-geoip", "?cn=1 profile lost its GEOIP,CN rule");
 
   // 2. Resolvers must be reachable where the customer is. Chinese public
   //    resolvers are only fast inside China; elsewhere they are slow or
   //    dropped, and mihomo resolves NODE hostnames with them — so every
   //    connection and every latency test fails even though import worked.
   const ns = (y.match(/^[ ]*nameserver:\s*(.*)$/m) || [, ""])[1];
-  if (!cn && /223\.5\.5\.5|119\.29\.29\.29/.test(ns)) bad("cn-dns", `global profile uses China-only resolvers: ${ns.trim()}`);
-  if (cn && !/223\.5\.5\.5/.test(ns)) bad("cn-dns-missing", "?cn=1 profile lost its CN resolvers");
+  if (!supplierPolicy && !cn && /223\.5\.5\.5|119\.29\.29\.29/.test(ns)) bad("cn-dns", `global profile uses China-only resolvers: ${ns.trim()}`);
+  if (!supplierPolicy && cn && !/223\.5\.5\.5/.test(ns)) bad("cn-dns-missing", "?cn=1 profile lost its CN resolvers");
 
   // 3. Without this the node hostnames are resolved with the entries above,
   //    and a user editing `nameserver` breaks the tunnel. Its absence is the
   //    classic "imported fine, every node times out".
-  if (!/^[ ]*proxy-server-nameserver:/m.test(y)) bad("no-proxy-nameserver", "missing dns.proxy-server-nameserver");
+  if (!supplierPolicy && !/^[ ]*proxy-server-nameserver:/m.test(y)) bad("no-proxy-nameserver", "missing dns.proxy-server-nameserver");
   // 3b. Latency display: a group of nodes with no `url:` gives the app nothing
   // to measure with (the core will not probe a select group at all, and reports
   // no testUrl for it), so every country shows a blank and the customer reads
@@ -1137,6 +1151,21 @@ async function collectRows(brand, linksText, host) {
 // ---------------- data (with 5-min cache to protect the supplier) ----------------
 const _cache = new Map();
 const TTL = 300000;
+// Separate cache: policy is only needed by YAML clients and must not slow down
+// Shadowrocket or the dashboard. Resolve token on every request for revocation.
+const _policyCache = new Map();
+async function getSupplierPolicy(tok) {
+  try {
+    const source = await storeResolve(tok);
+    if (!source || !policyUrl(source)) return null;
+    const hit = _policyCache.get(tok);
+    if (hit && hit.source === source && Date.now() - hit.t < TTL) return hit.policy;
+    const policy = await fetchSupplierPolicy(source);
+    if (policy) _policyCache.set(tok, { source, policy, t: Date.now() });
+    return policy;
+  } catch { return null; }
+}
+
 
 // Health-report cache: an open dashboard polls /admin/health, and the report
 // itself fetches the supplier — cache it so polling cannot hammer the panel.
@@ -1384,7 +1413,7 @@ const safeExpect = (v) => {
 };
 
 const yamlOpts = (url, skipped) => ({
-  cn: isCn(url),
+  cn: url.searchParams.get("policy") !== "global" && isCn(url),
   remember: isOn(url.searchParams.get("remember")),
   health: url.searchParams.get("health") || "",
   expect: url.searchParams.get("expect") || "",
@@ -2054,7 +2083,8 @@ export default {
         if (!tok) return json({ ...out, error: "add ?t=<your token> for a full profile check" }, 400);
         const t0 = Date.now();
         try {
-          const { status, links, proxies } = await getDecoded(tok);
+          const [all, supplierPolicy] = await Promise.all([getDecoded(tok), url.searchParams.get("policy") === "global" ? null : getSupplierPolicy(tok)]);
+          const { status, links, proxies } = all;
           out.supplierMs = Date.now() - t0;
           out.nodes = { shareLinks: links.length, clashUsable: proxies.length, unsupported: links.length - proxies.length };
           // Group by the host actually dialled: if one host is down upstream,
@@ -2065,15 +2095,17 @@ export default {
             .sort((a, b) => b[1] - a[1])
             .map(([server, count]) => ({ server, nodes: count }));
           out.quota = quotaSummary(status) || null;
-          const y = buildYaml(status, proxies, "SP VPN", yamlOpts(url, skippedNodeNames(links, proxies)));
+          const opts = { ...yamlOpts(url, skippedNodeNames(links, proxies)), supplierPolicy };
+          const y = buildYaml(status, proxies, "SP VPN", opts);
           const names = proxies.length ? y.split("\n").filter((l) => l.startsWith("- name: ")).map((l) => l.slice(8)) : [];
           out.yaml = {
-            mode: isCn(url) ? "cn" : "global",
+            mode: supplierPolicy ? "supplier-dns-routing" : isCn(url) ? "cn" : "global",
+            supplierIdentifyingRuleOmitted: !!supplierPolicy?.omittedBrandRule,
             bytes: y.length,
             proxies: names.length,
             duplicateNames: names.length - new Set(names).size,
-            needsGeoipDownload: /GEOIP|geoip:/.test(y),
-            resolvers: (y.match(/^  nameserver: .*$/m) || [""])[0].trim(),
+            needsGeoipDownload: supplierPolicy ? true : /GEOIP|geoip:/.test(y),
+            resolvers: supplierPolicy ? supplierPolicy.dns.nameserver : (y.match(/^  nameserver: .*$/m) || [""])[0].trim(),
             // Full guard against the profile THIS student would receive, so a
             // report of "it times out in Clash" names the reason or rules it out.
             // The probe is what the app's green/red dots are based on, so a
@@ -2090,7 +2122,7 @@ export default {
               }));
             })(),
             expectedStatus: (y.match(/^  expected-status: (.+)$/m) || [null, null])[1] || "(any status)",
-            guard: checkProfile(y, yamlOpts(url)),
+            guard: checkProfile(y, opts),
           };
           out.ok = proxies.length > 0 && out.yaml.duplicateNames === 0 && out.yaml.guard.ok;
         } catch (e) {
@@ -2120,10 +2152,6 @@ export default {
         const brand = seg.name || "SP VPN";
         const tok = url.searchParams.get("t") || "";
         if (!tok) return plainErr("missing ?t= parameter", 400);
-        const all = await getDecoded(tok);
-        if (!all.links.length) return plainErr("No nodes found in that link.");
-        const { status, links, proxies } = filterNodes(all, url);
-        if (!links.length) return plainErr(FILTERED_OUT, 400);
         // format negotiation: explicit ?fmt= / .yaml suffix wins, then UA, then Accept
         const wantsYaml = wantsClashYaml({
           fmt: url.searchParams.get("fmt") || "",
@@ -2131,10 +2159,14 @@ export default {
           accept: request.headers.get("accept") || "",
           ext: seg.ext,
         });
+        const [all, supplierPolicy] = await Promise.all([getDecoded(tok), wantsYaml && url.searchParams.get("policy") !== "global" ? getSupplierPolicy(tok) : null]);
+        if (!all.links.length) return plainErr("No nodes found in that link.");
+        const { status, links, proxies } = filterNodes(all, url);
+        if (!links.length) return plainErr(FILTERED_OUT, 400);
         const extra = subHeaders(status, `${host}/q/${tok}`);
         if (wantsYaml) {
           if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-          return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url, skippedNodeNames(links, proxies))), extra);
+          return yamlRes(buildYaml(status, proxies, brand, { ...yamlOpts(url, skippedNodeNames(links, proxies)), supplierPolicy }), { ...extra, "X-SPVPN-DNS-Routing": supplierPolicy ? "supplier" : "converter-fallback" });
         }
         return plain(btoa(unescape(encodeURIComponent(buildShare(status, links, brand)))), extra);
       }
@@ -2145,14 +2177,14 @@ export default {
         // lookup would fail on "<tok>.yaml" and the app shows a timeout.
         const tok = splitExt(m[1]).name;
         const brand = url.searchParams.get("brand") || "SP VPN";
-        const all = await getDecoded(tok);
+        const [all, supplierPolicy] = await Promise.all([getDecoded(tok), url.searchParams.get("policy") === "global" ? null : getSupplierPolicy(tok)]);
         const { status, links, proxies } = filterNodes(all, url);
         // Distinguish "the filter matched nothing" from "this subscription has
         // nothing Clash can use" — the first is the customer's own parameter and
         // needs a 400 with the reason, the second is the supplier's data.
         if (all.links.length && !links.length) return plainErr(FILTERED_OUT, 400);
         if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-        return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url, skippedNodeNames(links, proxies))), subHeaders(status, `${host}/q/${tok}`));
+        return yamlRes(buildYaml(status, proxies, brand, { ...yamlOpts(url, skippedNodeNames(links, proxies)), supplierPolicy }), { ...subHeaders(status, `${host}/q/${tok}`), "X-SPVPN-DNS-Routing": supplierPolicy ? "supplier" : "converter-fallback" });
       }
       if ((m = path.match(/^\/share\/([^/]+)$/))) {
         const brand = url.searchParams.get("brand") || "SP VPN";
