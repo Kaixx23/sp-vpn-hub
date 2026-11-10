@@ -591,13 +591,40 @@ console.log("\n[17] a rate limit is not an outage; a loop-back link is not a sup
   ok(resume.checked === 6 && resume.results.some((x) => x.ok && x.customer === "AfterTheWall"),
     "resuming from the returned cursor reaches the row the wall stopped us at");
 
+  // One challenged row inside an otherwise healthy batch must NOT stop the book:
+  // the first live paged run was 17 updated + 1 bot-check, and stopping there would
+  // have discarded 96 customers that were answering fine.
+  {
+    const { REFRESH_THROTTLE_STOP } = await import("../sp-vpn-worker.js");
+    // the six wall rows from above are still in the book; with their panel healthy
+    // again, the ONLY challenged row here is the lonely one — which is the case
+    // that must not stop anything.
+    setPanel("wall", 1, 1, 100, day(9));
+    ok(REFRESH_THROTTLE_STOP === 2, `a host has to push back ${REFRESH_THROTTLE_STOP}× before the sweep gives up`);
+    for (let n = 0; n < 5; n++) { setPanel("healthy" + n, 1, 1, 100, day(25 + n)); await mint("healthy" + n, { customer: "H" + n }); }
+    setPanel("singlewall", 1, "CHALLENGE", 100, day(9));
+    const lonely = await mint("singlewall", { customer: "LonelyWall" });
+    const one = await jget("/admin/refresh?after=0");
+    ok(one.throttled === 1 && one.checked >= 6, `one wall row among healthy customers (checked ${one.checked}, throttled ${one.throttled})`);
+    ok(one.backed_off === false, "the sweep does NOT stop for a single challenged row");
+    ok(one.remaining === 0 || one.partial === false || one.checked > 6, "…and keeps going through the rest of the book");
+    ok(one.results.some((x) => x.customer === "H4" && x.ok === true), "the healthy rows around it were still updated");
+    ok(one.throttle_hosts.length === 1 && /panel\.example/.test(one.throttle_hosts[0]),
+      `the response names which panel pushed back (${JSON.stringify(one.throttle_hosts)})`);
+    ok((await rowOf(lonely)).checked_at == null, "the challenged row still kept its old values");
+  }
+
   // One row at a time gets the same honesty, with the status the fix deserves.
-  const r = await get("/admin/link/" + wallToks[0] + "?action=check");
+  // Re-arm the wall and use a FRESH row: the six above were just checked
+  // successfully by the lonely-row sweep, so their checked_at is no longer null.
+  setPanel("wall", 1, "CHALLENGE", 100, day(9));
+  const perRowWall = await mint("wall", { customer: "WallSolo" });
+  const r = await get("/admin/link/" + perRowWall + "?action=check");
   const j = JSON.parse(await r.text());
   ok(r.status === 503, `a challenged single-row check answers 503, not 502 (got ${r.status})`);
   ok(j.ok === false && j.throttled === true, "and it carries the throttled flag the dashboard reads");
   ok(/rate.?limit|bot check/i.test(j.error), `the sentence says what to do about it (${JSON.stringify(j.error)})`);
-  ok((await rowOf(wallToks[0])).checked_at == null, "a throttled check still writes nothing");
+  ok((await rowOf(perRowWall)).checked_at == null, "a throttled check still writes nothing");
 
   // ---- (b) the loop-back link: a customer link saved as if it were the supplier's
   const loopTok = await mint("loop", { customer: "Loopy" });

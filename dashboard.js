@@ -777,6 +777,7 @@ $("#refresh").addEventListener("click", async (e) => {
   // being down, when in fact the supplier was answering fine.
   let after = 0, checked = 0, updated = 0, failed = 0, total = 0, why = null, pages = 0, cut = false;
   let throttlePages = 0, selfRef = 0, backedOff = false;
+  const hostNotes = [];
   for (;;) {
     if (++pages > 80) { cut = true; break; } // ~13k customers; bail rather than spin
     let j;
@@ -795,6 +796,7 @@ $("#refresh").addEventListener("click", async (e) => {
     checked += j.checked || 0; updated += j.updated || 0; failed += j.failed || 0;
     throttlePages += j.throttled || 0; selfRef += j.self_referential || 0;
     if (j.backed_off) { backedOff = true; }
+    if (j.throttle_hosts) for (const h of j.throttle_hosts) if (hostNotes.indexOf(h) < 0) hostNotes.push(h);
     if (!why) { const bad = (j.results || []).find((x) => x && x.ok === false); if (bad) why = (bad.customer ? bad.customer + ": " : "") + bad.error; }
     if (!j.partial || !j.next) break;
     if (j.next <= after) { cut = true; break; } // no forward progress: never loop
@@ -807,7 +809,14 @@ $("#refresh").addEventListener("click", async (e) => {
   if (total > checked) parts.push(backedOff ? "resumed where it stopped next time" : (cut ? "sweep stopped early" : (total - checked) + " not checked"));
   // "failed" means nothing on its own. The sweep now returns the reason class, so
   // the owner is told what to DO: wait, fix a link, or contact the supplier.
-  if (throttlePages) parts.push("the supplier's panel is rate-limiting us after " + throttlePages + " row(s) — wait a minute, then click again to resume");
+  // Two different situations, one number. A sweep that STOPPED because a panel kept
+  // challenging us is "wait and resume"; a sweep that carried on past one
+  // challenged row is that row's problem, and saying "rate-limiting, resume" would
+  // make the owner think the whole book failed.
+  if (throttlePages) parts.push((backedOff
+    ? "the supplier's panel is rate-limiting us after " + throttlePages + " row(s) — wait a minute, then click again to resume"
+    : throttlePages + " row(s) hit the panel's bot check and kept their old values") +
+    (hostNotes.length ? " (" + hostNotes.join(", ") + ")" : ""));
   if (selfRef) parts.push(selfRef + " row(s) have one of our own links saved as the supplier link — fix in Edit");
   if (failed) parts.push(failed + " could not be read");
   if (why) parts.push("first one: " + why);

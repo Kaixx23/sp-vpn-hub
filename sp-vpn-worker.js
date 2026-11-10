@@ -16,7 +16,7 @@ import {
   backend as storeBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise, isSystemGeneratedRow, cycleMonths } from "./dashboard.js";
-import { customerType, validCustomerType, supplierKey, supplierAccounts, resolveCustomerLink, validPaidUntil } from "./customer-accounts.js";
+import { customerType, validCustomerType, supplierKey, supplierHost, supplierAccounts, resolveCustomerLink, validPaidUntil } from "./customer-accounts.js";
 import { sharedUsersReport, sharedUsersForToken } from "./shared-users.js";
 import { PLAN_CATALOG, profitOf } from "./plans.js";
 import { checkCustomerRow, usageKind, usageMessage } from "./renewal.js";
@@ -175,6 +175,11 @@ export const REFRESH_BUDGET_MS = 8000;
 export const REFRESH_MAX_BUDGET_MS = 25000;
 // Never start a batch that cannot finish inside what is left of the request.
 export const REFRESH_MIN_LEFT_MS = 1500;
+// Back off from a wall only once a HOST has pushed back twice. A single challenged
+// row inside an otherwise healthy batch is that row's problem, not the sweep's: the
+// first live paged run (2026-11-10) was 18 rows, 17 updated, one 403 — stopping
+// there would have thrown away 96 customers that were answering normally.
+export const REFRESH_THROTTLE_STOP = 2;
 
 export async function fetchSubscription(url, budgetMs = FETCH_BUDGET_MS) {
   const uas = [
@@ -1758,6 +1763,7 @@ export default {
         const after = Math.min(nInt(url.searchParams.get("after"), 0), rows.length);
         const deadline = Date.now() + budget;
         let updated = 0, failed = 0, throttled = 0, cursor = after, batches = 0, backed_off = false;
+        const throttleByHost = new Map(); // host -> rows it challenged this request
         // Shared packages are the norm here — several customers sit on ONE supplier
         // subscription — so a per-ROW fetch asks the panel the same question up to
         // CONC times at once. That is what draws the bot check. One live fetch per
@@ -1798,7 +1804,11 @@ export default {
             const base = { token: r.token, customer: r.customer || r.label || null };
             if (!out.ok) {
               failed++;
-              if (out.throttled) throttled++;
+              if (out.throttled) {
+                throttled++;
+                const hostile = supplierHost(r.supplier_url);
+                throttleByHost.set(hostile, (throttleByHost.get(hostile) || 0) + 1);
+              }
               results.push({ ...base, ok: false, error: out.error, throttled: !!out.throttled, self_referential: !!out.self_referential });
               return;
             }
@@ -1819,10 +1829,13 @@ export default {
           }));
           cursor += batch.length;
           // Walking into the same wall 19 more times does not get you through it,
-          // and it is our own request volume that raised it. Stop, hand back the
-          // cursor, and let the owner resume in a minute — paging made that a
-          // first-class operation rather than "try again and hope".
-          if (throttled) { backed_off = true; break; }
+          // and it is our own request volume that raised it. But "a wall" means a
+          // host answering repeatedly, not one row of a batch — so stop on the
+          // second challenge from the SAME host, hand back the cursor, and let the
+          // owner resume in a minute. Paging made that a first-class operation
+          // instead of "try again and hope".
+          for (const n of throttleByHost.values()) if (n >= REFRESH_THROTTLE_STOP) backed_off = true;
+          if (backed_off) break;
         }
         const remaining = Math.max(rows.length - cursor, 0);
         return json({
@@ -1839,6 +1852,9 @@ export default {
           // the two failure kinds the owner can actually act on
           throttled,
           backed_off,
+          // which panels are shielding themselves, named, so the dashboard can
+          // point at one supplier account instead of "the supplier"
+          throttle_hosts: [...throttleByHost.entries()].filter(([, n]) => n >= 1).map(([h, n]) => h + " ×" + n),
           self_referential: results.filter((x) => x.self_referential).length,
           renewed: results.filter((x) => x.ok && x.renewed).length,
           marked_paid: results.filter((x) => x.ok && x.marked_paid).length,

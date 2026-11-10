@@ -203,7 +203,7 @@ export async function checkCustomerRow(row, deps) {
       code: throttled ? 503 : 502,
       throttled,
       error: throttled
-        ? "the supplier's panel is shielding itself from us right now (bot check / rate limit) — nothing was changed. Wait a minute; check one customer at a time instead of the whole book."
+        ? "the supplier's panel is shielding itself from us right now (bot check / rate limit) — nothing was changed. Wait a minute before trying again."
         : "could not check the supplier subscription: " +
           scrubSupplier(e && e.message ? e.message : e, supplierUrl),
     };

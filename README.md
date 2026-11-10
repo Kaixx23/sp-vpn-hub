@@ -244,10 +244,15 @@ Three changes followed from that, all pinned by `test/renewal.test.mjs` [17]:
   `supplierKey()` for the life of the request, so a shared package costs one fetch
   and still writes each row's own usage delta. This alone cut the sweep's request
   count roughly in half on the live book.
-* **A wall stops the sweep instead of drowning in it.** `isThrottleResponse()`
-  classifies 403/429/`Just a moment…`; a throttled batch sets `backed_off` and the
-  sweep ends there, cursor included. Walking into the wall 18 more times only
-  deepens the challenge — and every row left in `remaining` is *queued*, not lost.
+* **A wall stops the sweep instead of drowning in it** — but only a *real* wall.
+  `isThrottleResponse()` classifies 403/429/`Just a moment…`, and the sweep backs off
+  once one HOST has challenged `REFRESH_THROTTLE_STOP` (2) rows. It started as
+  "stop at the first challenge", and the first live run showed that was wrong: 18
+  rows came back `updated: 17, throttled: 1`, and stopping there would have
+  abandoned 96 customers who were answering perfectly well. A single challenged row
+  is that row's problem; it keeps its old values and the sweep carries on. Every row
+  still in `remaining` is *queued*, not lost, and `throttle_hosts` names which panel
+  pushed back.
   The pill now reads **`● supplier throttling us — retry in a minute`** rather than
   `supplier issue`, because "wait" and "escalate" are different actions.
 * **A loop-back link is refused by name, without fetching.** `422` +
@@ -884,7 +889,7 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-`npm test` runs **14 suites**: 1001 counted checks across the nine that report a
+`npm test` runs **14 suites**: 1008 counted checks across the nine that report a
 number, 21 `node:test` subtests in three more, and two suites that report a
 verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
 what each suite prints today — they were all stale in this file once already,
@@ -904,7 +909,7 @@ which is its own small argument for reading them from the run, not the README.)
 - `test/customer-accounts.test.mjs` — shared account/credential inheritance, payment isolation across checks and reminders, additive migrations and concurrent SQL updates.
 - `test/dashboard-ui.test.mjs` — real client/worker interaction: original + shared customer creation, Pay/cancel/retry/Mark unpaid, safe account display and filtering.
 - `test/shared-users.test.mjs` — the read-only shared-link finder: complete-URL matching (including rows mislabeled Individual), same-host/different-token separation, nested/copied/legacy Hub-link resolution, revoked/rotated/generated record handling, missing/cyclic/too-deep chains, leak and no-write/no-network guarantees, HTTP status semantics, and the real dashboard dialog (filter independence, escaping, hidden-on-load, retry, stale replies, Escape and focus restore).
-- `test/renewal.test.mjs` — **213 checks**: per-customer Renew / Check (changed
+- `test/renewal.test.mjs` — **220 checks**: per-customer Renew / Check (changed
   vs unchanged expiry), usage increase / unchanged / reset, no delta on the
   first check, failed checks overwriting nothing, the global refresh still
   working and persisting deltas, revoked + unknown + direct-node customers
