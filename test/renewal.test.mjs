@@ -656,6 +656,16 @@ console.log("\n[17] a rate limit is not an outage; a loop-back link is not a sup
   await store.updateRow(loopTok, { supplier_url: HOST + "/sub/account-one?token=PRIVATE-SUPPLIER-SECRET" });
   const r3 = await get("/admin/link/" + loopTok + "?action=check");
   const j3 = JSON.parse(await r3.text());
+  // The proof that does not need a host at all: the branded domain serves BOTH our
+  // customer links and the panel, so on that domain only "this token belongs to a
+  // row of the book" distinguishes a loop-back from a supplier link.
+  await store.updateRow(loopTok, { supplier_url: "https://brand.example/sub/" + survivor });
+  const r4 = await get("/admin/link/" + loopTok + "?action=check");
+  const j4 = JSON.parse(await r4.text());
+  ok(r4.status === 422 && j4.self_referential === true && j4.points_at === "AfterTheWall",
+    `a loop-back on a foreign-looking host is caught by the token, and named (${JSON.stringify({ s: r4.status, at: j4.points_at })})`);
+  ok(/belongs to AfterTheWall/.test(j4.error || ""), "…and says whose link it is");
+
   ok(j3.self_referential === false && r3.status === 502,
     `our own host + /sub/ + a non-token path is fetched, not refused (${JSON.stringify({ s: r3.status, r: j3.self_referential })})`);
 

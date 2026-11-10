@@ -1117,7 +1117,7 @@ $("#rows").addEventListener("click", async (e) => {
       // come from the API's check result; a bare "HTTP 502" taught the owner
       // nothing about which of the two problems to fix.
       toast((j.throttled ? name + " — the supplier's panel is rate-limiting us (bot check). Nothing changed; try again in a minute."
-        : j.self_referential ? name + " — " + (j.error || "this row's supplier link is one of our own links.")
+        : j.self_referential ? name + " — saved supplier link is our own customer link" + (j.points_at ? " (it belongs to " + j.points_at + ")" : "") + ". Edit this row and paste the SUPPLIER's link."
         : "Could not check " + name + ": " + (j.error || ("HTTP " + response.status))), 6000);
     } catch (err) {
       toast("Could not check " + name + ": " + err.message, 6000);

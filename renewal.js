@@ -116,11 +116,15 @@ export function scrubSupplier(text, supplierUrl) {
 // match, which is what separates `/sub/1f5210…adb7a` (ours) from
 // `/sub/account-one?token=…` (a panel's own path).
 const OUR_ROUTES = /^\/(all|sub|sr|share)(\/|$)/i;
-function ourCustomerLink(u) {
-  if (!OUR_ROUTES.test(u.pathname)) return false;
+// Returns our token when the URL is shaped like a link this converter minted,
+// else null. Shape alone is not proof (a panel could use /sub/<hash> too), so the
+// caller still has to confirm it — by host, or by finding the token in the book.
+function ourLinkToken(u) {
+  if (!OUR_ROUTES.test(u.pathname)) return null;
   const seg = u.pathname.split("/").filter(Boolean);
   const maybe = seg[0] === "sub" ? seg[1] : u.searchParams.get("t");
-  return /^[0-9a-f]{48}$/i.test(String(maybe || ""));
+  const t = String(maybe || "").toLowerCase();
+  return /^[0-9a-f]{48}$/.test(t) ? t : null;
 }
 
 /**
@@ -170,36 +174,45 @@ export async function checkCustomerRow(row, deps) {
     };
   }
 
-  // A link our OWN converter serves, saved as if it were the supplier's. It does
-  // answer — 200, with our quota comment at the top and zero node links below it —
-  // so the old behaviour was a baffling "supplier returned no nodes" for the
-  // owner, plus a wasted request that re-enters this same worker. Recognise the
-  // shape and say what to do about it. Paths are the worker's own routes; a real
-  // panel lives on /api/… or its own script names, so this cannot misfire on a
-  // supplier URL in practice.
   const selfHost = (() => {
     const h = deps.selfHost;
     if (!h) return null;
     try { return new URL(String(h), "http://_.invalid").host; }
     catch (e) { return String(h).replace(/^[a-z]+:\/\//i, "").split("/")[0]; }
   })();
+  // A link our OWN converter serves, saved as if it were the supplier's. It does
+  // answer — 200, with our quota comment on top and zero node links below — so the
+  // old behaviour was a baffling "supplier returned no nodes", plus a request that
+  // re-entered this same worker. Two independent proofs, either one is enough:
+  //   · the URL is on the host serving this request (or any netlify.app host) and
+  //     is shaped like one of our links;
+  //   · the token in it belongs to a row of the book — then it IS a customer's own
+  //     link, whatever domain the owner pasted it from (they run at least three:
+  //     sp-vpn, sp-connect, and the branded one, and the branded one also proxies
+  //     the panel, so host alone proves nothing there).
+  // Real panels live under exactly these path names too — `https://panel.example/
+  // sub/account-one?token=…` is an ordinary supplier URL, and a first cut matching
+  // only the path silenced the whole reminder pass (test/customer-accounts.test.mjs
+  // caught it). No proof matched means we fetch it like any other subscription.
+  const tokens = deps.knownTokens instanceof Map ? deps.knownTokens : null;
   try {
     const u = new URL(supplierUrl);
-    // The host match is MANDATORY, not a refinement. Real subscription panels
-    // live under exactly these path names — `https://panel.example/sub/account-one`
-    // is an ordinary supplier URL, and a first cut of this guard that matched the
-    // path alone silenced the whole reminder pass on it (caught by
-    // test/customer-accounts.test.mjs). So: no selfHost from the caller, or a
-    // different host, means this is not our link and we fetch it like any other.
-    if (selfHost && u.host === selfHost && ourCustomerLink(u)) {
-      return {
-        ok: false,
-        code: 422,
-        self_referential: true,
-        error: "the saved supplier link is one of our own customer links (" + u.pathname +
-          ") — it points back at this converter, so there is nothing upstream to read. " +
-          "Edit this customer and paste the link the SUPPLIER gave you.",
-      };
+    const t = ourLinkToken(u);
+    if (t) {
+      const owner = tokens ? tokens.get(t) : undefined;
+      const sameHost = (selfHost && u.host === selfHost) || /\.netlify\.app$/i.test(u.host);
+      if (owner !== undefined || sameHost) {
+        return {
+          ok: false,
+          code: 422,
+          self_referential: true,
+          points_at: owner && owner.customer ? owner.customer : null,
+          error: "the saved supplier link is one of our own customer links (" + u.pathname +
+            (owner && owner.customer ? ", it belongs to " + owner.customer : "") +
+            ") — it points back at this converter, so there is nothing upstream to read. " +
+            "Edit this customer and paste the link the SUPPLIER gave you.",
+        };
+      }
     }
   } catch (e) { /* not an absolute URL — the direct-link branch above already handled that */ }
 

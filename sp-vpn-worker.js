@@ -1762,6 +1762,9 @@ export default {
         // the worst case is that somebody gets checked twice.
         const after = Math.min(nInt(url.searchParams.get("after"), 0), rows.length);
         const deadline = Date.now() + budget;
+        // token -> { customer } for the loop-back guard: a saved supplier link
+        // carrying one of THESE tokens is a customer's own link, on any domain.
+        const knownTokens = new Map(rows.map((r) => [String(r.token).toLowerCase(), { customer: r.customer || r.label || null }]));
         let updated = 0, failed = 0, throttled = 0, cursor = after, batches = 0, backed_off = false;
         const throttleByHost = new Map(); // host -> rows it challenged this request
         // Shared packages are the norm here — several customers sit on ONE supplier
@@ -1799,7 +1802,7 @@ export default {
                 }
                 return fetchMemo.get(k);
               },
-              quotaSummary, updateRow: storeUpdate, selfHost: host,
+              quotaSummary, updateRow: storeUpdate, selfHost: host, knownTokens,
             });
             const base = { token: r.token, customer: r.customer || r.label || null };
             if (!out.ok) {
@@ -1877,6 +1880,7 @@ export default {
           if (!cur) return json({ ok: false, token: t, error: "unknown token" }, 404);
           const out = await checkCustomerRow(cur, {
             fetchSubscription, quotaSummary, updateRow: storeUpdate, selfHost: host,
+            knownTokens: new Map(rows.map((r) => [String(r.token).toLowerCase(), { customer: r.customer || r.label || null }])),
           });
           // A failed check writes nothing — the row keeps its previous expiry,
           // quota and usage delta. `throttled` / `self_referential` ride along so
@@ -1886,6 +1890,7 @@ export default {
             return json({
               ok: false, token: t, error: out.error,
               throttled: !!out.throttled, self_referential: !!out.self_referential,
+              points_at: out.points_at || null,
             }, out.code);
           }
           return json({
