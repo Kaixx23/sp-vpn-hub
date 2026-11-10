@@ -125,6 +125,13 @@ async function get(path, ua) {
 // Clash Meta / ClashX Meta / FlClash / Stash will load the profile.
 const RESERVED = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "PASS-RULE", "COMPATIBLE", "GLOBAL"];
 function validateMihomo(body, label) {
+  // Fail loudly if this is not a profile at all. Without this, an error page
+  // ("Couldn't read that link…") parses as a YAML *string*, `cfg.proxies` is
+  // undefined, and every `.every()`/`.length` check below passes vacuously —
+  // one 502 looked like 17 green checks. Found exactly this way: a merge left
+  // /sub/<token> reading an undefined variable and only the MATCH check blinked.
+  ok(/^proxies:\s*$/m.test(body) && /^proxy-groups:\s*$/m.test(body) && /^rules:\s*$/m.test(body),
+    `${label}: body is actually a mihomo profile (not an error page)`);
   let cfg;
   try { cfg = yaml.load(body); } catch (e) { ok(false, `${label}: YAML parses (${e.message})`); return; }
   ok(true, `${label}: YAML parses`);

@@ -195,3 +195,43 @@ test("dashboard: add original, inherit shared account, Check without paying, the
   assert.equal((await store.listAll()).length, 2);
   assert.deepEqual(errors, [], "no client-side exceptions during the complete flow");
 });
+
+// The revenue card is the one number on this page a reseller might act on, so
+// it is checked as RENDERED TEXT, not as a stats field: a sum of face prices
+// across currencies reads confidently wrong, and nothing else on the page would
+// reveal that it had been added up that way.
+test("dashboard: revenue card is monthly-normalised and never blends currencies", async (t) => {
+  store.setBackend(new store.MemoryBackend());
+  await store.ensureInit();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("STATUS=↑:1GB,↓:1GB,TOT:512GB Expires:" + day(60));
+  t.after(() => { globalThis.fetch = realFetch; });
+
+  await store.mint(SUPPLIER, "one", { customer: "Annual USD", plan: "512GB", price: 120, currency: "USD", billing_cycle: "annual" });
+  await store.mint(SUPPLIER, "two", { customer: "Monthly RMB", plan: "512GB", price: 10, currency: "RMB", billing_cycle: "monthly" });
+
+  const html = await (await worker.fetch(new Request(HOST + "/admin"), {}, {})).text();
+  const errors = [];
+  const console = new VirtualConsole();
+  console.on("jsdomError", (e) => errors.push(e));
+  const dom = new JSDOM(html, {
+    url: HOST + "/admin", runScripts: "dangerously", virtualConsole: console,
+    beforeParse(window) {
+      window.fetch = async (path) => worker.fetch(new Request(HOST + path), {}, {});
+    },
+  });
+  t.after(() => dom.window.close());
+  const $ = (s) => dom.window.document.querySelector(s);
+  const stats = () => dom.window.document.querySelectorAll("#stats .stat");
+  await waitFor(() => stats().length > 0, "stats rendered");
+
+  const cardOf = (label) => [...stats()].find((el) => el.querySelector(".stat-kicker").textContent === label);
+  const rev = cardOf("Revenue / month");
+  const text = rev.textContent.replace(/\s+/g, " ");
+
+  assert.equal(rev.querySelector(".stat-value").textContent, "2 currencies", text);
+  assert.match(rev.querySelector(".stat-caption").textContent, /USD 10/, "annual 120 shows as its monthly 10");
+  assert.match(rev.querySelector(".stat-caption").textContent, /RMB 10/, "the RMB row keeps its own currency");
+  assert.doesNotMatch(text, /130/, "120 + 10 must never appear as one total: " + text);
+  assert.deepEqual(errors, [], "no client-side exceptions rendering revenue");
+});

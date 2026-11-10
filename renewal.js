@@ -109,6 +109,24 @@ export function scrubSupplier(text, supplierUrl) {
   return out.replace(/[a-z0-9+.-]+:\/\/\S+/gi, "<link>").slice(0, 300);
 }
 
+// Is this URL one of the links THIS converter hands to customers? Host alone is
+// not enough: the owner serves the supplier's own panel through a branded domain
+// too (live evidence 2026-11-10: `throttle_hosts: ["xn--9kqs1lo79d.cc ×3"]` — real
+// supplier reads, same host as our links). So the route AND our token shape must
+// match, which is what separates `/sub/1f5210…adb7a` (ours) from
+// `/sub/account-one?token=…` (a panel's own path).
+const OUR_ROUTES = /^\/(all|sub|sr|share)(\/|$)/i;
+// Returns our token when the URL is shaped like a link this converter minted,
+// else null. Shape alone is not proof (a panel could use /sub/<hash> too), so the
+// caller still has to confirm it — by host, or by finding the token in the book.
+function ourLinkToken(u) {
+  if (!OUR_ROUTES.test(u.pathname)) return null;
+  const seg = u.pathname.split("/").filter(Boolean);
+  const maybe = seg[0] === "sub" ? seg[1] : u.searchParams.get("t");
+  const t = String(maybe || "").toLowerCase();
+  return /^[0-9a-f]{48}$/.test(t) ? t : null;
+}
+
 /**
  * Re-check ONE row against its supplier and persist the result.
  *
@@ -156,16 +174,65 @@ export async function checkCustomerRow(row, deps) {
     };
   }
 
+  const selfHost = (() => {
+    const h = deps.selfHost;
+    if (!h) return null;
+    try { return new URL(String(h), "http://_.invalid").host; }
+    catch (e) { return String(h).replace(/^[a-z]+:\/\//i, "").split("/")[0]; }
+  })();
+  // A link our OWN converter serves, saved as if it were the supplier's. It does
+  // answer — 200, with our quota comment on top and zero node links below — so the
+  // old behaviour was a baffling "supplier returned no nodes", plus a request that
+  // re-entered this same worker. Two independent proofs, either one is enough:
+  //   · the URL is on the host serving this request (or any netlify.app host) and
+  //     is shaped like one of our links;
+  //   · the token in it belongs to a row of the book — then it IS a customer's own
+  //     link, whatever domain the owner pasted it from (they run at least three:
+  //     sp-vpn, sp-connect, and the branded one, and the branded one also proxies
+  //     the panel, so host alone proves nothing there).
+  // Real panels live under exactly these path names too — `https://panel.example/
+  // sub/account-one?token=…` is an ordinary supplier URL, and a first cut matching
+  // only the path silenced the whole reminder pass (test/customer-accounts.test.mjs
+  // caught it). No proof matched means we fetch it like any other subscription.
+  const tokens = deps.knownTokens instanceof Map ? deps.knownTokens : null;
+  try {
+    const u = new URL(supplierUrl);
+    const t = ourLinkToken(u);
+    if (t) {
+      const owner = tokens ? tokens.get(t) : undefined;
+      const sameHost = (selfHost && u.host === selfHost) || /\.netlify\.app$/i.test(u.host);
+      if (owner !== undefined || sameHost) {
+        return {
+          ok: false,
+          code: 422,
+          self_referential: true,
+          points_at: owner && owner.customer ? owner.customer : null,
+          error: "the saved supplier link is one of our own customer links (" + u.pathname +
+            (owner && owner.customer ? ", it belongs to " + owner.customer : "") +
+            ") — it points back at this converter, so there is nothing upstream to read. " +
+            "Edit this customer and paste the link the SUPPLIER gave you.",
+        };
+      }
+    }
+  } catch (e) { /* not an absolute URL — the direct-link branch above already handled that */ }
+
   let summary = null;
   try {
     const { status } = await fetchSubscription(supplierUrl);
     summary = quotaSummary(status);
   } catch (e) {
+    // A rate limit is the panel protecting itself from US, and it is the single
+    // most common reason a whole-book refresh used to look like an outage. It gets
+    // its own words, its own 503, and its own flag — the sweep backs off on it.
+    const throttled = !!(e && e.throttled);
     return {
       ok: false,
-      code: 502,
-      error: "could not check the supplier subscription: " +
-        scrubSupplier(e && e.message ? e.message : e, supplierUrl),
+      code: throttled ? 503 : 502,
+      throttled,
+      error: throttled
+        ? "the supplier's panel is shielding itself from us right now (bot check / rate limit) — nothing was changed. Wait a minute before trying again."
+        : "could not check the supplier subscription: " +
+          scrubSupplier(e && e.message ? e.message : e, supplierUrl),
     };
   }
   if (!summary) {

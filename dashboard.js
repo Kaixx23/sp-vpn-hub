@@ -22,8 +22,128 @@ export function systemGeneratedLabel(r) {
   return "System-generated link";
 }
 
+// ---------------------------------------------------------------------------
+// How long a subscription actually lasts, in months.
+//
+// Needed because "Revenue / month" was summing FACE PRICES: an annual plan paid
+// once and a monthly plan paid every month were added together and labelled
+// monthly, so the bigger the discount you gave for committing, the richer the
+// book looked. `billing_cycle` wins when the seller set it; otherwise the plan
+// label is read ("200GB / 3 months" already carries the period, and asking for
+// it twice is how it ends up missing).
+// ---------------------------------------------------------------------------
+const CYCLE_MONTHS = {
+  monthly: 1, month: 1, m: 1, "1m": 1, "1mo": 1,
+  quarterly: 3, quarter: 3, "3m": 3, "3mo": 3,
+  "semi-annual": 6, semiannual: 6, "half-year": 6, halfyear: 6, "6m": 6, "6mo": 6,
+  annual: 12, yearly: 12, year: 12, y: 12, "1y": 12, "12m": 12, "12mo": 12,
+  // The panel and the seller's own notes are Chinese, and a whole-word label is
+  // unambiguous even with no number in front of it ("512GB/月" is monthly).
+  "月": 1, "月付": 1, "包月": 1, "单月": 1,
+  "季": 3, "季付": 3, "季度": 3, "包季": 3, "双月": 2,
+  "半年": 6, "包年": 12, "年付": 12, "年": 12,
+};
+const R_MONTH = /(\d+(?:\.\d+)?)\s*(?:months?|mos?)\b/;
+const R_YEAR = /(\d+(?:\.\d+)?)\s*(?:years?|yrs?|y)\b/;
+const R_DAY = /(\d+(?:\.\d+)?)\s*(?:days?|d)\b/;
+const R_WEEK = /(\d+(?:\.\d+)?)\s*(?:weeks?|wks?|w)\b/;
+// CJK has no word boundary, and the supplier panel's own labels are Chinese.
+const R_CN_MONTH = /(\d+(?:\.\d+)?)\s*个?\s*月/;
+const R_CN_YEAR = /(\d+(?:\.\d+)?)\s*年/;
+const R_CN_WEEK = /(\d+(?:\.\d+)?)\s*(?:周|星期|礼拜)/;
+const R_CN_DAY = /(\d+(?:\.\d+)?)\s*(?:天|日)/;
+
+// "一年" and "三个月" are ordinary ways to label a plan here, and the digit
+// patterns above only read Arabic numerals — so translate a CJK numeral that
+// sits directly in front of a unit first. Deliberately narrow: one numeral
+// character, and only when 年/月/周/个/天/星 follows it, which is where a real
+// label puts it — so "3个月" and "三个月" both read as 3 and nothing else moves.
+const CN_NUM = { "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+const cnNumerals = (s) => s.replace(/([一二两三四五六七八九十])\s*(?=[年月周天个星])/g, (c) => String(CN_NUM[c[0]]));
+
+/**
+ * Months this row's price covers, or null when the row does not SAY one.
+ * This function never falls back and never guesses — deciding what to do with a
+ * missing period is the caller's job, and it has to say so out loud: see
+ * revenueOf(), which assumes monthly for those rows and reports how many it did.
+ */
+export function cycleMonths(row) {
+  for (const raw of [row && row.billing_cycle, row && row.plan]) {
+    const s = cnNumerals(String(raw || "").toLowerCase().replace(/\s+/g, " ").trim());
+    if (!s) continue;
+    if (CYCLE_MONTHS[s] != null) return CYCLE_MONTHS[s];
+    let m = s.match(R_MONTH); if (m && Number(m[1]) > 0) return Number(m[1]);
+    m = s.match(R_YEAR); if (m && Number(m[1]) > 0) return Number(m[1]) * 12;
+    m = s.match(R_CN_MONTH); if (m && Number(m[1]) > 0) return Number(m[1]);
+    m = s.match(R_CN_YEAR); if (m && Number(m[1]) > 0) return Number(m[1]) * 12;
+    m = s.match(R_WEEK); if (m && Number(m[1]) > 0) return Math.round((Number(m[1]) * 7) / 30.44 * 100) / 100;
+    m = s.match(R_DAY); if (m && Number(m[1]) > 0) return Math.round((Number(m[1]) / 30.44) * 100) / 100;
+    m = s.match(R_CN_WEEK); if (m && Number(m[1]) > 0) return Math.round((Number(m[1]) * 7) / 30.44 * 100) / 100;
+    m = s.match(R_CN_DAY); if (m && Number(m[1]) > 0) return Math.round((Number(m[1]) / 30.44) * 100) / 100;
+  }
+  return null;
+}
+
+const r2 = (n) => Math.round(n * 100) / 100;
+
+/**
+ * Monthly-normalised revenue, kept apart by currency: one entry per currency in
+ * the book. Never a blended sum across currencies.
+ */
+function revenueOf(active, day) {
+  const byCurrency = {};
+  let cycleBlind = 0, cycleBlindTotal = 0;
+  for (const r of active) {
+    const price = Number(r.price) || 0;
+    if (price <= 0) continue;
+    let months = cycleMonths(r);
+    if (months === null) { cycleBlind++; cycleBlindTotal += price; months = 1; }
+    const cur = r.currency || "(none)";
+    const b = byCurrency[cur] || (byCurrency[cur] = { currency: cur, mrr: 0, arr: 0, atRisk30: 0, customers: 0 });
+    const monthly = price / months;
+    b.mrr += monthly;
+    b.arr += monthly * 12;
+    b.customers++;
+    const d = day(r.supplier_expires);
+    if (d !== null && d <= 30) b.atRisk30 += monthly;
+  }
+  const currencies = Object.keys(byCurrency).sort(
+    (a, b) => byCurrency[b].mrr - byCurrency[a].mrr || a.localeCompare(b));
+  for (const c of currencies) {
+    const b = byCurrency[c];
+    b.mrr = r2(b.mrr); b.arr = r2(b.arr); b.atRisk30 = r2(b.atRisk30);
+  }
+  // Blending currencies would repeat the original mistake somewhere else, so a
+  // single headline figure only exists when the book has one currency in it.
+  const single = currencies.length === 1 ? currencies[0] : null;
+  return {
+    currencies,
+    byCurrency,
+    currency: single,
+    mixedCurrencies: currencies.length > 1,
+    mrr: single ? byCurrency[single].mrr : null,
+    arr: single ? byCurrency[single].arr : null,
+    atRisk30: single ? byCurrency[single].atRisk30 : null,
+    // Priced rows with no determinable period. Their price is treated as
+    // monthly — which is what this reseller's catalogue sells — but counted and
+    // shown, because the old number got it wrong *and* hid that it had guessed.
+    // Date-span inference was considered and rejected: a renewed monthly
+    // customer's created_at→expiry span is their whole subscription, so it
+    // would read a 14-month subscriber as a 14-month plan and understate
+    // revenue by 14x. Setting billing_cycle in the edit form is exact.
+    cycleBlind,
+    cycleBlindTotal: r2(cycleBlindTotal),
+    assumedMonthly: cycleBlind,
+    assumedFace: r2(cycleBlindTotal),
+  };
+}
+
 export function summarise(rows) {
-  const now = new Date();
+  return summariseAt(rows, new Date());
+}
+
+/** `now` is injectable so "expiring in N days" is testable without waiting. */
+export function summariseAt(rows, now = new Date()) {
   const day = (d) => {
     if (!d) return null;
     const t = Date.parse(String(d).slice(0, 10) + "T00:00:00Z");
@@ -51,7 +171,10 @@ export function summarise(rows) {
   // Supplier renewal is not a customer payment, especially on shared accounts.
   const unpaid = active.filter((r) => { const d = day(r.paid_until); return d === null || d < 0; });
 
-  const mrr = active.reduce((sum, r) => sum + (Number(r.price) || 0), 0);
+  // Monthly-normalised, per currency — see revenueOf(). The previous version of
+  // this line was `active.reduce((s, r) => s + price)`, which was neither
+  // monthly (that is a face price, whatever the cycle) nor one currency.
+  const revenue = revenueOf(active, day);
   const quotable = active.filter((r) => r.total_gb > 0);
   const avgUsed = quotable.length
     ? quotable.reduce((s, r) => s + (Number(r.used_gb) || 0) / Number(r.total_gb), 0) / quotable.length
@@ -77,7 +200,11 @@ export function summarise(rows) {
     expiring30: exp30.length,
     unknownExpiry: unknownExp.length,
     unpaid: unpaid.length,
-    mrr: Math.round(mrr * 100) / 100,
+    mrr: revenue.mrr === null ? 0 : revenue.mrr,
+    revenue,
+    byCurrency: revenue.byCurrency,
+    currency: revenue.currency,
+    mixedCurrencies: revenue.mixedCurrencies,
     profitMonthly,
     avgQuotaUsedPct: avgUsed === null ? null : Math.round(avgUsed * 1000) / 10,
     legacy,
@@ -116,7 +243,7 @@ export function dashboardPage(host = "") {
       <button id="healthpill" class="pillbtn" title="System health — click for details" aria-label="System health">● checking…</button>
       <span class="live-status"><i></i><span>Live workspace</span></span>
       <a href="/qr" class="btn btn-secondary" style="text-decoration:none" title="Open QR Code Maker">📱 QR Maker</a>
-      <button id="refresh" class="btn btn-secondary" aria-label="Refresh quota" title="Check supplier quota and expiry only; payments stay unchanged">
+      <button id="refresh" class="btn btn-secondary" aria-label="Refresh quota" title="Check supplier quota and expiry only; payments stay unchanged. Works through the customer book in pages, so a big list cannot be cut off — if it stops early, click again to resume.">
         <span class="btn-symbol" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="M16.7 8A7 7 0 0 0 4.2 5.5L3 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M3 3.5V7h3.5M3.3 12A7 7 0 0 0 15.8 14.5L17 13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 16.5V13h-3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>
         <span class="btn-label">Refresh data</span>
       </button>
@@ -323,7 +450,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .top-actions{display:flex;align-items:center;gap:10px}.live-status{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;color:var(--muted-strong);font-size:12px;border:1px solid var(--line);border-radius:999px;background:rgba(18,13,16,.55)}.live-status i,.pulse-ring i{display:block;width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 0 4px rgba(255,77,87,.1),0 0 13px rgba(255,77,87,.8)}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid transparent;border-radius:10px;padding:10px 14px;color:var(--text);font-size:12px;font-weight:750;line-height:1;cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease,background .18s ease}.btn:hover{transform:translateY(-1px)}.btn:active{transform:translateY(0)}.btn:disabled{opacity:.55;cursor:default;transform:none}.btn-primary{background:linear-gradient(135deg,#e8323f,#a3131f);color:#ffffff;box-shadow:0 8px 22px rgba(220,38,38,.16)}.btn-primary:hover{box-shadow:0 10px 28px rgba(220,38,38,.28)}.btn-secondary{background:rgba(24,18,22,.85);border-color:var(--line-strong);color:var(--muted-strong)}.btn-secondary:hover{border-color:rgba(255,77,87,.42);color:var(--text);background:rgba(32,22,27,.92)}.btn-symbol{display:grid;place-items:center}.btn-symbol svg{width:16px;height:16px}.plus{font-size:17px;font-weight:400;line-height:10px;margin-left:-2px}
 .page-main{padding-top:44px;padding-bottom:88px;position:relative}.hero{min-height:224px;position:relative;display:grid;grid-template-columns:minmax(0,1fr) 360px;align-items:center;overflow:hidden;margin-bottom:27px;padding:34px 48px;border:1px solid var(--line);border-radius:24px;background:linear-gradient(110deg,rgba(26,18,22,.9),rgba(14,10,12,.7) 52%,rgba(43,15,20,.72));box-shadow:var(--shadow)}.hero:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(255,77,87,.045),transparent 34%,rgba(216,27,63,.08))}.hero-copy{position:relative;z-index:2;max-width:600px}.eyebrow{display:flex;align-items:center;gap:9px;margin:0 0 12px;color:var(--mint);font-size:10px;font-weight:800;letter-spacing:.18em}.eyebrow-line{width:22px;height:1px;background:currentColor;opacity:.75}.hero h2{margin:0;font-size:clamp(28px,4vw,45px);letter-spacing:-.045em;line-height:1.08;font-weight:780}.hero h2 em{font-style:normal;color:var(--mint)}.hero-lede{max-width:490px;margin:14px 0 19px;color:var(--muted);font-size:14px;line-height:1.65}.hero-foot{display:flex;align-items:center;gap:9px;color:var(--muted-strong);font-size:11px}.pulse-ring{display:grid;place-items:center;width:16px;height:16px}.pulse-ring i{width:6px;height:6px}.hero-art{position:absolute;right:30px;top:0;width:400px;height:100%;opacity:.95}.art-glow{position:absolute;width:280px;height:220px;right:28px;top:4px;background:radial-gradient(circle,rgba(255,77,87,.14),rgba(216,27,63,.1) 36%,transparent 69%);filter:blur(8px)}.art-orbit{position:absolute;border:1px solid rgba(255,125,132,.18);border-radius:50%;transform:rotate(-24deg)}.orbit-one{width:270px;height:132px;right:47px;top:47px}.orbit-two{width:170px;height:250px;right:95px;top:-10px;transform:rotate(43deg)}.art-core{position:absolute;display:grid;place-items:center;right:150px;top:78px;width:80px;height:80px;border:1px solid rgba(255,77,87,.38);border-radius:50%;background:radial-gradient(circle at 35% 25%,rgba(255,77,87,.27),rgba(24,18,22,.9) 66%);box-shadow:0 0 0 12px rgba(255,77,87,.035),0 0 45px rgba(255,77,87,.18)}.art-core span{font-size:15px;letter-spacing:.1em;font-weight:850;color:var(--mint)}.art-core i{position:absolute;right:10px;top:10px;width:6px;height:6px;border-radius:50%;background:var(--mint);box-shadow:0 0 10px var(--mint)}.art-node{position:absolute;width:7px;height:7px;border-radius:50%;background:var(--violet);box-shadow:0 0 14px rgba(216,27,63,.9)}.node-one{right:66px;top:66px}.node-two{right:92px;bottom:36px;background:var(--mint);box-shadow:0 0 14px rgba(255,77,87,.9)}.node-three{right:274px;top:46px;background:var(--amber);box-shadow:0 0 14px rgba(247,201,107,.9)}.art-card{position:absolute;display:flex;align-items:center;gap:9px;padding:9px 12px;border:1px solid var(--line-strong);border-radius:11px;background:rgba(22,16,19,.82);box-shadow:0 12px 25px rgba(0,0,0,.22);backdrop-filter:blur(8px)}.art-card b,.art-card small{display:block}.art-card b{font-size:10px}.art-card small{color:var(--muted);font-size:9px;margin-top:2px}.art-card-top{right:4px;top:33px}.art-card-bottom{right:39px;bottom:24px}.art-card-icon{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;color:var(--violet);background:rgba(216,27,63,.14);font-size:14px}.art-card-icon.green{color:var(--mint);background:rgba(255,77,87,.13)}
-.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:29px}.stat{position:relative;min-height:132px;overflow:hidden;padding:17px 18px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(24,18,22,.9),rgba(15,11,14,.84));box-shadow:0 12px 26px rgba(0,0,0,.1);transition:border-color .2s ease,transform .2s ease}.stat:after{content:"";position:absolute;right:-25px;bottom:-45px;width:110px;height:110px;border-radius:50%;background:var(--stat-glow,rgba(255,77,87,.07));filter:blur(4px)}.stat:hover{transform:translateY(-2px);border-color:var(--line-strong)}.stat-head{position:relative;z-index:1;display:flex;align-items:center;gap:9px}.stat-icon{display:grid;place-items:center;width:26px;height:26px;border-radius:8px;color:var(--mint);background:var(--mint-soft)}.stat-icon svg{width:14px;height:14px}.stat-kicker{color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.stat-value{position:relative;z-index:1;display:block;margin-top:17px;color:var(--text);font-size:27px;letter-spacing:-.04em;line-height:1;font-weight:790}.stat-caption{position:relative;z-index:1;display:block;margin-top:9px;color:var(--muted);font-size:11px}.stat.bad{--stat-glow:rgba(255,125,132,.1)}.stat.bad .stat-icon{color:var(--red);background:rgba(255,125,132,.11)}.stat.bad .stat-value{color:#ffabb0}.stat.warn{--stat-glow:rgba(247,201,107,.1)}.stat.warn .stat-icon{color:var(--amber);background:rgba(247,201,107,.11)}.stat.warn .stat-value{color:#f9d98d}.stat.good .stat-icon{color:var(--mint)}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:29px}.stat{position:relative;min-height:132px;overflow:hidden;padding:17px 18px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(24,18,22,.9),rgba(15,11,14,.84));box-shadow:0 12px 26px rgba(0,0,0,.1);transition:border-color .2s ease,transform .2s ease}.stat:after{content:"";position:absolute;right:-25px;bottom:-45px;width:110px;height:110px;border-radius:50%;background:var(--stat-glow,rgba(255,77,87,.07));filter:blur(4px)}.stat:hover{transform:translateY(-2px);border-color:var(--line-strong)}.stat-head{position:relative;z-index:1;display:flex;align-items:center;gap:9px}.stat-icon{display:grid;place-items:center;width:26px;height:26px;border-radius:8px;color:var(--mint);background:var(--mint-soft)}.stat-icon svg{width:14px;height:14px}.stat-kicker{color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.stat-value{position:relative;z-index:1;display:block;margin-top:17px;color:var(--text);font-size:27px;letter-spacing:-.04em;line-height:1;font-weight:790}.stat-caption{position:relative;z-index:1;display:block;margin-top:9px;color:var(--muted);font-size:11px}.stat-caption .bad{color:#ffabb0;font-weight:700}.stat-caption .warn{color:#f9d98d;font-weight:700}.sub .warn{color:#f9d98d;font-weight:700}.stat.bad{--stat-glow:rgba(255,125,132,.1)}.stat.bad .stat-icon{color:var(--red);background:rgba(255,125,132,.11)}.stat.bad .stat-value{color:#ffabb0}.stat.warn{--stat-glow:rgba(247,201,107,.1)}.stat.warn .stat-icon{color:var(--amber);background:rgba(247,201,107,.11)}.stat.warn .stat-value{color:#f9d98d}.stat.good .stat-icon{color:var(--mint)}
 .customer-panel{padding:27px 27px 0;border:1px solid var(--line);border-radius:22px;background:linear-gradient(145deg,rgba(19,14,17,.94),rgba(12,9,11,.92));box-shadow:var(--shadow)}.panel-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:0 2px 24px}.panel-heading .eyebrow{margin-bottom:8px}.panel-heading h2{margin:0;font-size:23px;letter-spacing:-.03em}.panel-subtitle{margin:5px 0 0;color:var(--muted);font-size:12px}.dim{color:var(--muted);font-size:11px}.tracked-count{display:flex;align-items:flex-end;gap:9px;padding-bottom:2px}.tracked-count strong{font-size:24px;letter-spacing:-.04em}.tracked-count span{color:var(--muted);font-size:11px;padding-bottom:3px}.toolbar{display:flex;align-items:center;gap:9px;min-height:54px;padding:8px 10px;margin-bottom:12px;border:1px solid var(--line);border-radius:13px;background:rgba(12,9,11,.65)}.search-field{display:flex;align-items:center;gap:9px;flex:1;min-width:190px;color:var(--muted)}.search-field svg{width:17px;height:17px;flex:none}.search-field input{width:100%;min-width:0;border:0;background:transparent;color:var(--text);font-size:12px;outline:0}.search-field input::placeholder{color:#9c828c}.toolbar-spacer{flex:1}.select-wrap{position:relative}.select-wrap:after{content:"⌄";position:absolute;right:11px;top:7px;color:var(--muted);font-size:14px;pointer-events:none}.toolbar select{appearance:none;min-width:144px;padding:8px 29px 8px 11px;border:1px solid var(--line);border-radius:8px;outline:0;background:var(--surface-soft);color:var(--muted-strong);font-size:11px;cursor:pointer}.toolbar select:hover{border-color:var(--line-strong);color:var(--text)}.results-meta{display:inline-block;min-width:78px;color:var(--muted);font-size:11px;text-align:right;white-space:nowrap}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:rgba(10,8,9,.48)}table{width:100%;min-width:1110px;border-collapse:collapse;font-size:12px}th{padding:13px 15px;text-align:left;border-bottom:1px solid var(--line);color:#a58a93;font-size:10px;font-weight:750;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}td{padding:15px;border-bottom:1px solid var(--line);vertical-align:middle}tbody tr:last-child td{border-bottom:0}tbody tr{transition:background .18s ease}tbody tr:hover{background:rgba(255,77,87,.035)}tr.revoked{opacity:.54}tr.generated{background:rgba(247,201,107,.025)}tr.generated .avatar{color:var(--amber);background:rgba(247,201,107,.12)}.customer-cell{display:flex;align-items:center;gap:11px;min-width:170px}.avatar{display:grid;place-items:center;flex:none;width:34px;height:34px;border-radius:11px;color:#ffb3b8;background:linear-gradient(145deg,rgba(255,77,87,.22),rgba(216,27,63,.24));font-size:11px;font-weight:850;letter-spacing:.04em}.nm{font-size:12px;font-weight:750;white-space:nowrap}.sub{display:block;margin-top:3px;color:var(--muted);font-size:10px;line-height:1.35}.plan-cell{min-width:150px;color:var(--muted-strong);font-weight:650}.renewal-cell{min-width:130px}.date{margin-top:4px;color:var(--muted);font-size:10px}.usage-cell{width:186px;min-width:186px}.usage-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;color:var(--muted-strong);font-size:10px}.usage-top b{color:var(--text);font-weight:700}.bar{height:6px;overflow:hidden;border-radius:99px;background:#0a0808;box-shadow:inset 0 0 0 1px rgba(255,255,255,.035)}.bar i{display:block;height:100%;min-width:3px;border-radius:inherit;background:linear-gradient(90deg,var(--mint),#dc2626);box-shadow:0 0 9px rgba(255,77,87,.25)}.bar i.hot{background:linear-gradient(90deg,var(--amber),var(--red));box-shadow:0 0 9px rgba(255,125,132,.25)}.paid-cell{min-width:130px;color:var(--muted-strong);font-size:11px;white-space:nowrap}.paid-cell .pill{margin-left:4px}.lnk{display:block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--blue);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}.link-cell{min-width:190px}.link-caption{display:flex;align-items:center;gap:5px;margin-top:4px;color:var(--muted);font-size:10px}.link-caption svg{width:11px;height:11px}.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:999px;font-size:10px;font-weight:750;white-space:nowrap}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.red{color:var(--red);background:rgba(255,125,132,.11)}.pill.amber{color:var(--amber);background:rgba(247,201,107,.11)}.pill.green{color:var(--mint);background:rgba(255,77,87,.11)}.pill.gray{color:var(--muted);background:rgba(255,125,132,.11)}.mini{display:inline-flex;align-items:center;justify-content:center;padding:6px 8px;margin:0 3px 3px 0;border:1px solid var(--line);border-radius:7px;background:rgba(24,18,22,.76);color:var(--muted-strong);font-size:10px;cursor:pointer;transition:all .18s ease}.mini:hover{border-color:rgba(255,77,87,.45);color:var(--mint);background:rgba(255,77,87,.07)}.mini.danger:hover{border-color:rgba(255,125,132,.48);color:var(--red);background:rgba(255,125,132,.07)}
 .mini[data-a="renew"]{border-color:rgba(255,77,87,.38);color:var(--mint);font-weight:800}
 .mini[data-a="renew"]:hover{border-color:rgba(255,77,87,.62);background:rgba(255,77,87,.12);color:var(--mint)}
@@ -423,6 +550,29 @@ const prettyDate = (d) => {
   const p = String(d).slice(0, 10).split("-");
   if (p.length !== 3) return String(d);
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]))));
+};
+// "read 4 min ago" for the renewal cell. A blank date and a stale one used to look
+// identical, and they mean opposite things: blank = never successfully checked (a
+// failed check writes nothing, on purpose), stale = checked, supplier says this.
+// No regex in here on purpose: CLIENT is one outer template literal, so every
+// backslash would have to be doubled and that is easy to get wrong by eye.
+const readAgo = (iso) => {
+  const t = Date.parse(String(iso || ""));
+  if (!Number.isFinite(t) || t <= 0) return "";
+  let s = Math.round((Date.now() - t) / 1000);
+  // V8 reads short junk as a date ("0" parses as 1 Jan 2000), which would render
+  // as a real-looking "read 26 years ago". Anything past ~10 years is not a
+  // check this book ever made, so show nothing — a blank beats a confident lie.
+  if (s > 315576000) return "";
+  if (s < 0) s = 0; // clock skew between the function and the browser
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + " min ago";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + (h === 1 ? " hour ago" : " hours ago");
+  const d = Math.floor(h / 24);
+  if (d < 31) return d + (d === 1 ? " day ago" : " days ago");
+  return prettyDate(String(iso)); // older than a month: the date is more useful
 };
 const initials = (name) => String(name || "SP").trim().split(/\\s+/).filter(Boolean).slice(0, 2).map((x) => x[0]).join("").toUpperCase() || "SP";
 
@@ -538,8 +688,11 @@ function render() {
       '<td><div class="customer-cell"><span class="avatar">' + esc(initials(name)) + '</span><div><div class="nm">' + esc(name) + '</div>' +
         (generatedRow ? '' : '<div class="customer-type"><span class="pill ' + (r.customer_type === 'shared' ? 'amber">Shared link' : 'gray">Individual') + '</span></div><div class="supplier-account"><span class="sub">Supplier account</span>' + accountCell(r) + '<div class="shared-users-btn">' + actionButton("shared-users", r.token, "Find shared users") + '</div></div>') +
         '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + (generatedRow ? ' · generated' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + (generatedRow ? '<div class="sub">Not counted as a customer or profit.</div>' : '') + '</div></div></td>' +
-      '<td class="plan-cell">' + esc(r.plan || (generatedRow ? "Not a customer record" : "No plan set")) + '<div class="sub">' + (generatedRow ? "Created by quota/tool page" : (esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : ""))) + '</div></td>' +
-      '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + esc(prettyDate(r.supplier_expires) || "Not checked") + '</div>' + (r.revoked || generatedRow ? "" : actionButton("check", r.token, "Check")) + '</td>' +
+      '<td class="plan-cell">' + esc(r.plan || (generatedRow ? "Not a customer record" : "No plan set")) + '<div class="sub">' + (generatedRow ? "Created by quota/tool page" : (esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.price != null && r.months ? " · ≈ " + (Number(r.price) / r.months).toFixed(2) + "/mo" : r.price != null ? " · <span class=warn>no billing cycle → assumed monthly</span>" : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : ""))) + '</div></td>' +
+      // The renewal cell shows WHEN it was last read, not just what it says, because
+      // a blank here means the row was never checked — a different fact from "checked
+      // and the date is old". (A failed check also writes nothing, by design.)
+      '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + (esc(prettyDate(r.supplier_expires) || "Not checked") + (r.checked_at ? ' <span class=sub>· read ' + esc(readAgo(r.checked_at)) + '</span>' : '')) + '</div>' + (r.revoked || generatedRow ? "" : actionButton("check", r.token, "Check")) + '</td>' +
       '<td class="usage-cell">' + quotaCell(r) + '</td>' +
       '<td class="paid-cell">' + paid + (r.revoked || generatedRow ? "" : actionButton("pay", r.token, "Pay") + (isPaid ? actionButton("unpaid", r.token, "Mark unpaid") : "")) + '</td>' +
       '<td class="link-cell"><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span><span class="link-caption"><svg viewBox="0 0 20 20" fill="none"><path d="M7.5 12.5 12.5 7.5M6 14a3 3 0 0 1 0-4.2l1.6-1.6M14 6a3 3 0 0 1 0 4.2l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> private link</span></td>' +
@@ -548,8 +701,31 @@ function render() {
   }).join("") : '<tr><td colspan="7" class="loading">No customers match these filters.</td></tr>';
 }
 
+// The revenue card, worded the way the number actually holds up. summarise()
+// normalises every price to one month and keeps currencies apart, so:
+//   * one currency  -> show the figure and name the currency;
+//   * several       -> show the split, never a meaningless cross-currency sum;
+//   * rows with no determinable period are NOT guessed, they are counted here.
+function revenueCard(s) {
+  const rev = s.revenue || { currencies: [], cycleBlind: 0 };
+  const list = rev.currencies || [];
+  const per = (c) => { const b = (s.byCurrency || {})[c]; return b && b.mrr != null ? Number(b.mrr).toFixed(2) : "0"; };
+  if (!list.length) return { value: "0", cls: "", cap: "no prices recorded yet" };
+  if (list.length > 1) {
+    return { value: list.length + " currencies", cls: "warn",
+      cap: list.map((c) => esc(c) + " " + per(c)).join(" · ") + " · not summed" };
+  }
+  const c0 = list[0];
+  const bits = [esc(c0) + " · monthly-normalised, before costs"];
+  const risk = (s.byCurrency[c0] || {}).atRisk30;
+  if (risk) bits.push("<span class=bad>" + Number(risk).toFixed(2) + " at risk ≤30d</span>");
+  if (rev.cycleBlind) bits.push("<span class=warn>" + rev.cycleBlind + " row" + (rev.cycleBlind > 1 ? "s" : "") + " priced without a billing cycle (excluded)</span>");
+  return { value: (s.mrr || 0).toFixed(2), cls: rev.assumedMonthly ? "warn" : "", cap: bits.join(" · ") };
+}
+
 function renderStats(s) {
   if (!s) return;
+  const rev = revenueCard(s);
   const card = (v, l, cls, icon, caption) => '<article class="stat ' + (cls || "") + '"><div class="stat-head"><span class="stat-icon">' + icon + '</span><span class="stat-kicker">' + l + '</span></div><strong class="stat-value">' + v + '</strong><span class="stat-caption">' + caption + '</span></article>';
   $("#stats").innerHTML =
     card(s.active, "Active customers", "good", ICONS.users, "currently connected") +
@@ -558,7 +734,7 @@ function renderStats(s) {
     card(s.overdue, "Expired / overdue", s.overdue ? "bad" : "good", ICONS.warning, "needs a follow-up") +
     card(s.unpaid, "Unpaid", s.unpaid ? "bad" : "good", ICONS.coin, "not recorded or overdue") +
     card(s.unknownExpiry, "Expiry unknown", s.unknownExpiry ? "warn" : "good", ICONS.calendar, "refresh to check status") +
-    card((s.mrr || 0).toFixed(2), "Revenue / month", "", ICONS.coin, "active plans · before costs") +
+    card(rev.value, "Revenue / month", rev.cls, ICONS.coin, rev.cap) +
     card(s.profitMonthly == null ? "—" : s.profitMonthly.toFixed(2), "Profit / month", s.profitMonthly == null ? "" : s.profitMonthly > 0 ? "good" : s.profitMonthly < 0 ? "bad" : "", ICONS.coin, "after catalogue cost") +
     card(s.generatedLinks || 0, "Anonymous checks", s.generatedLinks ? "warn" : "good", ICONS.link, "hidden from customer totals") +
     card(s.legacy, "Legacy links", s.legacy ? "warn" : "good", ICONS.shield, s.legacy ? "migrate when convenient" : "all links protected");
@@ -591,14 +767,65 @@ $("#sort").addEventListener("change", (e) => { SORT = e.target.value; render(); 
 
 $("#refresh").addEventListener("click", async (e) => {
   const button = e.currentTarget, label = button.querySelector(".btn-label");
-  button.disabled = true; if (label) label.textContent = "Checking supplier…";
-  try {
-    const response = await fetch("/admin/refresh");
-    const j = await response.json();
-    toast("Payments unchanged. Updated " + j.updated + " of " + j.checked + (j.failed ? " · " + j.failed + " failed" : ""));
-    await load();
-  } catch (err) { toast("Refresh failed: " + err.message); }
-  button.disabled = false; if (label) label.textContent = "Refresh data";
+  button.disabled = true;
+  if (label) label.textContent = "Checking supplier…";
+  // Paged on purpose. One request may only spend ~8 s of the platform's 10 s
+  // function ceiling, so /admin/refresh does a slice and hands back a cursor;
+  // we follow it until the book is done. Before this, a sweep of every customer
+  // was ONE request that Netlify killed mid-way, and the only thing the panel
+  // could report was "Refresh failed" — indistinguishable from the supplier
+  // being down, when in fact the supplier was answering fine.
+  let after = 0, checked = 0, updated = 0, failed = 0, total = 0, why = null, pages = 0, cut = false;
+  let throttlePages = 0, selfRef = 0, backedOff = false;
+  const hostNotes = [];
+  for (;;) {
+    if (++pages > 80) { cut = true; break; } // ~13k customers; bail rather than spin
+    let j;
+    try {
+      const r = await fetch("/admin/refresh?after=" + after);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      j = await r.json();
+    } catch (err) {
+      // A dead request is not a supplier verdict. Say how far we got.
+      why = (checked ? "stopped after " + checked + " of " + total + " (" + err.message + ") — click again to continue"
+                      : err.message);
+      cut = true;
+      break;
+    }
+    total = j.total || total;
+    checked += j.checked || 0; updated += j.updated || 0; failed += j.failed || 0;
+    throttlePages += j.throttled || 0; selfRef += j.self_referential || 0;
+    if (j.backed_off) { backedOff = true; }
+    if (j.throttle_hosts) for (const h of j.throttle_hosts) if (hostNotes.indexOf(h) < 0) hostNotes.push(h);
+    if (!why) { const bad = (j.results || []).find((x) => x && x.ok === false); if (bad) why = (bad.customer ? bad.customer + ": " : "") + bad.error; }
+    if (!j.partial || !j.next) break;
+    if (j.next <= after) { cut = true; break; } // no forward progress: never loop
+    after = j.next;
+    if (label) label.textContent = "Checking " + checked + " of " + total + "…";
+  }
+  button.disabled = false;
+  if (label) label.textContent = "Refresh data";
+  const parts = ["Payments unchanged. Updated " + updated + " of " + checked + " checked"];
+  if (total > checked) parts.push(backedOff ? "resumed where it stopped next time" : (cut ? "sweep stopped early" : (total - checked) + " not checked"));
+  // "failed" means nothing on its own. The sweep now returns the reason class, so
+  // the owner is told what to DO: wait, fix a link, or contact the supplier.
+  // Two different situations, one number. A sweep that STOPPED because a panel kept
+  // challenging us is "wait and resume"; a sweep that carried on past one
+  // challenged row is that row's problem, and saying "rate-limiting, resume" would
+  // make the owner think the whole book failed.
+  if (throttlePages) parts.push((backedOff
+    ? "the supplier's panel is rate-limiting us after " + throttlePages + " row(s) — wait a minute, then click again to resume"
+    : throttlePages + " row(s) hit the panel's bot check and kept their old values") +
+    (hostNotes.length ? " (" + hostNotes.join(", ") + ")" : ""));
+  if (selfRef) parts.push(selfRef + " row(s) have one of our own links saved as the supplier link — fix in Edit");
+  if (failed) parts.push(failed + " could not be read");
+  if (why) parts.push("first one: " + why);
+  toast(parts.join(" · "));
+  await load();
+  // The health pill caches its report for 2 minutes (it fetches the panel, so
+  // an open dashboard must not hammer it). We just proved the pipeline works,
+  // so force one re-read rather than leave "supplier issue" on screen.
+  await loadHealth(true);
 });
 
 // ---- auto-detect: paste a supplier link, the form fills itself ------------
@@ -876,9 +1103,22 @@ $("#rows").addEventListener("click", async (e) => {
         toast(name + " — " + j.message + (j.usage_message ? " · " + j.usage_message : "") +
           " · Payment unchanged.", 6000);
         await load();
+        // Contradiction check. The pill's report is memoised at the origin for 2
+        // minutes, and its supplier probe only ever tries ONE representative row
+        // per host — so it can be sitting on "supplier issue" from a momentary
+        // blip while this very customer's subscription just answered. A live read
+        // beating the pill is evidence; make the pill account for it. (Only on
+        // success: forcing a re-read for every FAILURE would hammer the panel with
+        // extra fetches during an actual outage.)
+        if (HEALTH && (HEALTH.level === "degraded" || HEALTH.level === "down")) await loadHealth(true);
         return;
       }
-      toast("Could not check " + name + ": " + (j.error || ("HTTP " + response.status)), 6000);
+      // Same three-way split for a single row. j.throttled / j.self_referential
+      // come from the API's check result; a bare "HTTP 502" taught the owner
+      // nothing about which of the two problems to fix.
+      toast((j.throttled ? name + " — the supplier's panel is rate-limiting us (bot check). Nothing changed; try again in a minute."
+        : j.self_referential ? name + " — saved supplier link is our own customer link" + (j.points_at ? " (it belongs to " + j.points_at + ")" : "") + ". Edit this row and paste the SUPPLIER's link."
+        : "Could not check " + name + ": " + (j.error || ("HTTP " + response.status))), 6000);
     } catch (err) {
       toast("Could not check " + name + ": " + err.message, 6000);
     }
@@ -1070,6 +1310,10 @@ function renderHealth() {
   const sup = HEALTH.checks.supplier;
   if (sup) for (const [host, d] of Object.entries(sup.hosts || {}))
     h += row(d.ok, "Supplier", d.ok ? esc(host) + " · " + d.nodes + " nodes · " + (d.quota_parsed ? "quota OK" : "no quota info") + (d.expires ? " · expires " + esc(d.expires) : "") + " · " + d.ms + " ms" : esc(host) + " — " + esc(d.error || "failed"));
+  const pf = HEALTH.checks.profile;
+  if (pf) h += row(pf.ok !== false, "Deployed build", pf.ok !== false
+    ? "profile policy current — " + esc(pf.label || "unknown")
+    : "<b>serving an OLD or regressed build</b> (" + esc((pf.problems || []).join(", ") || "unknown") + " — redeploy)");
   const cv = HEALTH.checks.converter;
   if (cv) h += row(cv.ok, "Converter", cv.ok ? (cv.skipped ? esc(cv.skipped) : "one-link served " + cv.nodes + " nodes" + (cv.quota_parsed ? " with quota header" : "") + " · " + cv.ms + " ms") : esc(cv.error || "failed"));
   h += '<div class="dim" style="padding:11px 0 0;line-height:1.55">' + esc(HEALTH.note || "") + "<br>Checked " + esc(HEALTH.generated) + (HEALTH.cached ? " (cached " + Math.round((HEALTH.age_ms || 0) / 1000) + "s ago)" : "") + '</div>';
@@ -1084,7 +1328,20 @@ async function loadHealth(force) {
     HEALTH = await r.json();
     const lvl = HEALTH.level || (HEALTH.ok ? "ok" : "down");
     pill.className = "pillbtn " + (lvl === "ok" ? "ok" : lvl === "degraded" ? "warn" : "bad");
-    pill.textContent = lvl === "ok" ? "● all systems healthy" : lvl === "degraded" ? "● supplier issue — serving cached" : "● system down";
+    // A stale deploy has its own wording: "degraded" here almost always means the
+    // build did not take, not that the supplier is unhappy, and the fix is
+    // "redeploy" rather than "wait".
+    const stale = ((HEALTH.checks || {}).profile || {}).ok === false;
+    // A rate limit and an outage need different sentences, because they have
+    // different fixes: wait, versus go shout at the supplier. Collapsing them into
+    // "supplier issue" is what this pill was wrong about.
+    const sup = (HEALTH.checks || {}).supplier || {};
+    const throttled = lvl === "degraded" && sup.throttled === true;
+    pill.textContent = stale ? "● old build deployed — redeploy"
+      : lvl === "ok" ? "● all systems healthy"
+      : lvl === "degraded" ? (throttled ? "● supplier throttling us — retry in a minute" : "● supplier issue — serving cached") : "● system down";
+    if (throttled) pill.title = "The supplier's panel answered with a bot check / rate limit, not an error. Data being served is from cache. Checking the whole customer book at once is what triggers it — check one row, or wait a minute.";
+    if (stale) pill.title = ((HEALTH.checks.profile.problems || []).join(", ") || "profile guard failed") + " — the code on GitHub is newer than what is serving you";
     renderHealth();
   } catch (err) { pill.className = "pillbtn bad"; pill.textContent = "● health unknown"; }
 }

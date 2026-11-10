@@ -54,6 +54,8 @@ globalThis.fetch = async (u) => {
   const p = PANEL[who];
   if (!p) return new Response("nope", { status: 500 });
   if (p.down === "DEAD") return new Response("upstream exploded", { status: 503 });
+  // A CDN/bot wall in front of the panel: an HTML interstitial, not an error page.
+  if (p.down === "CHALLENGE") return new Response("<html><title>Just a moment...</title></html>", { status: 403 });
   if (p.down === "NOSTATUS") return new Response(NODE); // nodes but no STATUS line
   return new Response(body(p));
 };
@@ -434,6 +436,255 @@ console.log("\n[15] the dashboard renders the new control without losing the old
   let parsed = false;
   try { new vm.Script(script[1]); parsed = true; } catch (e) { console.log("     parse error:", e.message); }
   ok(parsed, "the inlined client script is still valid JavaScript");
+
+  // The sweep now pages, so the page has to say so and follow the cursor.
+  ok(html.includes("/admin/refresh?after="), "the dashboard drives /admin/refresh with an explicit cursor");
+  ok(/of " \+ total/.test(html) || html.includes('Checking " + checked'), "the button counts up while it pages");
+  ok(html.includes("not checked"), "a cut-off sweep is reported as 'not checked', not as a supplier failure");
+
+  // readAgo() decides what the renewal cell means, so run the SHIPPED copy on a
+  // frozen clock rather than trust it reads well: blank must stay blank (never
+  // checked) and every unit boundary must pluralise and not go negative.
+  const fn = html.match(/const readAgo = \(iso\) => \{([\s\S]*?)\n\};/);
+  ok(!!fn, "the dashboard ships readAgo() for the renewal cell");
+  if (fn) {
+    const NOW = Date.UTC(2026, 10, 10, 12, 0, 0);
+    const S = 1000, M = 60 * S, H = 60 * M, D = 24 * H;
+    const ctx = vm.createContext({
+      prettyDate: (s) => "date:" + String(s).slice(0, 10),
+      out: null,
+    });
+    vm.runInContext(
+      // take the helper exactly as shipped (statement form), no re-wrapping
+      // S/M/H/D and NOW live in THIS realm, so the units have to be declared
+      // inside the sandbox too — a vm context shares nothing implicitly.
+      "const NOW = " + NOW + ", S = " + S + ", M = " + M + ", H = " + H + ", D = " + D + ";\n" +
+      "Date.now = () => NOW;\n" + fn[0].replace(/;\s*$/, "") + "\n" +
+      "const iso = (ms) => new Date(NOW - ms).toISOString();\n" +
+      "out = [readAgo(''), readAgo('0'), readAgo('garbage'), readAgo(iso(30 * S))," +
+      " readAgo(iso(-5 * M)), readAgo(iso(5 * M)), readAgo(iso(60 * M)), readAgo(iso(2 * H))," +
+      " readAgo(iso(25 * H)), readAgo(iso(2 * D)), readAgo(iso(40 * D))]", ctx,
+    );
+    const want = ["", "", "", "just now", "just now", "5 min ago", "1 hour ago",
+      "2 hours ago", "1 day ago", "2 days ago", "date:2026-10-01"]; // NOW − 40 d
+    ctx.out.forEach((got, i) => ok(got === want[i], `readAgo → "${want[i]}" (got "${got}")`));
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[16] /admin/refresh pages, so a big book cannot be cut off");
+{
+  // What this pins: the sweep used to be ONE request over every customer. With
+  // ~114 rows and a 500 ms panel that is 9.6 s against Netlify's 10 s function
+  // ceiling (and that ceiling is a plan limit, not a netlify.toml setting), so
+  // the request died mid-book and the dashboard could only say "Refresh failed"
+  // — which reads exactly like a supplier outage when the supplier was fine.
+  const extra = [];
+  for (let n = 0; n < 14; n++) { const who = "bulk" + n; setPanel(who, 1, 1, 100, day(30)); extra.push(await mint(who)); }
+  fetchLog = [];
+
+  const first = await jget("/admin/refresh?after=0&batch=1");
+  const TOTAL = first.total;
+  ok(TOTAL >= 8, `the book has ${TOTAL} checkable customers — more than one page`);
+  ok(first.checked === 6 && first.remaining === TOTAL - 6 && first.partial === true,
+    `one page checks one batch and admits the rest is pending (got ${JSON.stringify({ c: first.checked, r: first.remaining, p: first.partial })})`);
+  ok(first.next === 6, `…and hands back the offset to continue from (next=${first.next})`);
+  ok(first.total === TOTAL && first.checked < first.total, "checked counts THIS call, total counts the book");
+
+  const seen = (first.results || []).slice();
+  let after = first.next, guard = 0, last = first;
+  while (after) {
+    if (++guard > 40) break;
+    last = await jget("/admin/refresh?after=" + after + "&batch=1");
+    seen.push(...(last.results || []));
+    after = last.next;
+  }
+  ok(guard <= 40, `the sweep converged in ${guard + 1} page(s)`);
+  ok(seen.length === TOTAL, `every customer was checked exactly once across pages (${seen.length}/${TOTAL})`);
+  ok(new Set(seen.map((r) => r.token)).size === seen.length, "no customer was checked twice by the paging");
+  ok(last.remaining === 0 && last.partial === false && last.next === null, "the final page reports the book as done");
+  const oks = seen.filter((t) => t.ok === true).length;
+  ok(fetchLog.length >= oks && fetchLog.length <= oks * 3,
+    `one supplier call per checked customer, retries bounded (${fetchLog.length} calls for ${oks} checkable rows)`);
+
+  // A page with no time left must come back honestly instead of being killed.
+  // The panel is made slow AND signal-aware: fetchSubscription bounds each row by
+  // AbortSignal.timeout(what is left of the request), so a stub that ignored the
+  // signal would prove nothing about that bound.
+  const fast = globalThis.fetch;
+  globalThis.fetch = async (u, init) => {
+    await new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error("abort-test: panel too slow")), 4000);
+      const sig = init && init.signal;
+      if (sig) { if (sig.aborted) { clearTimeout(t); reject(new Error("aborted")); return; } sig.addEventListener("abort", () => { clearTimeout(t); reject(new Error("aborted")); }); }
+    });
+    return fast(u, init);
+  };
+  const t0 = Date.now();
+  const tight = await jget("/admin/refresh?after=0&budget=1600");
+  const ms = Date.now() - t0;
+  globalThis.fetch = fast;
+  ok(ms < 3500, `a 1.6 s budget returned in ${ms} ms — it did not wait for a 4 s panel`);
+  ok(tight.failed === 6 && tight.checked === 6, `rows it could not finish are reported as failures, not swallowed (${JSON.stringify({ c: tight.checked, f: tight.failed })})`);
+  ok(tight.remaining === TOTAL - 6 && tight.partial === true, "…and the rest of the book stays queued, so nothing is silently skipped");
+
+  // Garbage or out-of-range cursors cannot corrupt the sweep.
+  const junk = await jget("/admin/refresh?after=abc&batch=zz");
+  ok(junk.offset === 0 && junk.checked > 0, `a non-numeric cursor starts at the top, not at NaN (${JSON.stringify({ o: junk.offset, c: junk.checked })})`);
+  const over = await jget("/admin/refresh?after=99999");
+  ok(over.checked === 0 && over.remaining === 0 && over.partial === false, "an offset past the end is an empty page, not an error");
+  const huge = await jget("/admin/refresh?budget=999999");
+  ok(huge.checked === TOTAL, "an absurd budget is clamped to the platform-safe maximum, not honoured");
+
+  const j2 = await jget("/admin/refresh?after=0&batch=1");
+  const j3 = await jget("/admin/refresh?after=6&batch=1");
+  ok(j2.checked + j3.checked <= TOTAL, "pages report disjoint slices of the book");
+  ok(j2.updated === 6 && j3.updated > 0, `each page counts its own updates (${j2.updated} + ${j3.updated})`);
+
+  // Paging is only safe if the pages are not replayed from the edge cache: a
+  // cached "after=6" would hand back "after=0" a second time and the sweep would
+  // never reach the end of the book. Netlify's [[headers]] rules cannot express
+  // this (they never apply to a function response), so it must come from json().
+  for (const path of ["/admin", "/admin/dashboard.json", "/admin/health", "/admin/refresh?after=0&batch=1", "/diag"]) {
+    const r = await get(path);
+    const cc = r.headers.get("cache-control");
+    ok(cc && cc.includes("no-store"), `${path.split("?")[0]} answers with Cache-Control: no-store (got ${JSON.stringify(cc)})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[17] a rate limit is not an outage; a loop-back link is not a supplier; a shared pack is fetched once");
+{
+  // Live evidence from the 2026-11-10 investigation: of the 96 customers the sweep
+  // could reach, 58 failed — and those failures were THREE different problems,
+  // every one of them printed as "supplier issue". This section pins each apart.
+  //
+  // NB the store orders by created_at DESC (newest first), so everything minted
+  // here is at the FRONT of the book: rows[0..5] are the six wall customers and
+  // rows[6] is the one that should never be reached.
+  setPanel("afterwall", 1, 1, 100, day(21));
+  const survivor = await mint("afterwall", { customer: "AfterTheWall" });
+  setPanel("wall", 1, "CHALLENGE", 100, day(9));
+  const wallToks = [];
+  for (let n = 0; n < 6; n++) wallToks.push(await mint("wall", { customer: "Wall" + n }));
+  const total = (await jget("/admin/refresh?after=99999")).total;
+  ok(total >= 8, `the book holds ${total} customers, so a back-off has somewhere left to go`);
+
+  fetchLog = [];
+  const page = await jget("/admin/refresh?after=0");
+  ok(page.checked === 6, `the sweep did one batch and stopped (checked ${page.checked}, not ${total})`);
+  ok(page.throttled === 6 && page.failed === 6,
+    `all six are classified as throttling, not as broken data (${JSON.stringify({ t: page.throttled, f: page.failed })})`);
+  ok(page.backed_off === true, "the response admits it backed off, so the dashboard can say WAIT instead of FAILED");
+  ok(page.remaining === total - 6 && page.partial === true && page.next === 6,
+    `everyone else stays queued rather than being skipped (${JSON.stringify({ r: page.remaining, p: page.partial, n: page.next })})`);
+  // fetchSubscription tries up to 3 user agents per call, so ONE logical fetch of a
+  // shared subscription logs 3 entries. Un-deduped it would be 18: six customers on
+  // one 512 GB pack asking the panel the same question six times at once, which is
+  // exactly what pulls a CDN challenge down on the whole sweep.
+  const wallCalls = fetchLog.filter((w) => w === "wall").length;
+  ok(wallCalls > 0 && wallCalls <= 3, `six customers sharing one subscription cost ONE logical fetch (${wallCalls} UA attempts, not 18)`);
+  ok(new Set(fetchLog).size === 1, `only that subscription was touched (${JSON.stringify([...new Set(fetchLog)])})`);
+  ok((await rowOf(survivor)).checked_at == null, "the customer behind the wall was not touched");
+
+  const resume = await jget("/admin/refresh?after=" + page.next + "&batch=1");
+  ok(resume.checked === 6 && resume.results.some((x) => x.ok && x.customer === "AfterTheWall"),
+    "resuming from the returned cursor reaches the row the wall stopped us at");
+
+  // One challenged row inside an otherwise healthy batch must NOT stop the book:
+  // the first live paged run was 17 updated + 1 bot-check, and stopping there would
+  // have discarded 96 customers that were answering fine.
+  {
+    const { REFRESH_THROTTLE_STOP } = await import("../sp-vpn-worker.js");
+    // the six wall rows from above are still in the book; with their panel healthy
+    // again, the ONLY challenged row here is the lonely one — which is the case
+    // that must not stop anything.
+    setPanel("wall", 1, 1, 100, day(9));
+    ok(REFRESH_THROTTLE_STOP === 2, `a host has to push back ${REFRESH_THROTTLE_STOP}× before the sweep gives up`);
+    for (let n = 0; n < 5; n++) { setPanel("healthy" + n, 1, 1, 100, day(25 + n)); await mint("healthy" + n, { customer: "H" + n }); }
+    setPanel("singlewall", 1, "CHALLENGE", 100, day(9));
+    const lonely = await mint("singlewall", { customer: "LonelyWall" });
+    const one = await jget("/admin/refresh?after=0");
+    ok(one.throttled === 1 && one.checked >= 6, `one wall row among healthy customers (checked ${one.checked}, throttled ${one.throttled})`);
+    ok(one.backed_off === false, "the sweep does NOT stop for a single challenged row");
+    ok(one.remaining === 0 || one.partial === false || one.checked > 6, "…and keeps going through the rest of the book");
+    ok(one.results.some((x) => x.customer === "H4" && x.ok === true), "the healthy rows around it were still updated");
+    ok(one.throttle_hosts.length === 1 && /panel\.example/.test(one.throttle_hosts[0]),
+      `the response names which panel pushed back (${JSON.stringify(one.throttle_hosts)})`);
+    ok((await rowOf(lonely)).checked_at == null, "the challenged row still kept its old values");
+  }
+
+  // One row at a time gets the same honesty, with the status the fix deserves.
+  // Re-arm the wall and use a FRESH row: the six above were just checked
+  // successfully by the lonely-row sweep, so their checked_at is no longer null.
+  setPanel("wall", 1, "CHALLENGE", 100, day(9));
+  const perRowWall = await mint("wall", { customer: "WallSolo" });
+  const r = await get("/admin/link/" + perRowWall + "?action=check");
+  const j = JSON.parse(await r.text());
+  ok(r.status === 503, `a challenged single-row check answers 503, not 502 (got ${r.status})`);
+  ok(j.ok === false && j.throttled === true, "and it carries the throttled flag the dashboard reads");
+  ok(/rate.?limit|bot check/i.test(j.error), `the sentence says what to do about it (${JSON.stringify(j.error)})`);
+  ok((await rowOf(perRowWall)).checked_at == null, "a throttled check still writes nothing");
+
+  // ---- (b) the loop-back link: a customer link saved as if it were the supplier's
+  const loopTok = await mint("loop", { customer: "Loopy" });
+  setPanel("loop", 1, 1, 100, day(5));
+  await store.updateRow(loopTok, { supplier_url: HOST + "/all/SP VPN?t=" + loopTok });
+  let allFetches = 0;
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (u, i) => { allFetches++; return inner(u, i); };
+  const rl = await get("/admin/link/" + loopTok + "?action=check");
+  globalThis.fetch = inner;
+  const jl = JSON.parse(await rl.text());
+  ok(rl.status === 422 && jl.self_referential === true,
+    `a customer link saved as the supplier link is refused by name (${JSON.stringify({ s: rl.status, r: jl.self_referential })})`);
+  ok(/our own customer links/i.test(jl.error || ""), `…with the fix in the sentence (${JSON.stringify(jl.error)})`);
+  ok(allFetches === 0, `and it costs no fetch at all — it used to ask the panel, and the panel was us (${allFetches})`);
+  ok((await rowOf(loopTok)).supplier_expires == null, "nothing was written for the loop-back row");
+
+  // A supplier URL that merely LIVES under one of our route names, on a foreign
+  // host, is not ours — the host half of the test is what keeps this from being a
+  // false accusation against a real panel.
+  setPanel("dead", 1, "DEAD", 0, day(1));
+  await store.updateRow(loopTok, { supplier_url: "https://panel.example/sr/other-tenant?who=dead" });
+  const r2 = await get("/admin/link/" + loopTok + "?action=check");
+  const j2 = JSON.parse(await r2.text());
+  // …and a /sub/ path ON OUR OWN HOST that is not one of our tokens is still a
+  // supplier link. This is the case the branded domain creates: the owner proxies
+  // the panel through the same hostname as the customer links, so the route name
+  // alone cannot tell them apart — the 48-hex token shape can.
+  await store.updateRow(loopTok, { supplier_url: HOST + "/sub/account-one?token=PRIVATE-SUPPLIER-SECRET" });
+  const r3 = await get("/admin/link/" + loopTok + "?action=check");
+  const j3 = JSON.parse(await r3.text());
+  // The proof that does not need a host at all: the branded domain serves BOTH our
+  // customer links and the panel, so on that domain only "this token belongs to a
+  // row of the book" distinguishes a loop-back from a supplier link.
+  await store.updateRow(loopTok, { supplier_url: "https://brand.example/sub/" + survivor });
+  const r4 = await get("/admin/link/" + loopTok + "?action=check");
+  const j4 = JSON.parse(await r4.text());
+  ok(r4.status === 422 && j4.self_referential === true && j4.points_at === "AfterTheWall",
+    `a loop-back on a foreign-looking host is caught by the token, and named (${JSON.stringify({ s: r4.status, at: j4.points_at })})`);
+  ok(/belongs to AfterTheWall/.test(j4.error || ""), "…and says whose link it is");
+
+  ok(j3.self_referential === false && r3.status === 502,
+    `our own host + /sub/ + a non-token path is fetched, not refused (${JSON.stringify({ s: r3.status, r: j3.self_referential })})`);
+
+  ok(j2.self_referential === false && j2.throttled === false && r2.status === 502,
+    `someone else's /sr/ path is still tried and reported as a real failure (${JSON.stringify({ s: r2.status, r: j2.self_referential, t: j2.throttled })})`);
+
+  // ---- (c) the classifier, unit-tested, because everything above rides on it
+  const { isThrottleResponse } = await import("../sp-vpn-worker.js");
+  const cases = [
+    [[403, ""], true, "403"],
+    [[429, "slow down"], true, "429"],
+    [[200, "<html>Just a moment...</html>"], true, "200 with a challenge page"],
+    [[503, "Attention Required! | Cloudflare"], true, "503 interstitial"],
+    [[200, "STATUS=↑:1GB,↓:2GB,TOT:512GB Expires:2026-12-01\nvless://a@b:443#x"], false, "a real payload"],
+    [[500, "upstream exploded"], false, "a plain server error"],
+    [[200, "x".repeat(5000)], false, "a long body cannot be a wall"],
+  ];
+  for (const [args, want, label] of cases)
+    ok(isThrottleResponse(...args) === want, `isThrottleResponse(${label}) → ${want}`);
 }
 
 console.log("\n" + "─".repeat(70));

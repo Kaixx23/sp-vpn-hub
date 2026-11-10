@@ -4,7 +4,7 @@
 // ============================================================================
 import worker from "../sp-vpn-worker.js";
 import * as store from "../token-store.js";
-import { summarise } from "../dashboard.js";
+import { summarise, summariseAt, cycleMonths } from "../dashboard.js";
 import vm from "node:vm";
 
 let failures = 0, checks = 0;
@@ -142,7 +142,19 @@ console.log("\n[3] /admin/refresh — pulls live quota + expiry from the supplie
   ok(s.overdue === 1, `1 overdue — Chen (got ${s.overdue})`);
   ok(s.expiring7 === 1, `1 expiring ≤7d — Bao at 4 days (got ${s.expiring7})`);
   ok(s.unpaid === 1, `1 unpaid — Chen (got ${s.unpaid})`);
-  ok(s.mrr === 50, `MRR 15+20+15 = 50 (got ${s.mrr})`);
+  // These three fixture rows are "200GB / 3mo" at 15/20/15, i.e. a QUARTERLY
+  // price each. The old expectation here was `mrr === 50` — the raw sum of the
+  // three face prices, which is what you collect THIS quarter, not a monthly
+  // run-rate. The test was pinning the bug, so it is corrected rather than
+  // preserved: 50 over 3 months is 16.67/month.
+  ok(s.mrr === 16.67, `revenue = (15+20+15) / 3mo = 16.67 per month (got ${s.mrr})`);
+  ok(s.currency === "USD", `single currency named on the number (${s.currency})`);
+  ok(s.mixedCurrencies === false, "one currency in the book -> no blending warning");
+  ok(s.byCurrency.USD.customers === 3, `per-currency customer count (${s.byCurrency.USD.customers})`);
+  ok(s.revenue.arr === 200, `annual run-rate = 16.67 * 12 ≈ the 200 collected per 3mo cycle (got ${s.revenue.arr})`);
+  ok(s.revenue.assumedMonthly === 0, "every row stated its cycle -> nothing assumed");
+  const monthsRow = after.customers.find((c) => c.customer === "Ali");
+  ok(monthsRow && monthsRow.months === 3, `rows carry their period for the table (got ${monthsRow && monthsRow.months})`);
   ok(s.avgQuotaUsedPct !== null, `average quota used computed (${s.avgQuotaUsedPct}%)`);
 }
 
@@ -331,11 +343,79 @@ console.log("\n[11] /admin/health — live pipeline health");
   ok(j.checks.converter && j.checks.converter.ok === true, `converter end-to-end ok (${j.checks.converter && j.checks.converter.ms} ms)`);
   ok(j.checks.converter && j.checks.converter.nodes === 1 && j.checks.converter.quota_parsed === true, "converter served nodes with quota parsed");
   ok(j.ok === true && j.level === "ok", `overall verdict ok (got ${j.level})`);
+  // A deploy that silently failed serves the OLD profile while answering 200
+  // everywhere, so the dashboard's own health check has to see it.
+  ok(!!j.checks.profile, "health reports the deployed build's profile policy");
+  ok(j.checks.profile.ok === true, `deployed profile is current (${j.checks.profile.label})`);
+  ok(Array.isArray(j.checks.profile.problems) && j.checks.profile.problems.length === 0,
+    `no profile problems (got ${JSON.stringify(j.checks.profile.problems)})`);
   const r2 = await get("/admin/health");
   const j2 = JSON.parse(await r2.text());
   ok(j2.cached === true, `second call served from cache (age ${Math.round((j2.age_ms || 0) / 1000)}s)`);
   const fresh = await get("/admin/health?force=1");
   ok(JSON.parse(await fresh.text()).cached === undefined, "?force=1 bypasses the cache");
+}
+
+console.log("\n[12] revenue maths — monthly-normalised, per currency");
+{
+  // A 12-month plan paid once must NOT count as 12 months of revenue…
+  const annual = summariseAt([
+    { revoked: false, price: 120, currency: "USD", billing_cycle: "annual", supplier_expires: day(300) },
+  ], new Date(day(0) + "T00:00:00Z"));
+  ok(annual.mrr === 10, `120/12mo -> 10 per month (got ${annual.mrr})`);
+  ok(annual.revenue.arr === 120, `…and 120 per year (got ${annual.revenue.arr})`);
+
+  // …and a 120/year customer must never be added to an 8/month one as if equal.
+  const mixedBook = summariseAt([
+    { revoked: false, price: 120, currency: "USD", billing_cycle: "annual" },
+    { revoked: false, price: 8, currency: "USD", billing_cycle: "monthly" },
+  ], new Date(day(0) + "T00:00:00Z"));
+  ok(mixedBook.mrr === 18, `120/12 + 8 = 18/mo in one currency (got ${mixedBook.mrr})`);
+
+  // Two currencies are not one number.
+  const two = summariseAt([
+    { revoked: false, price: 10, currency: "RMB", billing_cycle: "monthly" },
+    { revoked: false, price: 8, currency: "USD", billing_cycle: "monthly" },
+  ], new Date(day(0) + "T00:00:00Z"));
+  ok(two.mixedCurrencies === true, "RMB + USD is reported as mixed, not summed");
+  ok(two.mrr === 0, "no blended cross-currency headline figure exists (got " + two.mrr + ")");
+  ok(two.byCurrency.RMB.mrr === 10 && two.byCurrency.USD.mrr === 8,
+    `each currency keeps its own figure (${JSON.stringify(two.revenue.currencies)})`);
+  ok(two.revenue.currencies[0] === "RMB", `biggest earner listed first (${two.revenue.currencies[0]})`);
+
+  // Cycle read off the plan label when billing_cycle was never filled in.
+  ok(cycleMonths({ plan: "200GB / 3mo" }) === 3, "plan label '3mo' parsed");
+  ok(cycleMonths({ plan: "512GB 一年" }) === 12, "Chinese '年' parsed");
+  ok(cycleMonths({ plan: "512GB/3个月" }) === 3, "Chinese '个月' parsed");
+  ok(cycleMonths({ plan: "包月" }) === 1, "bare '包月' is monthly");
+  ok(cycleMonths({ plan: "512GB 三个月" }) === 3, "CJK numeral before 个月 (一年/两周 style labels)");
+  ok(cycleMonths({ plan: "一星期" }) === 0.23, "CJK '星期' read as a week (7/30.44)");
+  ok(cycleMonths({ plan: "30天" }) === 0.99, "CJK '天' read as days");
+  ok(cycleMonths({ billing_cycle: "QUARTERLY" }) === 3, "billing_cycle wins and case does not matter");
+  ok(cycleMonths({ billing_cycle: "3  months " }) === 3, "sloppy spacing tolerated");
+  ok(cycleMonths({ plan: "512GB" }) === null, "no period stated -> null, never a silent guess");
+  ok(cycleMonths({}) === null, "empty row -> null");
+
+  // Unpriced / free rows must not become 0-currency customers.
+  const free = summariseAt([{ revoked: false, price: 0 }, { revoked: false, price: null }], new Date(day(0) + "T00:00:00Z"));
+  ok(free.revenue.currencies.length === 0, "zero/null prices contribute nothing");
+  ok(free.active === 2, "…but they are still active customers (got " + free.active + ")");
+
+  // Unknown cycle: assume monthly (this catalogue sells monthly) BUT say so.
+  const assumed = summariseAt([{ revoked: false, price: 25 }], new Date(day(0) + "T00:00:00Z"));
+  ok(assumed.mrr === 25, "an unstated cycle is treated as monthly (got " + assumed.mrr + ")");
+  ok(assumed.revenue.assumedMonthly === 1 && assumed.revenue.assumedFace === 25,
+    `…and the guess is counted and shown (${assumed.revenue.assumedMonthly} row / ${assumed.revenue.assumedFace})`);
+
+  // Revenue at risk: only rows expiring within 30 days (or already overdue).
+  const risk = summariseAt([
+    { revoked: false, price: 9, currency: "RMB", billing_cycle: "monthly", supplier_expires: day(5) },
+    { revoked: false, price: 12, currency: "RMB", billing_cycle: "monthly", supplier_expires: day(-2) },
+    { revoked: false, price: 30, currency: "RMB", billing_cycle: "monthly", supplier_expires: day(90) },
+    { revoked: true, price: 99, currency: "RMB", billing_cycle: "monthly", supplier_expires: day(1) },
+  ], new Date(day(0) + "T00:00:00Z"));
+  ok(risk.byCurrency.RMB.atRisk30 === 21, `9 due soon + 12 overdue = 21 at risk, 30d-out and revoked excluded (got ${risk.byCurrency.RMB.atRisk30})`);
+  ok(risk.mrr === 51, `risk is a slice of revenue, not the whole book (got ${risk.mrr})`);
 }
 
 console.log("\n" + "─".repeat(70));
