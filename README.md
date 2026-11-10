@@ -542,13 +542,35 @@ self-reporting and externally auditable:
 npm run verify -- https://sp-vpn.netlify.app --token=<a-customer-token>
 ```
 
-It distinguishes the two failures you can hit, because they need different fixes:
+It distinguishes the three failures you can hit, because they need different fixes:
 
 ```
 ❌ deployment reports its profile policy   GET /healthz returned 200 ok — this
    build predates the profile guard … Redeploy from this repo.     ← build too old
 ❌ live profile passes the guard   needs-geoip, cn-dns              ← regression
+❌ could not reach https://… — every request failed at the network  ← your shell,
+   layer …                                                          not the deploy
 ```
+
+The third one is a trap: a sandboxed runner, a CI job without egress, or any host
+that cannot complete the TLS handshake produces `fetch failed` for every request,
+and a script that reports "not serving the profile this repo builds" in that case
+sends you redeploying a build that was already correct. Exit code is still 1 — the
+answer is "I could not look", which is not the same as "it is wrong". From a
+machine that *does* have egress, read the two headers by eye (the agent working on
+this repo hit exactly this while confirming the 2026-11-10 probe fix, and had to
+fetch the live profile through a proxy instead — note that a proxied page fetch
+also answers it, but a plain `curl` from inside a no-egress sandbox does not):
+
+```bash
+curl -s https://sp-vpn.netlify.app/healthz | head -c 160
+curl -sL "https://sp-vpn.netlify.app/all/SP%20VPN?t=<token>&fmt=yaml" | head -5
+```
+
+That second command is also the customer-facing answer to "did my app get the
+fix?": the `# latency probe:` line only exists in new profiles, so if a customer's
+app shows it missing while the server emits it, their client cached the old
+subscription — update the subscription, don't redeploy.
 
 `checkProfile()` in `sp-vpn-worker.js` is the single definition those all share:
 geodata-free by default, non-CN resolvers plus `proxy-server-nameserver`,

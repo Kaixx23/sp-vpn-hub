@@ -127,6 +127,23 @@ console.log(`${"─".repeat(64)}`);
 for (const r of results) line(`${mark(r.ok)} ${r.name}${r.detail ? "  " + r.detail : ""}`);
 const failed = results.filter((r) => !r.ok);
 console.log(`${"─".repeat(64)}`);
+// A socket that never connected is not evidence about a deployment. Sandboxes,
+// CI runners and restricted networks commonly have no outbound TLS at all, and
+// this script used to answer that with "the fix is not deployed" — which sends
+// someone redeploying a build that was already correct. Sort that out first.
+const unreachable = failed.length && failed.every((r) =>
+  /fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENET|certificate|SSL|TLS|socket hang up|aborted/i.test(r.detail));
+if (unreachable) {
+  console.log(`${RED}could not reach ${base}${OFF} — every request failed at the network layer, so`);
+  console.log("  nothing here says whether the deployment is current. Re-run from a machine with");
+  console.log("  ordinary outbound HTTPS, or check by eye — both are one line each:");
+  console.log(`    curl -s ${base}/healthz | head -c 160`);
+  console.log(`    curl -sL "${base}/all/<brand>?t=<token>&fmt=yaml" | head -5\n`);
+  console.log("  In that YAML header, `# latency probe: https://…` must be present, and the");
+  console.log("  url-test/fallback groups must carry NO `expected-status`. Missing either one");
+  console.log("  means the build is behind; if both are there, the deploy is fine.\n");
+  process.exit(1);
+}
 if (failed.length) {
   console.log(`${RED}${failed.length} check(s) failed${OFF} — ${base} is not serving the profile this repo builds.\n`);
   console.log("  Most likely cause: the fix is merged but not deployed. Redeploy, then re-run:");
