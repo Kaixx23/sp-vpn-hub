@@ -1,16 +1,23 @@
 # SP-V1 handoff (temporary files — delete once the repo is populated)
 
-`SP-V1-v1.0.patch` is the **entire finished SP-V1 project** as one git patch:
-10 files, 2 169 lines, `npm test` = 181 checks passing. It exists because the
-GitHub connection in this Arena session can write to `sp-vpn-hub` but was denied
-on `Kaixx23/SP-V1` (`Resource not accessible by integration`), so the work could
-not be pushed there.
+`SP-V1-v1.0.patch` is the **entire finished SP-V1 project** as a git patch: 2
+commits, 10 files, 2 169 lines, `npm test` = **249 checks passing** (181 against
+stubs + 68 over real HTTP on three loopback servers). Verified by applying the
+patch into an empty repo and running the suite there: the restored tree hashes
+identical to the working one.
 
-## Option A — give the session write access to the new repo
+It lives here because the GitHub connection in this Arena session can write to
+`sp-vpn-hub` but every write to `Kaixx23/SP-V1` is refused — `gh api` says
+*Resource not accessible by integration* (403) and git-over-HTTPS says *Permission
+denied*, on both the contents API and the git-data API. The repo is empty, so
+nothing has been lost; the work just has not been delivered yet.
 
-GitHub → Settings → Applications/Integrations → the Arena GitHub app → *Reposit
-ories* → add `SP-V1`. Then say "push SP-V1" and it goes to `main` with the `v1.0`
-tag, and these two files get deleted.
+## Option A — authorise the new repo, then I push it
+
+GitHub → **Settings → Applications → (the Arena GitHub app) → Configure → Only
+select repositories** → add `SP-V1`. Then say "push SP-V1": `main` plus the `v1.0`
+tag (already created locally, `git push --follow-tags`) land in one go, and these
+two files get deleted.
 
 ## Option B — apply it yourself
 
