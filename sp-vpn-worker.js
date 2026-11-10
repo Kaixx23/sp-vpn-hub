@@ -109,6 +109,34 @@ function b64d(s) {
   return decodeURIComponent(escape(atob(s)));
 }
 function safeDecode(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
+
+/**
+ * Make a brand safe to put in a Clash profile.
+ *
+ * The brand is not just a label — it becomes the default proxy-group name and
+ * the target of the final `MATCH` rule, and both parsers are strict about it:
+ * mihomo splits rules on commas, so `SP,VPN` turns `MATCH,🚀 SP,VPN` into a
+ * three-field rule; YAML reads `: ` as a key/value separator and ` #` as a
+ * comment, so `吹雪 VPN: 学生` stops being a string at all. Either way mihomo
+ * rejects the profile and EVERY node fails — a silent, total outage caused by
+ * nothing more than the name chosen in the seller form.
+ */
+export function safeBrand(b) {
+  const s = String(b == null ? "" : b)
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[",#]/g, " ")
+    .replace(/:(?=\s)/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 40)
+    .trim();
+  return s || "SP VPN";
+}
+
+/** For brand text going into HTML — it arrives from the URL/query of a link. */
+const escHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 function encName(s) {
   return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
 }
@@ -257,6 +285,28 @@ function parseNode(link) {
   return null;
 }
 
+/**
+ * Names of share links a mihomo client cannot use. Used only to annotate the
+ * profile — deliberately NOT converted. Checked against mihomo's own structs:
+ * `type: hysteria` needs up/down speeds the URI never carries (its Speed()
+ * errors without them) and has no password or salamander-obfs field, so
+ * guessing risks the whole import to gain one node. A labelled gap beats a
+ * config that will not load at all.
+ */
+function skippedNodeNames(links, proxies) {
+  if (!Array.isArray(links) || !links.length) return [];
+  const kept = new Set((proxies || []).map((p) => p.name));
+  const out = [];
+  for (const l of links) {
+    if (!/^[a-z0-9+.-]+:\/\//i.test(l)) continue; // STATUS= line, blanks
+    const p = parseNode(l);
+    if (p && kept.has(p.name)) continue;
+    const name = p ? p.name : safeDecode(l.split("#").slice(1).join("#") || "");
+    if (name) out.push(name);
+  }
+  return [...new Set(out)];
+}
+
 function rebrandLink(link, brand) {
   const i = link.indexOf("#");
   const base = i >= 0 ? link.slice(0, i) : link;
@@ -319,7 +369,11 @@ function buildYaml(status, proxies, brand, opts = {}) {
   // import and every auto-update re-arms Auto Speed. ?remember=1 brings the
   // sticky behaviour back for power users.
   const remember = !!opts.remember;
-  const AUTO = "⚡ Auto Speed", FAIL = "🔁 Failover", DIRECT = "🇨🇳 Direct", TOP = "🚀 " + brand;
+  // Sanitised here rather than at every call site: buildYaml is the only place
+  // the brand becomes a group name and a rule target, so this is the one choke
+  // point that can guarantee the profile parses.
+  const br = safeBrand(brand);
+  const AUTO = "⚡ Auto Speed", FAIL = "🔁 Failover", DIRECT = "🇨🇳 Direct", TOP = "🚀 " + br;
   const CI = { Telecom: "📡", Unicom: "📶", Mobile: "📱" };
   const CN = { Telecom: "电信", Unicom: "联通", Mobile: "移动" };
   const cgroup = (c) => `${CI[c] || ""} ${CN[c] || c}专线`;
@@ -365,10 +419,25 @@ function buildYaml(status, proxies, brand, opts = {}) {
   const hasAuto = names.length > 0;
 
   const L = [];
-  L.push(`# ${brand} — generated for your account (live quota below)`);
-  if (status) L.push("# " + status);
+  L.push(`# ${br} — generated for your account (live quota below)`);
+  if (status) L.push("# " + String(status).replace(/\r?\n/g, " "));
+  // Nodes the share list had but mihomo cannot use (hysteria2://, tuic://, …).
+  // Silently dropping them is what makes a converted link look worse than the
+  // supplier's own — Shadowrocket shows 24 nodes, Clash shows 22, and the
+  // student has no way to know why. Say it in the profile they can screenshot.
+  const skipped = Array.isArray(opts.skipped) ? opts.skipped.filter(Boolean) : [];
+  if (skipped.length) {
+    L.push(`# NOTE: ${skipped.length} node(s) here are not Clash-compatible and are left out:`);
+    L.push(`#       ${skipped.slice(0, 8).map((n) => String(n).replace(/\r?\n/g, " ")).join(", ")}${skipped.length > 8 ? ` +${skipped.length - 8} more` : ""}`);
+    L.push(`#       those work fine in Shadowrocket / v2rayNG / NekoBox / Hiddify — use the plain link for them`);
+  }
   L.push(`# default selection: ${AUTO}${remember ? " (your last manual pick is remembered)" : " — re-armed on every update"}`);
-  L.push(`# ${branded.length} nodes · ${cn
+  // Real nodes only — the quota placeholders are not servers, and promising a
+  // customer "24 nodes" when two of them are a bandwidth readout is how you get
+  // "half my nodes are broken" tickets.
+  const infoCount = branded.length - realNodes.length;
+  const nodeWord = realNodes.length === 1 ? "node" : "nodes";
+  L.push(`# ${realNodes.length} ${nodeWord}${infoCount ? ` + ${infoCount} quota info link(s)` : ""} · ${cn
     ? "CN-optimized: auto speed-test, fallback, carrier lines, CN-direct rules (?cn=1)"
     : "global profile: auto speed-test, fallback, carrier lines, no GeoIP download needed"}`);
   L.push(`# refreshed ${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC`);
@@ -531,6 +600,169 @@ function buildYaml(status, proxies, brand, opts = {}) {
   return L.join("\n") + "\n";
 }
 
+// ---------------------------------------------------------------------------
+// PROFILE GUARD — one definition of "this profile is safe to hand out".
+//
+// Why this exists: on 2026-11-10 customers on Clash Meta / Clash Verge could
+// import a link that worked fine in Shadowrocket. The build serving them was
+// emitting CN-only DNS resolvers (223.5.5.5 / 119.29.29.29) and GEOIP rules
+// with no geodata shipped — so outside China every node hostname lookup and
+// every latency test timed out, and a fresh install blocked on a GeoIP
+// download it could not make. Those are exactly the properties the profile
+// generator is supposed to guarantee the OPPOSITE of, and nothing at runtime
+// could tell us the deployed build disagreed with git. So the guarantee is now
+// checked, reported and testable in one place:
+//
+//   * `checkProfile()`      — the rules themselves (used by every caller below)
+//   * `profileFingerprint()` — what THIS running build produces, exposed at
+//                              /healthz and in an X-SPVPN-Profile header, so
+//                              "is production current?" is one curl
+//   * `npm run verify`      — runs the same rules against a live host
+//   * test/profile-guard    — fails CI if anyone reintroduces them
+// ---------------------------------------------------------------------------
+
+/** Split our own generated YAML into the groups section and the proxies block. */
+function splitYamlSections(y) {
+  // Leading \n so a document that opens with `proxies:` still splits — without
+  // it the whole profile reads as "groups" and every proxy-level check is a
+  // silent no-op.
+  const hay = "\n" + y;
+  const i = hay.lastIndexOf("\nproxies:\n");
+  if (i < 0) return { groups: y, proxies: "" };
+  return { groups: hay.slice(0, i + 1), proxies: hay.slice(i + 1) };
+}
+
+/**
+ * Assert the safety properties a mihomo client needs. Pure — takes the YAML
+ * text, returns { ok, problems: [{ code, msg }] }. `cn: true` inverts the two
+ * rules that are deliberately different in the ?cn=1 profile.
+ */
+export function checkProfile(y, opts = {}) {
+  const cn = !!opts.cn;
+  const problems = [];
+  const bad = (code, msg) => problems.push({ code, msg });
+  const sec = splitYamlSections(y);
+
+  // 1. No geodata dependency. GEOIP rules + fallback-filter.geoip force the
+  //    core to download geoip.metadb *through the network the user cannot
+  //    reach yet* — which surfaces as a timeout on import, not an error.
+  if (!cn && (/(^|\n)\s*-\s*GEOIP,/.test(y) || /geoip:\s*true/.test(y))) {
+    bad("needs-geoip", "profile requires a GeoIP download before first connection");
+  }
+  if (cn && !/-\s*GEOIP,CN,DIRECT/.test(y)) bad("cn-missing-geoip", "?cn=1 profile lost its GEOIP,CN rule");
+
+  // 2. Resolvers must be reachable where the customer is. Chinese public
+  //    resolvers are only fast inside China; elsewhere they are slow or
+  //    dropped, and mihomo resolves NODE hostnames with them — so every
+  //    connection and every latency test fails even though import worked.
+  const ns = (y.match(/^[ ]*nameserver:\s*(.*)$/m) || [, ""])[1];
+  if (!cn && /223\.5\.5\.5|119\.29\.29\.29/.test(ns)) bad("cn-dns", `global profile uses China-only resolvers: ${ns.trim()}`);
+  if (cn && !/223\.5\.5\.5/.test(ns)) bad("cn-dns-missing", "?cn=1 profile lost its CN resolvers");
+
+  // 3. Without this the node hostnames are resolved with the entries above,
+  //    and a user editing `nameserver` breaks the tunnel. Its absence is the
+  //    classic "imported fine, every node times out".
+  if (!/^[ ]*proxy-server-nameserver:/m.test(y)) bad("no-proxy-nameserver", "missing dns.proxy-server-nameserver");
+
+  // 4. Fresh load must land on Auto Speed. store-selected:true restores the last
+  //    tapped node forever, so a stray tap outlives every renewal.
+  if (!cn && /store-selected:\s*true/.test(y)) bad("sticky-selection", "profile.store-selected:true stops Auto Speed being re-armed on update");
+
+  // 5. mihomo FATALLY rejects a duplicate proxy name ("X is the duplicate
+  //    name") — the whole import fails, not just one node. Translation makes
+  //    移联/移动 collide to the same English name, so this must stay true.
+  const names = [...sec.proxies.matchAll(/^- name:\s*"((?:[^"\\]|\\.)*)"/gm)].map((m) => m[1].replace(/\\"/g, '"'));
+  const dupes = names.filter((n, i) => names.indexOf(n) !== i);
+  if (dupes.length) bad("duplicate-names", `duplicate proxy names kill import: ${dupes.slice(0, 3).join(", ")}`);
+
+  // 6. A group naming something that does not exist is also fatal.
+  const groupNames = [...sec.groups.matchAll(/^- name:\s*"((?:[^"\\]|\\.)*)"/gm)].map((m) => m[1]);
+  const known = new Set([...names, ...groupNames, "DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBAL"]);
+  const missing = [...sec.groups.matchAll(/^\s+-\s+"((?:[^"\\]|\\.)*)"/gm)].map((m) => m[1].replace(/\\"/g, '"')).filter((n) => !known.has(n));
+  if (missing.length) bad("dangling-group", `groups reference unknown proxies: ${[...new Set(missing)].slice(0, 3).join(", ")}`);
+
+  // 7. Fake quota nodes (剩余流量/套餐到期 are links, not servers) must never
+  //    sit in a speed-test or failover group: they steal probe slots and skew
+  //    the auto-selection every customer depends on.
+  const groups = parseGroups(sec.groups);
+  const infoNames = new Set(names.filter((n) => isInfoLink(n) || /^(Remaining|Expires|Reset in)\b/i.test(n)));
+  for (const g of groups) {
+    if (g.type !== "url-test" && g.type !== "fallback") continue;
+    if (g.proxies.some((p) => infoNames.has(p))) { bad("info-in-test", `"${g.name}" speed-tests quota placeholder nodes`); break; }
+  }
+
+  // 8. udp:false silently kills DNS for the customer (fake-ip mode).
+  const proxyBlocks = sec.proxies.split(/\n(?=- name: )/).filter((b) => /^- name: /.test(b));
+  if (proxyBlocks.some((b) => !/^\s+udp:\s*true/m.test(b))) bad("no-udp", "a proxy is missing udp: true — DNS/QUIC breaks");
+
+  return { ok: problems.length === 0, problems };
+}
+
+/** Read `- name / type / proxies: [a, b]` and block-form proxy lists back out. */
+function parseGroups(block) {
+  const out = [];
+  const parts = block.split(/\n(?=- name: )/);
+  for (const p of parts) {
+    const name = (p.match(/^- name:\s*"((?:[^"\\]|\\.)*)"/) || [, null])[1];
+    if (!name) continue;
+    const type = (p.match(/^[ ]*type:\s*(\S+)/m) || [, ""])[1];
+    const inline = (p.match(/^[ ]*proxies:\s*\[(.*)\]$/m) || [])[1];
+    const list = inline !== undefined
+      ? inline.split(",").map((s) => s.trim().replace(/^"|"$/g, ""))
+      : [...p.matchAll(/^\s+-\s+"?([^"\n]+)"?$/gm)].map((m) => m[1].trim());
+    out.push({ name, type, proxies: list });
+  }
+  return out;
+}
+
+// Four links covering the risky paths: a quota placeholder (must not reach the
+// test groups), a Reality/tcp node, a CDN-front ws node, and a second Reality
+// node whose translated name collides with the first (must be de-duplicated).
+const FINGERPRINT_LINKS = [
+  "vless://11111111-1111-4111-8111-111111111111@a.example:443?encryption=none&security=reality&flow=xtls-rprx-vision&fp=safari&sni=example.com&pbk=AAA&sid=bb#%E5%89%A9%E4%BD%99%E6%B5%81%E9%87%8F%EF%BC%9A100GB",
+  "vless://11111111-1111-4111-8111-111111111111@a.example:443?encryption=none&security=reality&flow=xtls-rprx-vision&fp=chrome&sni=example.com&pbk=AAA&sid=bb#%F0%9F%87%AF%E2%80%A2Mobile01",
+  "vless://11111111-1111-4111-8111-111111111111@b.example:443?encryption=none&security=tls&type=ws&host=cdn.example.com&path=%2Fx&sni=cdn.example.com#%F0%9F%87%AD%E2%80%A2Telecom01",
+  "vless://11111111-1111-4111-8111-111111111111@c.example:443?encryption=none&security=reality&flow=xtls-rprx-vision&sni=example.com&pbk=AAA&sid=cc#%F0%9F%87%AF%E2%80%A2Mobile01",
+];
+
+let _fp = null;
+/**
+ * What profile policy is the code actually running right now producing?
+ * Generated from buildYaml itself, so it cannot drift out of sync with a
+ * version string someone forgot to bump.
+ */
+export function profileFingerprint() {
+  if (_fp) return _fp;
+  const proxies = FINGERPRINT_LINKS.map(parseNode).filter(Boolean);
+  const global = buildYaml("", proxies, "SP VPN", {});
+  const cnYaml = buildYaml("", proxies, "SP VPN", { cn: true });
+  const res = checkProfile(global, {});
+  const cnRes = checkProfile(cnYaml, { cn: true });
+  const top = parseGroups(splitYamlSections(global).groups)[0] || { proxies: [] };
+  _fp = {
+    ok: res.ok && cnRes.ok,
+    mode: "geo-free global profile by default; ?cn=1 opts into CN resolvers + GEOIP rules",
+    autoSpeedFirst: top.proxies[0] === "⚡ Auto Speed",
+    storeSelectedOff: /store-selected: false/.test(global),
+    needsGeoipDownload: /GEOIP|geoip:/.test(global),
+    cnOnlyDns: /223\.5\.5\.5/.test((global.match(/^[ ]*nameserver:.*$/m) || [""])[0]),
+    proxyServerNameserver: /proxy-server-nameserver/.test(global),
+    problems: res.problems,
+    cnProblems: cnRes.problems,
+  };
+  return _fp;
+}
+
+/** Short, greppable signal for the app-facing responses. */
+export function profileHeader() {
+  try {
+    const f = profileFingerprint();
+    return f.ok ? "geo-free;global-dns;auto-speed;re-armed" : "STALE:" + f.problems.map((p) => p.code).join("+");
+  } catch (e) {
+    return "unknown";
+  }
+}
+
 export function quotaSummary(status) {
   const m = status.match(/↑:([\d.]+)GB,↓:([\d.]+)GB,TOT:([\d.]+)GB.*?Expires:([\d-]+)/);
   if (!m) return null;
@@ -614,6 +846,9 @@ const errorPage = (msg) => page("Error", `
 <div class="dim">If your plan was renewed, use the NEW link.</div>`);
 
 function quotaBody(host, tok, brand, status, proxies, linksTotal) {
+  // brand arrives via ?brand= on a link any student can send to another
+  // student, so it must not be able to write markup into the quota page.
+  const bHtml = escHtml(safeBrand(brand));
   const s = quotaSummary(status);
   const one = `${host}/all/${encodeURIComponent(brand)}?t=${encodeURIComponent(tok)}`;
   // Explicit YAML link: works even when the Clash app sends a User-Agent we
@@ -635,14 +870,14 @@ function quotaBody(host, tok, brand, status, proxies, linksTotal) {
     quota = `<div class="err">Quota text not recognized.<br>${status || "No status from provider."}</div>`;
   }
   return `
-<h1>⚡ ${brand} — your data</h1>
+<h1>⚡ ${bHtml} — your data</h1>
 <div class="sub">updated ${new Date().toISOString().slice(11, 16)} UTC · auto-refreshes every 60s</div>
 ${quota}
 <div class="dim" style="text-align:center;margin-top:10px">${proxies.length} of ${linksTotal} nodes ready</div>
 <div class="me"><div class="t">🔗 <b>YOUR personal link</b> — save it:</div><div class="u" id="pl">${one}</div></div>
 <button class="btn gray" style="margin-top:8px" onclick="cp('pl','cop1')">📋 Copy my personal link</button>
 <div class="ok" id="cop1" style="display:none">✅ copied</div>
-<div class="me" style="margin-top:14px"><div class="t">✨ <b>ONE VPN LINK — all apps</b> (Shadowrocket / v2rayNG / Clash / Hiddify — auto-detects, named "${brand}", English node names):</div><div class="u" id="al">${one}</div></div>
+<div class="me" style="margin-top:14px"><div class="t">✨ <b>ONE VPN LINK — all apps</b> (Shadowrocket / v2rayNG / Clash / Hiddify — auto-detects, named "${bHtml}", English node names):</div><div class="u" id="al">${one}</div></div>
 <button class="btn green" style="margin-top:8px" onclick="cp('al','copa')">📋 Copy the ONE link</button>
 <div class="ok" id="copa" style="display:none">✅ copied — that's all your client needs</div>
 <div class="me" style="margin-top:14px"><div class="t">🔄 <b>Clash / Clash Mi / mihomo link</b> (always YAML, auto-updates) — Profiles → + → add URL:</div><div class="u" id="su">${sub}</div></div>
@@ -653,7 +888,8 @@ ${COPY_JS}`;
 }
 
 function rebrandResults(host, brand, rows) {
-  const parts = [`<h1>⚡ Rebranded as ${brand}</h1><div class="sub">${rows.length} link(s) · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC</div>`];
+  const bHtml = escHtml(safeBrand(brand));
+  const parts = [`<h1>⚡ Rebranded as ${bHtml}</h1><div class="sub">${rows.length} link(s) · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC</div>`];
   rows.forEach((r, i) => {
     const n = i + 1;
     if (r.error) { parts.push(`<div class="row"><b>Link ${n}</b><div class="err">❌ ${r.error}</div></div>`); return; }
@@ -670,19 +906,21 @@ ${r.summary ? `<div class="dim" style="text-align:center">🚀 ${r.summary.left.
 <div class="ok" id="cosp2${n}" style="display:none">✅ copied</div></div>`);
   });
   parts.push(COPY_JS);
-  return page(`Rebranded as ${brand}`, parts.join(""));
+  return page(`Rebranded as ${bHtml}`, parts.join(""));
 }
 
 function toolResults(host, brand, rows) {
-  const parts = [`<h1>⚡ ${brand} — client packs</h1><div class="sub">${rows.length} link(s) · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC</div>`];
+  const bHtml = escHtml(safeBrand(brand));
+  const bMsg = safeBrand(brand);
+  const parts = [`<h1>⚡ ${bHtml} — client packs</h1><div class="sub">${rows.length} link(s) · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC</div>`];
   rows.forEach((r, i) => {
     const n = i + 1;
     if (r.error) { parts.push(`<div class="row"><b>Link ${n}</b><div class="err">❌ ${r.error}</div></div>`); return; }
     const one = `${host}/all/${encodeURIComponent(brand)}?t=${encodeURIComponent(r.tok)}`;
     const sub = `${one}&fmt=yaml`;
-    const msg = `Here's your ${brand} setup 🚀
+    const msg = `Here's your ${bMsg} setup 🚀
 
-1) VPN — add this ONE link in your app (Shadowrocket / v2rayNG / NekoBox / Hiddify / Clash — auto-detects, arrives named "${brand}"):
+1) VPN — add this ONE link in your app (Shadowrocket / v2rayNG / NekoBox / Hiddify / Clash — auto-detects, arrives named "${bMsg}"):
 ${one}
    Clash users (Clash Mi / Verge / FlClash / ClashX) — use this instead, it always returns YAML and auto-updates:
 ${sub}
@@ -701,7 +939,7 @@ ${r.summary ? `<div class="dim" style="text-align:center">🚀 ${r.summary.left.
 <div class="ok" id="copm${n}" style="display:none">✅ message copied — send it to your client</div></div>`);
   });
   parts.push(COPY_JS);
-  return page(`${brand} — client packs`, parts.join(""));
+  return page(`${bHtml} — client packs`, parts.join(""));
 }
 
 // ---------------- router ----------------
@@ -778,7 +1016,7 @@ const html = (doc, title) => {
   return new Response(out, { headers: { "Content-Type": "text/html; charset=utf-8" } });
 };
 const plain = (body, extra) => new Response(body, { headers: { "Content-Type": "text/plain; charset=utf-8", ...extra } });
-const yamlRes = (body, extra) => new Response(body, { headers: { "Content-Type": "text/yaml; charset=utf-8", ...extra } });
+const yamlRes = (body, extra) => new Response(body, { headers: { "Content-Type": "text/yaml; charset=utf-8", "X-SPVPN-Profile": profileHeader(), ...extra } });
 // Real errors must return a real HTTP error status. Apps used to receive a 200
 // HTML page and then showed a confusing "parse error" instead of the reason.
 const plainErr = (msg, code = 502) => new Response(msg + "\n", {
@@ -848,7 +1086,9 @@ const redact = (r) => ({
 });
 
 function subHeaders(status, pageUrl) {
-  const h = {};
+  // Every subscription response states which profile policy built it, so
+  // "is the live site running the fix?" is answerable without reading code.
+  const h = { "X-SPVPN-Profile": profileHeader() };
   const s = quotaSummary(status);
   if (s) {
     const G = 1073741824;
@@ -879,6 +1119,12 @@ export const CLASH_UA_KEYS = [
   "clash", "clashmi", "clash-mi", "clashx", "clashmeta", "mihomo", "meta",
   "verge", "nyanpasu", "fugu", "flclash", "stash", "streisand", "sparkle",
   "party", "zash", "reqwest", "tauri",
+  // Karing runs the mihomo core but identifies itself as "Karing/x.y.z" — with
+  // no match here it was handed a bare base64 list and had to rebuild a config
+  // itself, losing the auto-speed group, carrier lines and quota header. Its
+  // own support docs tell users to set the subscription UA to "clash/mihomo",
+  // which is exactly this line doing it for them.
+  "karing",
 ];
 export function wantsClashYaml({ fmt = "", ua = "", accept = "", ext = "" }) {
   const f = String(fmt).toLowerCase();
@@ -932,7 +1178,11 @@ const isOn = (v) => ["1", "true", "yes", "on"].includes(String(v || "").toLowerC
 // ?cn=1 restores the China-ISP profile (CN resolvers + GEOIP rules).
 const isCn = (url) => isOn(url.searchParams.get("cn"));
 // Every profile option that changes the generated YAML, in one place.
-const yamlOpts = (url) => ({ cn: isCn(url), remember: isOn(url.searchParams.get("remember")) });
+const yamlOpts = (url, skipped) => ({
+  cn: isCn(url),
+  remember: isOn(url.searchParams.get("remember")),
+  ...(skipped && skipped.length ? { skipped } : {}),
+});
 
 export default {
   async fetch(request, env, ctx) {
@@ -1003,7 +1253,19 @@ export default {
       }
 
       // GET
-      if (path === "/healthz") return plain("ok");
+      // ---- health ----
+      // Not just "is the function up" but "is the function up WITH THE RIGHT
+      // PROFILE POLICY". A stale deploy (the cause of the 2026-11-10 Clash
+      // outage) returns ok:true from a liveness probe and still breaks every
+      // customer — so /healthz reports the fingerprint of the profile this
+      // build actually generates. Non-zero HTTP status when it regresses.
+      if (path === "/healthz") {
+        const f = profileFingerprint();
+        // 503 (not 200) when the policy regressed, so an uptime check fails on
+        // its own — a stale-but-alive deploy is exactly what a liveness probe misses.
+        if (url.searchParams.get("full") === "1") return json({ ok: f.ok, profile: profileHeader(), ...f }, f.ok ? 200 : 503);
+        return json({ ok: f.ok, profile: profileHeader() }, f.ok ? 200 : 503);
+      }
 
       // ---- dashboard ----
       if (path === "/admin" || path === "/admin/dashboard") {
@@ -1126,6 +1388,9 @@ export default {
           const b = storeBackend();
           out.store = { backend: b && b.name ? b.name : "unknown", persistent: !!(b && b.name && b.name !== "memory") };
         } catch (e) { out.store = { backend: "unknown", persistent: null }; }
+        // Is THIS deployment the fixed one? Reported from the running build, so
+        // a stale deploy is visible in the same place a student reports from.
+        out.deployment = profileFingerprint();
         if (!tok) return json({ ...out, error: "add ?t=<your token> for a full profile check" }, 400);
         const t0 = Date.now();
         try {
@@ -1140,7 +1405,7 @@ export default {
             .sort((a, b) => b[1] - a[1])
             .map(([server, count]) => ({ server, nodes: count }));
           out.quota = quotaSummary(status) || null;
-          const y = buildYaml(status, proxies, "SP VPN", yamlOpts(url));
+          const y = buildYaml(status, proxies, "SP VPN", yamlOpts(url, skippedNodeNames(links, proxies)));
           const names = proxies.length ? y.split("\n").filter((l) => l.startsWith("- name: ")).map((l) => l.slice(8)) : [];
           out.yaml = {
             mode: isCn(url) ? "cn" : "global",
@@ -1149,8 +1414,11 @@ export default {
             duplicateNames: names.length - new Set(names).size,
             needsGeoipDownload: /GEOIP|geoip:/.test(y),
             resolvers: (y.match(/^  nameserver: .*$/m) || [""])[0].trim(),
+            // Full guard against the profile THIS student would receive, so a
+            // report of "it times out in Clash" names the reason or rules it out.
+            guard: checkProfile(y, yamlOpts(url)),
           };
-          out.ok = proxies.length > 0 && out.yaml.duplicateNames === 0;
+          out.ok = proxies.length > 0 && out.yaml.duplicateNames === 0 && out.yaml.guard.ok;
         } catch (e) {
           out.ok = false;
           out.supplierMs = Date.now() - t0;
@@ -1164,7 +1432,8 @@ export default {
         const { status, proxies, links } = await getDecoded(m[1]);
         return html(quotaBody(host, m[1], brand, status, proxies, links.length));
       }
-      if ((m = path.match(/^\/all\/([^/?]+)$/))) {
+      if ((m = path.match(/^\/all\/([^/?]*)$/))) { // * not +: an empty brand must fall back to the default, not 404
+
         const seg = splitExt(safeDecode(m[1]));
         const brand = seg.name || "SP VPN";
         const tok = url.searchParams.get("t") || "";
@@ -1183,16 +1452,16 @@ export default {
         const extra = subHeaders(status, `${host}/q/${tok}`);
         if (wantsYaml) {
           if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-          return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url)), extra);
+          return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url, skippedNodeNames(links, proxies))), extra);
         }
         return plain(btoa(unescape(encodeURIComponent(buildShare(status, links, brand)))), extra);
       }
       if ((m = path.match(/^\/sub\/([^/]+)$/))) {
         const tok = splitExt(m[1]).name;
         const brand = url.searchParams.get("brand") || "SP VPN";
-        const { status, proxies } = filterNodes(await getDecoded(tok), url);
+        const { status, links, proxies } = filterNodes(await getDecoded(tok), url);
         if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
-        return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url)), subHeaders(status, `${host}/q/${tok}`));
+        return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url, skippedNodeNames(links, proxies))), subHeaders(status, `${host}/q/${tok}`));
       }
       if ((m = path.match(/^\/share\/([^/]+)$/))) {
         const brand = url.searchParams.get("brand") || "SP VPN";
@@ -1203,7 +1472,7 @@ export default {
           return plain(body, { "Content-Disposition": `attachment; filename="${(brand.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}.txt"` });
         return plain(body);
       }
-      if ((m = path.match(/^\/sr\/([^/?]+)$/))) {
+      if ((m = path.match(/^\/sr\/([^/?]*)$/))) {
         const brand = safeDecode(m[1]) || "SP VPN";
         const tok = url.searchParams.get("t") || "";
         if (!tok) return plainErr("missing ?t= parameter", 400);

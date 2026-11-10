@@ -243,7 +243,8 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/link/<t>?action=rotate` | GET | Kill + reissue, carries the customer's details |
 | `/admin/link/<t>?action=delete` | GET | Remove the row entirely |
 
-| `/diag?t=<t>` | GET | Self-service diagnosis — what format *this* client gets, supplier latency, YAML sanity |
+| `/diag?t=<t>` | GET | Self-service diagnosis — what format *this* client gets, supplier latency, YAML sanity, **and whether this deployment is current** |
+| `/healthz` | GET | Liveness **plus profile policy**. `?full=1` for the whole fingerprint. HTTP 503 when the profile policy has regressed |
 
 `/admin/*` has **no authentication yet** — see *Before you deploy*.
 
@@ -283,6 +284,115 @@ There are only three possible causes, and each has a switch:
 
    Really on a Chinese ISP? Append **`&cn=1`** to get the old CN-optimized
    profile (CN resolvers, `GEOIP,CN,DIRECT`, background geodata updates).
+
+### ⚠️ "My link works in Shadowrocket but times out in Clash" → check the *deployed* build first
+
+Real incident, 2026-11-10. A customer's converted link
+(`https://sp-vpn.netlify.app/all/SP%20VPN?t=<48-hex>`) failed to connect in Clash
+Meta / Clash Verge, while the same student's raw supplier link
+(`https://xn--9kqs1lo79d.cc/api/v1/chuixue?token=…`) worked fine. **The repo was
+correct and `npm test` passed.** The deployed build predated this section's fix,
+so it was still emitting:
+
+```yaml
+  default-nameserver: [223.5.5.5, 119.29.29.29]   # ← China-only: every node
+  nameserver: [223.5.5.5, 119.29.29.29]           #    hostname lookup times out
+  fallback-filter:                                #    abroad
+    geoip: true                                   # ← needs geoip.metadb, which
+rules:                                            #    a fresh install cannot fetch
+  - GEOIP,PRIVATE,DIRECT
+  - GEOIP,CN,DIRECT
+# no proxy-server-nameserver, no profile.store-selected:false
+# quota pseudo-nodes ("剩余流量" → "Remaining 511.99 GB") listed inside ⚡ Auto Speed
+```
+
+Both payloads were otherwise **byte-identical after translation** — same 24 links,
+same Reality `pbk`/`sid`/`sni`/`fp`, same ws `Host`+`path` — which is how you can
+tell a profile bug from a node bug. The supplier URL never appears in the response.
+
+**The lesson: a liveness probe cannot catch this.** `GET /healthz` returned `ok`
+for a build that was breaking every Clash customer. So the profile is now
+self-reporting and externally auditable:
+
+| Signal | What it answers |
+|---|---|
+| `GET /healthz` | `{"ok":true,"profile":"geo-free;global-dns;auto-speed;re-armed"}` — and **HTTP 503** when the policy regresses, so uptime checks fail on their own |
+| `GET /healthz?full=1` | the whole fingerprint, incl. `problems[]`. Computed by running `buildYaml` on a fixture, so it cannot drift out of sync with a forgotten version bump |
+| `X-SPVPN-Profile` header | on every `/all`, `/sub`, `/sr` response, base64 *and* YAML. `STALE:needs-geoip+cn-dns` is the string that means "redeploy me" |
+| `GET /diag?t=<t>` | now carries `deployment` (is this build current?) and `yaml.guard` (is *this student's* profile safe?) |
+| `npm run verify` | runs the repo's own `checkProfile` against a live host and exits non-zero on any mismatch |
+
+```bash
+npm run verify -- https://sp-vpn.netlify.app --token=<a-customer-token>
+```
+
+It distinguishes the two failures you can hit, because they need different fixes:
+
+```
+❌ deployment reports its profile policy   GET /healthz returned 200 ok — this
+   build predates the profile guard … Redeploy from this repo.     ← build too old
+❌ live profile passes the guard   needs-geoip, cn-dns              ← regression
+```
+
+`checkProfile()` in `sp-vpn-worker.js` is the single definition those all share:
+geodata-free by default, non-CN resolvers plus `proxy-server-nameserver`,
+`store-selected: false`, no duplicate proxy names (mihomo rejects the whole
+import), no dangling group members, `udp: true` on every proxy, and quota
+placeholders kept out of the speed-test groups. `?cn=1` deliberately flips the
+first two, and the guard checks that mode too — so a profile claiming CN mode but
+missing its rules fails instead of being excused.
+
+### Per-client behaviour, pinned by `test/client-matrix.test.mjs`
+
+Each app is sent the format it can actually read, chosen from its `User-Agent`.
+106 checks run every client below against a supplier fixture built to be as
+nasty as a real panel (CRLF + BOM, uppercase scheme, quota placeholders, names
+that collide in English, quotes and commas in names, a CDN-fronted ws family,
+grpc, trojan-ws with `allowInsecure`, `aid=64` vmess, an IPv6 target, an empty
+name, and two node types mihomo cannot use).
+
+| Client | Gets | Notes |
+|---|---|---|
+| Clash Meta / mihomo | mihomo YAML | geo-free by default |
+| Clash Verge / Verge Rev | mihomo YAML | quota + expiry via `subscription-userinfo` |
+| **Karing** | mihomo YAML | was getting a bare base64 list and had to rebuild a config itself, losing Auto Speed, the carrier groups and the quota header |
+| Clash Mi | mihomo YAML | |
+| FlClash / Stash | mihomo YAML | |
+| Shadowrocket / v2rayNG / NekoBox | base64 share list | all supplier links passed through, rebranded |
+| Hiddify | base64 share list | sing-box reads URI lists; it is not a mihomo client |
+| `curl`, or no UA at all | base64 share list | the safe answer when we cannot tell |
+
+Parity is asserted, not assumed: every `vless`/`vmess`/`trojan` node the supplier
+sent must survive with its Reality `pbk`/`sid`, `flow`, `fp`, SNI, ws `Host`+`path`
+and grpc service name intact, and quota must still reach the app through the
+headers.
+
+**Nodes Clash cannot use are announced, never hidden.** `hysteria2://` and
+`tuic://` links are kept in the base64 list but cannot appear in a mihomo
+profile, and they are deliberately *not* converted: checked against mihomo's own
+`HysteriaOption`, `type: hysteria` requires `up`/`down` speeds the URI never
+carries (its `Speed()` errors without them) and has no `password` or
+salamander-obfs field — so converting would risk the whole import to gain one
+node. Instead the profile says what is missing:
+
+```
+# NOTE: 2 node(s) here are not Clash-compatible and are left out:
+#       🇸🇬新加坡•Hysteria2, 🇯🇵日本•TUIC
+#       those work fine in Shadowrocket / v2rayNG / NekoBox / Hiddify — use the plain link for them
+```
+
+so "my Clash list is shorter than my friend's" is answered by the file itself
+rather than by a support conversation. `/diag` reports the same as
+`nodes.unsupported`.
+
+**The brand name is sanitised** (`safeBrand`) because it is not just a label: it
+becomes the default group name *and* the target of the final `MATCH` rule, and
+both parsers are strict — mihomo splits rules on commas (`SP,VPN` → a three-field
+rule), YAML reads `: ` as a key/value separator (`吹雪 VPN: 学生` stops being a
+string) and ` #` as a comment. Any of those made mihomo reject the profile, which
+looks identical to "your VPN is broken" for every Clash customer at once. The
+brand is also HTML-escaped on the quota and seller pages, since it arrives from a
+URL any student can forward to another student.
 
 ### "Auto Speed doesn't pick anything"
 
@@ -353,18 +463,34 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-- `test/full-proof.mjs` — the original **291 checks**, unmodified, run against
-  the patched worker. Proves no client broke.
+773 checks total. (The counts below are what `npm test` prints — they were all
+stale in this file before, which is its own small argument for keeping tests in
+the repo rather than trusting a README.)
+
+- `test/full-proof.mjs` — **475 checks**: the original client-matrix suite, run
+  against the patched worker. Proves no client broke.
 - `test/opaque-token.test.mjs` — **40 checks**: leak closed, opaque links serve
   every client type, legacy links still work, revocation is immediate, rotation,
   admin redaction, DB-outage fallback.
-- `test/dashboard.test.mjs` — **42 checks**: the renewal maths in `summarise()`,
+- `test/dashboard.test.mjs` — **49 checks**: the renewal maths in `summarise()`,
   live quota refresh, the dashboard routes, customer editing, and that no route
   ever leaks a supplier URL.
 - `test/reminders.test.mjs` — **45 checks**: day maths, which reminders are due,
   cron idempotency (three passes in one day send once; tomorrow fires again),
   a dead channel not losing the reminder, and the worker routes.
-- `test/leak-proof.mjs` — the before/after attack, side by side.
+- `test/profile-guard.test.mjs` — **58 checks**: the 2026-11-10 Clash incident,
+  pinned. The served profile is safe outside China, quota placeholders stay out
+  of the speed-test groups, translation collisions are de-duplicated, Reality and
+  CDN-front params survive the rebuild, `?cn=1` still works, `checkProfile`
+  catches each regression individually, and a stale deploy is detectable from
+  `/healthz` + `X-SPVPN-Profile` without shipping a version string anyone has to
+  remember to bump.
+- `test/client-matrix.test.mjs` — **106 checks**: every client above against an
+  adversarial supplier fixture — right format per `User-Agent`, no node or
+  parameter lost versus the raw link, quota headers present, unusable nodes
+  announced rather than dropped, brand/YAML injection attempts, every `&fmt=` /
+  `&cn=1` / `&remember=1` / `&exclude=` / `&include=` escape hatch, and a clean
+  5xx when the supplier returns nothing.
 - `test/bench.mjs` — the latency numbers below.
 
 ## Rebuilding the patched worker
@@ -400,6 +526,17 @@ TOKEN_STORE_AUTH_TOKEN=...
 
 If you stay on Vercel, add `export const runtime = "edge"` to `api/index.js` to
 avoid Node cold starts.
+
+**Then prove it actually shipped** — a merged PR is not a deployed PR, and the
+site will happily serve a stale profile to every Clash customer until you check:
+
+```bash
+curl -s https://<your-host>/healthz          # {"ok":true,"profile":"geo-free;…"}
+npm run verify -- https://<your-host> --token=<a-customer-token>
+```
+
+`verify` exits non-zero if the live build is older than this repo or has
+regressed. It is worth wiring into CI after any deploy.
 
 ---
 
