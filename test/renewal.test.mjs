@@ -649,6 +649,16 @@ console.log("\n[17] a rate limit is not an outage; a loop-back link is not a sup
   await store.updateRow(loopTok, { supplier_url: "https://panel.example/sr/other-tenant?who=dead" });
   const r2 = await get("/admin/link/" + loopTok + "?action=check");
   const j2 = JSON.parse(await r2.text());
+  // …and a /sub/ path ON OUR OWN HOST that is not one of our tokens is still a
+  // supplier link. This is the case the branded domain creates: the owner proxies
+  // the panel through the same hostname as the customer links, so the route name
+  // alone cannot tell them apart — the 48-hex token shape can.
+  await store.updateRow(loopTok, { supplier_url: HOST + "/sub/account-one?token=PRIVATE-SUPPLIER-SECRET" });
+  const r3 = await get("/admin/link/" + loopTok + "?action=check");
+  const j3 = JSON.parse(await r3.text());
+  ok(j3.self_referential === false && r3.status === 502,
+    `our own host + /sub/ + a non-token path is fetched, not refused (${JSON.stringify({ s: r3.status, r: j3.self_referential })})`);
+
   ok(j2.self_referential === false && j2.throttled === false && r2.status === 502,
     `someone else's /sr/ path is still tried and reported as a real failure (${JSON.stringify({ s: r2.status, r: j2.self_referential, t: j2.throttled })})`);
 

@@ -260,7 +260,10 @@ Three changes followed from that, all pinned by `test/renewal.test.mjs` [17]:
   gave you"). It requires the host to be OURS: `https://panel.example/sub/…` is an
   ordinary supplier URL, and a first version that matched only the path name
   silently disabled the whole reminder pass — `customer-accounts.test.mjs` caught
-  it, which is why that case is now in the suite too.
+  it, which is why that case is now in the suite too. It also requires OUR token
+  shape (48 hex, `/sub/<t>` or `/all/<brand>?t=<t>`): the owner proxies the panel
+  through the branded domain `xn--9kqs1lo79d.cc`, the *same host* as customer
+  links, so a route name on that host is not proof of anything by itself.
 
 So the sentence the dashboard can finally tell you is which of the four it is:
 *cut off by the platform clock* → click again; *throttled* → wait a minute;
@@ -889,7 +892,7 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-`npm test` runs **14 suites**: 1008 counted checks across the nine that report a
+`npm test` runs **14 suites**: 1009 counted checks across the nine that report a
 number, 21 `node:test` subtests in three more, and two suites that report a
 verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
 what each suite prints today — they were all stale in this file once already,
@@ -909,7 +912,7 @@ which is its own small argument for reading them from the run, not the README.)
 - `test/customer-accounts.test.mjs` — shared account/credential inheritance, payment isolation across checks and reminders, additive migrations and concurrent SQL updates.
 - `test/dashboard-ui.test.mjs` — real client/worker interaction: original + shared customer creation, Pay/cancel/retry/Mark unpaid, safe account display and filtering.
 - `test/shared-users.test.mjs` — the read-only shared-link finder: complete-URL matching (including rows mislabeled Individual), same-host/different-token separation, nested/copied/legacy Hub-link resolution, revoked/rotated/generated record handling, missing/cyclic/too-deep chains, leak and no-write/no-network guarantees, HTTP status semantics, and the real dashboard dialog (filter independence, escaping, hidden-on-load, retry, stale replies, Escape and focus restore).
-- `test/renewal.test.mjs` — **220 checks**: per-customer Renew / Check (changed
+- `test/renewal.test.mjs` — **221 checks**: per-customer Renew / Check (changed
   vs unchanged expiry), usage increase / unchanged / reset, no delta on the
   first check, failed checks overwriting nothing, the global refresh still
   working and persisting deltas, revoked + unknown + direct-node customers

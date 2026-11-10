@@ -109,6 +109,20 @@ export function scrubSupplier(text, supplierUrl) {
   return out.replace(/[a-z0-9+.-]+:\/\/\S+/gi, "<link>").slice(0, 300);
 }
 
+// Is this URL one of the links THIS converter hands to customers? Host alone is
+// not enough: the owner serves the supplier's own panel through a branded domain
+// too (live evidence 2026-11-10: `throttle_hosts: ["xn--9kqs1lo79d.cc ×3"]` — real
+// supplier reads, same host as our links). So the route AND our token shape must
+// match, which is what separates `/sub/1f5210…adb7a` (ours) from
+// `/sub/account-one?token=…` (a panel's own path).
+const OUR_ROUTES = /^\/(all|sub|sr|share)(\/|$)/i;
+function ourCustomerLink(u) {
+  if (!OUR_ROUTES.test(u.pathname)) return false;
+  const seg = u.pathname.split("/").filter(Boolean);
+  const maybe = seg[0] === "sub" ? seg[1] : u.searchParams.get("t");
+  return /^[0-9a-f]{48}$/i.test(String(maybe || ""));
+}
+
 /**
  * Re-check ONE row against its supplier and persist the result.
  *
@@ -177,7 +191,7 @@ export async function checkCustomerRow(row, deps) {
     // path alone silenced the whole reminder pass on it (caught by
     // test/customer-accounts.test.mjs). So: no selfHost from the caller, or a
     // different host, means this is not our link and we fetch it like any other.
-    if (selfHost && u.host === selfHost && /^\/(all|sub|sr|share)\//i.test(u.pathname)) {
+    if (selfHost && u.host === selfHost && ourCustomerLink(u)) {
       return {
         ok: false,
         code: 422,
