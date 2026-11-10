@@ -139,9 +139,10 @@ if (unreachable) {
   console.log("  ordinary outbound HTTPS, or check by eye — both are one line each:");
   console.log(`    curl -s ${base}/healthz | head -c 160`);
   console.log(`    curl -sL "${base}/all/<brand>?t=<token>&fmt=yaml" | head -5\n`);
-  console.log("  In that YAML header, `# latency probe: https://…` must be present, and the");
-  console.log("  url-test/fallback groups must carry NO `expected-status`. Missing either one");
-  console.log("  means the build is behind; if both are there, the deploy is fine.\n");
+  console.log("  In that YAML header, a `# latency probe:` line must be present, every group with");
+  console.log("  nodes must carry a `url:`, and none of them may probe the core's own default");
+  console.log("  (https://www.gstatic.com/generate_204 — mihomo hides that from the app, which is");
+  console.log("  how a correct-looking config ends up showing no latency numbers at all).\n");
   process.exit(1);
 }
 if (failed.length) {

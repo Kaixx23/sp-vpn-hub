@@ -532,9 +532,9 @@ self-reporting and externally auditable:
 
 | Signal | What it answers |
 |---|---|
-| `GET /healthz` | `{"ok":true,"profile":"geo-free;global-dns;auto-speed;re-armed"}` — and **HTTP 503** when the policy regresses, so uptime checks fail on their own |
+| `GET /healthz` | `{"ok":true,"profile":"geo-free;global-dns;auto-speed;re-armed;probe-advertised"}` — and **HTTP 503** when the policy regresses, so uptime checks fail on their own. `probe-advertised` is the latency fix: `probe-hidden` means the build is probing mihomo's default URL and the app will show no ping numbers |
 | `GET /healthz?full=1` | the whole fingerprint, incl. `problems[]`. Computed by running `buildYaml` on a fixture, so it cannot drift out of sync with a forgotten version bump |
-| `X-SPVPN-Profile` header | on every `/all`, `/sub`, `/sr` response, base64 *and* YAML. `STALE:needs-geoip+cn-dns` is the string that means "redeploy me" |
+| `X-SPVPN-Profile` header | on every `/all`, `/sub`, `/sr` response, base64 *and* YAML — the same string, so a customer's screenshot of a response header says which build served them. `STALE:needs-geoip+cn-dns` is the string that means "redeploy me" |
 | `GET /diag?t=<t>` | now carries `deployment` (is this build current?) and `yaml.guard` (is *this student's* profile safe?) |
 | `npm run verify` | runs the repo's own `checkProfile` against a live host and exits non-zero on any mismatch |
 
@@ -637,68 +637,96 @@ looks identical to "your VPN is broken" for every Clash customer at once. The
 brand is also HTML-escaped on the quota and seller pages, since it arrives from a
 URL any student can forward to another student.
 
-### Only a few nodes show a latency number — the rest look dead
+### No latency numbers in Clash Meta / "most of my countries don't work"
 
-Symptom, reported 2026-11-10: the same 22 nodes give country-after-country of
-working latency when the **seller's own link** is imported into Clash Meta, but
-with the converter link **only a few pin** and the rest show nothing / `timeout`
-— while the profile itself is complete (24 share links in, 24 accounted for,
-`pbk`/`sid`/`flow`/`fp`/SNI/ws `Host`+`path` all identical to the supplier's).
+Reported 2026-11-10, and worth reading as a lesson in *how* to diagnose this one:
+the converter's node parameters were never the problem, and **the first fix for
+this symptom was wrong** (it "upgraded" the probe to `https://www.gstatic.com/generate_204`
+and dropped `expected-status`; that changed nothing for the customer, and the
+reason it changed nothing is the actual bug).
 
-Nothing was being dropped. The difference was **how each config decides that a
-node is alive**, and the converter had it set two ways against itself:
+The panel has its own Clash config, and it is fetchable — that is the reference:
 
-```yaml
-# the old profile
-  url: http://www.gstatic.com/generate_204   # 1) port 80 — several datacenter
-                                             #    exits and CDN fronts drop it
-  expected-status: 204                       # 2) Google answers a datacenter IP
-                                             #    with a redirect / rate limit
+```bash
+curl -sL "https://xn--9kqs1lo79d.cc/api/v1/chuixue?token=<t>&type=clash&flag=meta" | sed -n '/proxy-groups/,/^rules:/p'
+#   - { name: 吹雪云,  type: select,   proxies: [自动选择, 故障转移, …all nodes…] }
+#   - { name: 自动选择, type: url-test, proxies: […], url: 'http://www.gstatic.com/generate_204', interval: 86400 }
+#   - { name: 故障转移, type: fallback, proxies: […], url: 'http://www.gstatic.com/generate_204', interval: 7200 }
 ```
 
-mihomo scores each member with `URLTest(ctx, url, expectedStatus)` and a node is
-only *alive* if the probe both **completes** and the status **matches**
-(`adapter/provider/healthcheck.go`). So:
+(`&clash=1` returns base64 like the plain link does; `type=clash&flag=meta` is the
+switch that yields YAML. Their `自动选择` also contains the two quota nodes
+`剩余流量`/`套餐到期` — we still exclude those from the test groups, which is the
+one part of their policy that is worth *not* copying.)
 
-* a node whose exit cannot reach **port 80** never completes → no latency, marked dead;
-* a node that Google **rate-limits** (302, not 204) completes fine and is still marked dead;
-* `⚡ Auto Speed` is a `url-test`, so it **refuses to select** a node the probe failed on —
-  which turns "the probe is blocked" into "your VPN doesn't work in Germany".
+So the panel probes over **plain `http://`** and pings fine — the probe runs from
+the *node's* exit, where gstatic is reachable, not from the customer's phone. The
+http-vs-https theory was wrong. What the panel has and the converter did not:
 
-The seller's own config sets no `expected-status` and probes over `https`, so
-mihomo's default (`*` — *any* reply means the node is up) applies and every
-country lights up. Same nodes, same parameters, opposite verdict.
+1. **A `url:` on the group the customer actually opens.** The core will not
+   measure a `select` group on its own — `adapter/outboundgroup/parser.go`:
+   *"select don't need auto health check"*, so `interval` is left at 0, and
+   `HealthCheck.auto()` (interval ≠ 0) never starts `process()`
+   (`adapter/provider/provider.go` `Initial()`). Any `⚡ Auto Speed` numbers are
+   therefore *not* the numbers the top group has to show.
+2. **A probe URL the app is allowed to see.** `constant/adapters.go` defines
+   `DefaultTestURL = "https://www.gstatic.com/generate_204"`, and
+   `Selector.MarshalJSON` deliberately omits a group's `testUrl` when it equals
+   it — *"do not append a value to ensure that the web dashboard follows the
+   settings of the dashboard"*. Emitting the https-gstatic URL (my "fix") is
+   therefore **equivalent to emitting nothing**: the app falls back to whatever
+   the user's own latency-test setting says, and on a fresh install that is often
+   unset → no ping for any country, traffic fine. `HEALTH_URL` in
+   `sp-vpn-worker.js` is the panel's URL for exactly this reason, and
+   `checkProfile` now returns **`probe-hidden-from-ui`** if anyone re-"improves"
+   it back to the core default.
+3. **No `lazy`.** `HealthCheck.process()` skips a whole round on
+   `lazy && time.Since(lastTouch) >= interval`, so delay history stays empty for
+   every group the customer has not tapped. Guard code: **`lazy-probe`**.
+4. A status that can be *failed*. `Proxy.URLTest` (`adapter/adapter.go`) records
+   `Delay: 0` + `alive=false` when the probe errors **or** the status does not
+   match `expected-status`; the core's own default is `"*"`, i.e. any reply
+   proves the node alive. We emit no `expected-status` (like the panel);
+   `&expect=204` opts back in per link.
 
-**Now the default is `https://www.gstatic.com/generate_204` with no forced
-status.** Two switches, if you need them per customer:
+**Current policy, matching the panel:** every group that contains a real node
+carries `url: http://www.gstatic.com/generate_204`; `⚡ Auto Speed` `interval:
+86400`, `🔁 Failover` `interval: 7200`; no `lazy`, no `tolerance`, no
+`max-failed-times`, no `expected-status`. Two deliberate deviations, both cheap
+and both aimed at the same symptom:
+
+* the top `🚀 SP VPN` select gets `interval: 86400` as well, so the core fills
+  each node's delay history once a day even if the app never asks;
+* `📱 移动专线` / `📡 电信专线` get the `url` but **no** interval — delay history
+  lives on the proxy (`adapter/adapter.go` `p.history`), shared by every group
+  that lists it, so they display the same numbers without dialling anything.
+
+`checkProfile` refuses to emit a node-bearing group with no `url:` at all
+(**`group-has-no-probe-url`**), and `/diag?t=<t>` lists every probed group with
+`{group, type, url, interval, lazy, advertised}` — `advertised: false` is the
+one that explains "config looks right, app shows nothing".
+
+The header of each profile states the policy, so a screenshot answers it:
+
+```
+# latency probe: http://www.gstatic.com/generate_204 · every 86400s · any reply counts as alive
+```
+
+And the per-link knobs, if a reseller's exits need different treatment:
 
 | Parameter | Effect |
 |---|---|
-| `&health=<url>` | any `http(s)` URL your exits can reach — `https://cp.cloudflare.com/generate_204`, `https://www.google.com/generate_204`, a captive portal of your own |
-| `&expect=<codes>` | opt back into strictness: `204`, `2xx`, `200-204,301`. Anything mihomo could not parse is ignored rather than written into the profile |
+| `&health=<url>` | any `http(s)` URL — **avoid `https://www.gstatic.com/generate_204`**, the core hides it from the UI |
+| `&interval=<s>` | probe cadence for every probed group, 60…604800; `&interval=300` is what the converter shipped before this change |
+| `&expect=<codes>` | opt into strict liveness: `204`, `2xx`, `200-204,301`; unparseable → ignored |
 
-Every profile also says which probe it was built with, at the top of the file itself:
-
-```
-# latency probe: https://www.gstatic.com/generate_204 · any reply counts as alive
-```
-
-which is the quickest way to tell "the app is showing me a cached old profile"
-from "the deployment is behind" — both are answered by that one line, and
-`/diag?t=<t>` reports both (`yaml.healthUrl`, `yaml.expectedStatus`), because
-"which one is it this time" should not need a guess; and `checkProfile` now
-returns `insecure-health-url` if a `http://` probe ever comes back.
-
-Two things this does **not** change, so you can rule them out when a customer
-reports the same thing:
-
-* **Nodes Clash cannot use are still announced, not hidden** — `unsupported` in
-  `/diag` is the number to look at. If it is 0 and the header says
-  `# 22 nodes`, nothing was dropped.
-* **`lazy: true` stays.** A group that is not in use is not probed, so
-  *Clash Meta only shows latency for the group you are looking at*. Tapping into
-  `⚡ Auto Speed` (or the carrier group) makes the numbers appear; that display
-  detail is not a broken node.
+Customers must still **update the subscription inside the app** once: an imported
+profile is cached, and the profile header line above is how you tell a stale
+client cache from a stale deployment. If a customer reports blanks after that, the
+two things to try in order are `&interval=300` (forces the core to keep measuring)
+and their app's own latency-test URL setting — the app is the component that
+decides whether a number is drawn, which is the uncomfortable limit of what a
+config converter can control.
 
 ### "Auto Speed doesn't pick anything"
 
@@ -769,7 +797,7 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-`npm test` runs **14 suites**: 923 counted checks across the nine that report a
+`npm test` runs **14 suites**: 939 counted checks across the nine that report a
 number, 21 `node:test` subtests in three more, and two suites that report a
 verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
 what each suite prints today — they were all stale in this file once already,
@@ -798,7 +826,7 @@ which is its own small argument for reading them from the run, not the README.)
 - `test/reminders.test.mjs` — **45 checks**: day maths, which reminders are due,
   cron idempotency (three passes in one day send once; tomorrow fires again),
   a dead channel not losing the reminder, and the worker routes.
-- `test/profile-guard.test.mjs` — **72 checks**: the 2026-11-10 Clash incident,
+- `test/profile-guard.test.mjs` — **88 checks**: the 2026-11-10 Clash incident,
   pinned. The served profile is safe outside China, quota placeholders stay out
   of the speed-test groups, translation collisions are de-duplicated, Reality and
   CDN-front params survive the rebuild, `?cn=1` still works, `checkProfile`

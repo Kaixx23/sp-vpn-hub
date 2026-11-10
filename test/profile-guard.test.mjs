@@ -15,7 +15,7 @@
 //
 // Run: node test/profile-guard.test.mjs
 // ============================================================================
-import worker, { checkProfile, profileFingerprint, profileHeader } from "../sp-vpn-worker.js";
+import worker, { checkProfile, profileFingerprint, profileHeader, HEALTH_URL, MIHOMO_DEFAULT_TEST_URL } from "../sp-vpn-worker.js";
 import * as store from "../token-store.js";
 import yaml from "js-yaml";
 
@@ -83,18 +83,24 @@ ok(/^tcp-concurrent: true$/m.test(y), "tcp-concurrent:true — happy-eyeballs fo
 const top = doc["proxy-groups"].find((g) => g.name.startsWith("🚀"));
 ok(top.proxies[0] === "⚡ Auto Speed", "⚡ Auto Speed is the first member of the top group (mihomo default)");
 const auto = doc["proxy-groups"].find((g) => g.name === "⚡ Auto Speed");
-// This used to read `auto["expected-status"] === 204` and call it a feature. It
-// was the bug: a node is only "alive" if the probe answer matches, and Google
-// answers a datacenter exit with a redirect / rate limit routinely — so the node
-// shows no latency and url-test refuses to select it, while carrying traffic
-// fine. That is the whole of "only a few of my countries work in Clash".
-ok(auto["lazy"] === true, "url-test is lazy — no background dialling of every node");
-ok(auto["expected-status"] === undefined, "…and no forced status, so ANY reply from the node counts as alive");
-ok(/^  url: https:\/\/\S+generate_204$/m.test(y), "health probe is https (http:// on port 80 is dropped by some exits)");
-ok(!/^  url: http:\/\//m.test(y), "no plain-http probe anywhere in the profile");
-ok(auto["tolerance"] === 80, "url-test tolerance 80 — auto selection does not flap");
 const failover = doc["proxy-groups"].find((g) => g.name === "🔁 Failover");
-ok(failover["max-failed-times"] === 3, "fallback has max-failed-times:3");
+// Two generations of this suite were wrong about what makes latency appear, so
+// these assertions are pinned to the SUPPLIER's own config instead of to a
+// theory: `?type=clash&flag=meta` on the panel returns url-test interval 86400,
+// fallback interval 7200, no lazy, no tolerance, no expected-status — and every
+// group that holds a node carries `url:`. What a node-bearing group without a
+// probe costs is a country list with no numbers, which is the complaint.
+ok(auto["interval"] === 86400, `url-test interval ${auto["interval"]} — the panel's value, not a guess`);
+ok(failover["interval"] === 7200, "fallback re-probes every 2h, like the panel");
+ok(auto["lazy"] === undefined && auto["tolerance"] === undefined, "no lazy (it skips rounds: HistoryTask stays empty) and no tolerance — the panel sets neither");
+ok(auto["expected-status"] === undefined, "no expected-status, so mihomo's default "*" means ANY reply proves the node alive");
+ok(failover["max-failed-times"] === undefined, "fallback uses the core's own max-failed-times default (5)");
+const BUILTIN = new Set(["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBAL"]);
+const nodeGroups = doc["proxy-groups"].filter((g) => (g.proxies || []).some((x) => !BUILTIN.has(x)));
+ok(nodeGroups.every((g) => g.url), `every group with a real node advertises a probe (${nodeGroups.map((g) => g.name).join(", ")})`);
+ok(nodeGroups.every((g) => g.url === HEALTH_URL), "…with the same URL, so a blank is never one group's fault");
+ok(HEALTH_URL !== MIHOMO_DEFAULT_TEST_URL, "the probe is NOT mihomo's DefaultTestURL — the core hides that from the UI, so the app would test nothing");
+ok(/^  url: http:\/\/www\.gstatic\.com\/generate_204$/m.test(y), `probe as served: ${HEALTH_URL}`);
 
 // ------------------------------------------------------- 2. quota placeholders
 sect("2. quota info links are display-only, not servers");
@@ -167,7 +173,10 @@ const fp = profileFingerprint();
 ok(fp.ok, "fingerprint: this build's profile policy is sound");
 ok(fp.needsGeoipDownload === false && fp.cnOnlyDns === false, "fingerprint reports the two incident properties");
 ok(fp.autoSpeedFirst && fp.storeSelectedOff && fp.proxyServerNameserver, "fingerprint reports the four positive properties");
-ok(profileHeader() === "geo-free;global-dns;auto-speed;re-armed", `header string (${profileHeader()})`);
+ok(profileHeader() === "geo-free;global-dns;auto-speed;re-armed;probe-advertised", `header string (${profileHeader()})`);
+ok(fp.latencyProbe === HEALTH_URL && fp.probeAdvertised === true,
+  "/healthz states the probe, so 'is the fix live' needs no screenshot from a customer");
+ok(HEALTH_URL !== MIHOMO_DEFAULT_TEST_URL, "and the value it states is one the core will not hide");
 const hres = await get("/healthz");
 ok(hres.status === 200, "/healthz returns 200 when the policy is intact");
 const hj = await hres.json();
@@ -231,18 +240,22 @@ const noGuard = checkProfile("proxies:\n- name: \"a\"\n  udp: true\n", { cn: tru
 ok(noGuard.problems.some((p) => p.code === "cn-missing-geoip"), "a profile claiming cn mode without CN rules is flagged");
 
 // ------------------------------------------------ 8. the latency probe itself
-// Two independent ways a node can be healthy and still look dead, both of which
-// the old profile had, both invisible to any check that only parses the YAML.
-sect("8. health probe — the difference between \u201cnode dead\u201d and \u201cprobe blocked\u201d");
+// What the app measures each country WITH. Two ways to get a blank here, both
+// once shipped by this converter, and neither visible to a check that only
+// parses the YAML for validity.
+sect("8. health probe — why a working node shows no ping");
 {
-  ok(/^# latency probe: https:\/\/\S+generate_204 · any reply counts as alive$/m.test(y),
-    "the profile states its own probe, so 'no pin' is answerable from the file");
-  const u = (g) => doc["proxy-groups"].find((x) => x.name === g).url;
-  ok(u("⚡ Auto Speed") === u("🔁 Failover"), "both auto groups probe the same URL (a split makes selection unexplainable)");
-  ok(/^https:\/\/www\.gstatic\.com\/generate_204$/.test(u("⚡ Auto Speed")), `default probe: ${u("⚡ Auto Speed")}`);
+  ok(/^# latency probe: http:\/\/www\.gstatic\.com\/generate_204 · every 86400s · any reply counts as alive$/m.test(y),
+    "the profile states its own probe + cadence, so 'no ping' is answerable from the file");
+  const g = (n) => doc["proxy-groups"].find((x) => x.name === n);
+  ok(g("⚡ Auto Speed").url === g("🔁 Failover").url, "both auto groups probe the same URL (a split makes selection unexplainable)");
+  ok(g("🚀 SP VPN").url === g("⚡ Auto Speed").url, "the group the customer actually opens probes it too — a select group gets no probe of its own from the core");
+  ok(g("🚀 SP VPN").interval === 86400, "the top select gets a daily core-side round, so a fresh import is not a wall of blanks");
+  const carriers = doc["proxy-groups"].filter((x) => /专线/.test(x.name));
+  ok(carriers.length > 0 && carriers.every((c) => c.url && !c.interval), "carrier groups advertise the URL without their own periodic round (delay history is per-proxy, shared)");
 
   const strict = await (await get(sub("&fmt=yaml&expect=204"), "clash-verge/v1.7.7")).text();
-  ok(/expected-status: "204"/.test(strict), "&expect=204 opts back into the strict check (still quoted, so YAML cannot misread it)");
+  ok((strict.match(/expected-status: "204"/g) || []).length >= 3, "&expect=204 opts back into the strict check on every group (still quoted, so YAML cannot misread it)");
   const ranges = await (await get(sub("&fmt=yaml&expect=2xx,301"), "clash-verge/v1.7.7")).text();
   ok(/expected-status: "2xx,301"/.test(ranges), "&expect accepts mihomo's range syntax");
   const junk = await (await get(sub("&fmt=yaml&expect=42,drop-tables"), "clash-verge/v1.7.7")).text();
@@ -250,19 +263,43 @@ sect("8. health probe — the difference between \u201cnode dead\u201d and \u201
   const inj = await (await get(sub('&fmt=yaml&expect=204"\n  x: "y'), "clash-verge/v1.7.7")).text();
   ok(!/x:/.test(inj), "…and it cannot break out of the YAML scalar");
 
+  const fast = await (await get(sub("&fmt=yaml&interval=300"), "clash-verge/v1.7.7")).text();
+  ok((fast.match(/^  interval: 300$/gm) || []).length === 3, "&interval=300 retunes every probed group at once (300s = the old behaviour)");
+  const tiny = await (await get(sub("&fmt=yaml&interval=7"), "clash-verge/v1.7.7")).text();
+  ok(!/^  interval: 7$/m.test(tiny) && /^  interval: 86400$/m.test(tiny), "a 7-second cadence is refused, not written — a typo in a reseller link must not decide how often a phone dials 22 countries");
+  const huge = await (await get(sub("&fmt=yaml&interval=99999999"), "clash-verge/v1.7.7")).text();
+  ok(!/^  interval: 99999999$/m.test(huge), "…and so is a cadence longer than a week");
+
   const other = await (await get(sub("&fmt=yaml&health=https://www.google.com/generate_204"), "clash-verge/v1.7.7")).text();
   ok(/url: https:\/\/www\.google\.com\/generate_204/.test(other), "&health= lets a reseller point the probe at something their exits reach");
   const bad = await (await get(sub('&fmt=yaml&health=https://x" y#z'), "clash-verge/v1.7.7")).text();
-  ok(/url: https:\/\/www\.gstatic\.com\/generate_204/.test(bad), "a URL that would corrupt the profile falls back to the default");
+  ok(new RegExp("url: " + HEALTH_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(bad), "a URL that would corrupt the profile falls back to the panel's");
   const over = await (await get(sub("&fmt=yaml&health=" + "a".repeat(400)), "clash-verge/v1.7.7")).text();
-  ok(/url: https:\/\/www\.gstatic\.com\/generate_204/.test(over), "an absurdly long probe URL is rejected, not truncated into the file");
+  ok(over.includes("url: " + HEALTH_URL), "an absurdly long probe URL is rejected, not truncated into the file");
 
-  // The guard knows about it, so a future "optimisation" back to http:// or to a
-  // forced status is loud instead of arriving as a customer complaint.
-  const httpProbe = checkProfile(y.replace("url: https://www.gstatic.com/generate_204", "url: http://www.gstatic.com/generate_204"), {});
-  ok(httpProbe.problems.some((x) => x.code === "insecure-health-url"), "an http:// probe is reported as a profile problem");
-  const strictProbe = checkProfile(y + '\n  expected-status: "204"\n', {});
-  ok(!strictProbe.problems.some((x) => x.code === "insecure-health-url"), "…and adding a status back is not itself an error");
+  // The three regressions that produce "no ping numbers", each guarded: dropping
+  // the url, restoring lazy, and picking the one URL the core keeps from the app.
+  const noProbe = checkProfile(y.replace(/^  url: .*\n/gm, ""), {});
+  ok(noProbe.problems.length && noProbe.problems.every((x) => x.code === "group-has-no-probe-url"),
+    "deleting the probe is reported per group, not silently accepted");
+  const lazyBack = checkProfile(y.replace("  url:", "  lazy: true\n  url:"), {});
+  ok(lazyBack.problems.some((x) => x.code === "lazy-probe"), "putting lazy:true back fails the guard");
+  const hidden = checkProfile(y.split(HEALTH_URL).join(MIHOMO_DEFAULT_TEST_URL), {});
+  ok(hidden.problems.some((x) => x.code === "probe-hidden-from-ui"),
+    "probing mihomo's own DefaultTestURL is reported, because the core withholds it from the app");
+  ok(checkProfile(y + '\n  expected-status: "204"\n', {}).problems.every((x) => x.code !== "lazy-probe"),
+    "adding a status back is a choice, not an error");
+  // A group of nothing but DIRECT/REJECT needs no probe and must not be nagged,
+  // while the group that did lose its probe is named precisely.
+  // Keep the name/type lines: a block that loses its `- name:` is not a group at
+  // all, and the guard (rightly) stops reading it — which would make this check
+  // pass for the wrong reason.
+  const stripped = y.replace(/(- name: "🚀 SP VPN"\n  type: select\n)  url[^\n]*\n  interval[^\n]*\n/, "$1");
+  const strippedProblems = checkProfile(stripped, {}).problems.filter((x) => x.code === "group-has-no-probe-url");
+  ok(stripped !== y, "the fixture really does carry the top group's probe (otherwise this check proves nothing)");
+  ok(strippedProblems.length === 1 && /🚀 SP VPN/.test(strippedProblems[0].msg),
+    "only the group that lost it is reported, and it is named");
+  ok(!strippedProblems.some((x) => /Direct/.test(x.msg)), "🇨🇳 Direct is exempt — DIRECT/REJECT are not servers");
 }
 
 console.log("\n" + "─".repeat(62));

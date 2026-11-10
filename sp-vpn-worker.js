@@ -380,6 +380,20 @@ function buildYaml(status, proxies, brand, opts = {}) {
   const br = safeBrand(brand);
   const health = safeHealthUrl(opts.health);
   const expect = safeExpect(opts.expect);
+  const pingEvery = safeInterval(opts.interval, PROBE_INTERVAL);
+  const failEvery = opts.interval ? pingEvery : FAILOVER_INTERVAL;
+  // The probe belongs on EVERY group that holds a node, not just the auto ones.
+  // A select group gets no periodic check from the core at all
+  // (adapter/outboundgroup/parser.go, "select don't need auto health check",
+  // interval stays 0 → HealthCheck.auto() is false → process() never runs), but
+  // its `url` is still published to the app as `testUrl`, and that is what the
+  // app measures every country with. Omit it and the country list has no number
+  // to show, however healthy the node is.
+  const probeLines = (interval) => {
+    L.push(`  url: ${health}`);
+    if (interval) L.push(`  interval: ${interval}`);
+    if (expect) L.push(`  expected-status: "${expect}"`);
+  };
   const AUTO = "⚡ Auto Speed", FAIL = "🔁 Failover", DIRECT = "🇨🇳 Direct", TOP = "🚀 " + br;
   const CI = { Telecom: "📡", Unicom: "📶", Mobile: "📱" };
   const CN = { Telecom: "电信", Unicom: "联通", Mobile: "移动" };
@@ -443,7 +457,7 @@ function buildYaml(status, proxies, brand, opts = {}) {
   // don't ping" is answered by the top of the profile instead of by guessing
   // whether the app has the current build — and a client that cached an old
   // profile shows the old probe line, which is how you tell those apart.
-  L.push(`# latency probe: ${health} · ${expect ? "expects " + expect : "any reply counts as alive"}`);
+  L.push(`# latency probe: ${health} · every ${pingEvery}s · ${expect ? "expects " + expect : "any reply counts as alive"}`);
   // Real nodes only — the quota placeholders are not servers, and promising a
   // customer "24 nodes" when two of them are a bandwidth readout is how you get
   // "half my nodes are broken" tickets.
@@ -502,29 +516,28 @@ function buildYaml(status, proxies, brand, opts = {}) {
   ];
   L.push(`- name: ${yq(TOP)}`);
   L.push("  type: select");
+  // interval on a select group is a deliberate deviation from the panel: it makes
+  // the core fill each node's delay history once a day even if the app never
+  // asks, so a freshly imported profile is not a wall of blanks. Per-proxy
+  // history is shared across groups (adapter/adapter.go `p.history`), which is
+  // why the carrier groups below only need the url, not their own checks.
+  probeLines(pingEvery);
   L.push("  proxies:");
   for (const n of topMembers) L.push("  - " + yq(n));
   if (hasAuto) {
     for (const [gname, gtype] of [[AUTO, "url-test"], [FAIL, "fallback"]]) {
       L.push(`- name: ${yq(gname)}`);
       L.push("  type: " + gtype);
-      L.push(`  url: ${health}`);
-      L.push("  interval: 300");
-      // lazy: only health-check the group that is actually in use. Without it
-      // mihomo dials EVERY node every interval — when a whole node family is
-      // down (a banned CDN front, say) the app fills with red "connect error"
-      // lines and burns battery for nodes nobody selected.
-      L.push("  lazy: true");
-      // No expected-status unless the link asks for one. mihomo's default ("*")
-      // counts ANY reply as proof of life; pinning 204 does not, and a Google
-      // 302/rate-limit from a datacenter exit — which is routine — marks the
-      // node dead, so it shows no latency in the app and url-test refuses to
-      // select it, even though the node passes traffic perfectly. That reads to
-      // the customer as "only a few of my countries work". &expect=204 restores
-      // the strict check for anyone who wants it.
-      if (expect) L.push(`  expected-status: "${expect}"`);
-      if (gtype === "url-test") L.push("  tolerance: 80");
-      if (gtype === "fallback") L.push("  max-failed-times: 3");
+      // No `lazy`, no `tolerance`, no `max-failed-times`: the panel omits all
+      // three and so does the core's default, and `lazy: true` was actively
+      // harmful — HealthCheck.process() skips a whole round when the group has
+      // not been touched within the interval, which keeps delay history empty
+      // for anything the customer has not tapped yet.
+      // No expected-status either: mihomo defaults it to "*" (any reply proves
+      // the node is up), and Proxy.URLTest writes `Delay: 0` + alive=false for
+      // any other verdict, which is a blank in the app for a working node.
+      // &expect=204 opts back into strictness for anyone who wants it.
+      probeLines(gtype === "url-test" ? pingEvery : failEvery);
       L.push("  proxies:");
       for (const n of names) L.push("  - " + yq(n));
     }
@@ -532,6 +545,7 @@ function buildYaml(status, proxies, brand, opts = {}) {
   for (const c of Object.keys(carrierNodes).sort()) {
     L.push(`- name: ${yq(cgroup(c))}`);
     L.push("  type: select");
+    probeLines(0); // url for the app, no extra periodic round
     L.push("  proxies:");
     if (hasAuto) L.push("  - " + yq(AUTO));
     for (const n of carrierNodes[c]) L.push("  - " + yq(n));
@@ -682,10 +696,24 @@ export function checkProfile(y, opts = {}) {
   //    and a user editing `nameserver` breaks the tunnel. Its absence is the
   //    classic "imported fine, every node times out".
   if (!/^[ ]*proxy-server-nameserver:/m.test(y)) bad("no-proxy-nameserver", "missing dns.proxy-server-nameserver");
-  // 3b. The health-check URL has to be reachable the same way from every exit.
-  // An http:// probe is a false negative machine: nodes look dead, get skipped
-  // by url-test, and the customer's traffic would have worked fine.
-  if (/^[ ]*url:[ ]*http:\/\//m.test(y)) bad("insecure-health-url", "health check uses http:// — some exits drop port 80, so live nodes show no latency and are skipped");
+  // 3b. Latency display: a group of nodes with no `url:` gives the app nothing
+  // to measure with (the core will not probe a select group at all, and reports
+  // no testUrl for it), so every country shows a blank and the customer reads
+  // that as "the converter dropped my nodes". And a `url` equal to mihomo's
+  // DefaultTestURL is deliberately WITHHELD from the UI, same outcome.
+  {
+    const gs = parseGroups(sec.groups);
+    const builtin = new Set(["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBAL"]);
+    for (const g of gs) {
+      if (g.proxies.every((p) => builtin.has(p))) continue; // e.g. a manual Direct switch
+      if (!g.url) {
+        bad("group-has-no-probe-url", `"${g.name}" has nodes but no url: — the app has no latency probe for it, so the list shows no ping`);
+      } else if (g.url === MIHOMO_DEFAULT_TEST_URL && g.type === "select") {
+        bad("probe-hidden-from-ui", `"${g.name}" probes ${g.url}, which mihomo treats as its own default and hides from the app — set a different url (http://www.gstatic.com/generate_204) or the app uses its own setting`);
+      }
+    }
+    if (/^[ ]*lazy:\s*true/m.test(y)) bad("lazy-probe", "lazy:true skips health-check rounds for groups not in use, leaving delay history empty");
+  }
 
   // 4. Fresh load must land on Auto Speed. store-selected:true restores the last
   //    tapped node forever, so a stray tap outlives every renewal.
@@ -729,11 +757,14 @@ function parseGroups(block) {
     const name = (p.match(/^- name:\s*"((?:[^"\\]|\\.)*)"/) || [, null])[1];
     if (!name) continue;
     const type = (p.match(/^[ ]*type:\s*(\S+)/m) || [, ""])[1];
+    const url = (p.match(/^[ ]*url:\s*"?([^"\n]+?)"?\s*$/m) || [, null])[1];
+    const interval = Number((p.match(/^[ ]*interval:\s*(\d+)/m) || [, "0"])[1]);
+    const lazy = /^[ ]*lazy:\s*true/m.test(p);
     const inline = (p.match(/^[ ]*proxies:\s*\[(.*)\]$/m) || [])[1];
     const list = inline !== undefined
       ? inline.split(",").map((s) => s.trim().replace(/^"|"$/g, ""))
       : [...p.matchAll(/^\s+-\s+"?([^"\n]+)"?$/gm)].map((m) => m[1].trim());
-    out.push({ name, type, proxies: list });
+    out.push({ name, type, url, interval, lazy, proxies: list });
   }
   return out;
 }
@@ -766,6 +797,12 @@ export function profileFingerprint() {
     ok: res.ok && cnRes.ok,
     mode: "geo-free global profile by default; ?cn=1 opts into CN resolvers + GEOIP rules",
     autoSpeedFirst: top.proxies[0] === "⚡ Auto Speed",
+    // Which probe the app is being handed, and whether mihomo will show it.
+    // /healthz is the one endpoint that is not an edge-cached profile response,
+    // so this is what settles "did the fix reach production" without asking a
+    // customer for a screenshot.
+    latencyProbe: HEALTH_URL,
+    probeAdvertised: HEALTH_URL !== MIHOMO_DEFAULT_TEST_URL,
     storeSelectedOff: /store-selected: false/.test(global),
     needsGeoipDownload: /GEOIP|geoip:/.test(global),
     cnOnlyDns: /223\.5\.5\.5/.test((global.match(/^[ ]*nameserver:.*$/m) || [""])[0]),
@@ -780,7 +817,11 @@ export function profileFingerprint() {
 export function profileHeader() {
   try {
     const f = profileFingerprint();
-    return f.ok ? "geo-free;global-dns;auto-speed;re-armed" : "STALE:" + f.problems.map((p) => p.code).join("+");
+    // The guard covers the probe codes, so a profile that lost a url, gained
+    // `lazy`, or picked the core's hidden default lands on the STALE side.
+    return f.ok
+      ? "geo-free;global-dns;auto-speed;re-armed" + (f.probeAdvertised ? ";probe-advertised" : ";probe-hidden")
+      : "STALE:" + f.problems.map((p) => p.code).join("+");
   } catch (e) {
     return "unknown";
   }
@@ -1230,16 +1271,42 @@ const isOn = (v) => ["1", "true", "yes", "on"].includes(String(v || "").toLowerC
 // ?cn=1 restores the China-ISP profile (CN resolvers + GEOIP rules).
 const isCn = (url) => isOn(url.searchParams.get("cn"));
 // Every profile option that changes the generated YAML, in one place.
-// What proves a node is alive. https on purpose: http:// (port 80) is silently
-// dropped by a number of datacenter exits and CDN fronts, and the node then
-// shows "timeout" in the app while carrying traffic fine over 443.
-export const HEALTH_URL = "https://www.gstatic.com/generate_204";
+// The probe the panel itself uses, copied deliberately: the latency test runs
+// from the NODE's exit, not from the customer's phone, so plain http:// to
+// gstatic works even where Google is otherwise blocked — and a probe that
+// matches the reference config is the one thing nobody can argue about.
+//
+// Do NOT "upgrade" this to https://www.gstatic.com/generate_204: that string is
+// mihomo's `constant.DefaultTestURL`, and `Selector.MarshalJSON` withholds a
+// group's testUrl when it equals the default ("do not append a value to ensure
+// that the web dashboard follows the settings of the dashboard"). A select group
+// with that URL therefore tells the app *nothing*, and the app falls back to the
+// user's own latency-test setting — which is how "no ping numbers at all" comes
+// to look like "the converter lost my nodes". This exact mistake cost a release
+// cycle on 2026-11-10, so the guard has a code for it (probe-hidden-from-ui).
+export const HEALTH_URL = "http://www.gstatic.com/generate_204";
+// constant/adapters.go: DefaultTestURL — the value mihomo treats as "unset".
+export const MIHOMO_DEFAULT_TEST_URL = "https://www.gstatic.com/generate_204";
+// Cadence from the panel: url-test re-probes daily, failover every 2 h. Long on
+// purpose — the app drives per-node latency itself, the config only has to give
+// it a URL to use and a background refresh for when it does not.
+const PROBE_INTERVAL = 86400;
+const FAILOVER_INTERVAL = 7200;
 // Characters a YAML scalar and a URL can both live with. No quotes, no "#",
 // no commas, no spaces — any of those would corrupt the emitted profile.
 const safeHealthUrl = (v) => {
   const s = String(v || "").trim().slice(0, 200);
   return /^https?:\/\/[A-Za-z0-9._~:\/?@!$&*+=;%-]+$/.test(s) ? s : HEALTH_URL;
 };
+// Seconds, as mihomo's `interval` wants them. Bounded: 0 for a select group
+// means "never check" and 1e9 means "never check either", so a typo in a
+// reseller's link should not silently decide how often a customer's phone dials
+// 22 countries.
+const safeInterval = (v, dflt) => {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n >= 60 && n <= 604800 ? n : dflt;
+};
+
 // "204", "2xx", "200-204,301" — mihomo's accepted shapes, and nothing else.
 const safeExpect = (v) => {
   const parts = String(v || "").toLowerCase().split(",").map((s) => s.trim()).filter(Boolean).slice(0, 6);
@@ -1251,6 +1318,7 @@ const yamlOpts = (url, skipped) => ({
   remember: isOn(url.searchParams.get("remember")),
   health: url.searchParams.get("health") || "",
   expect: url.searchParams.get("expect") || "",
+  interval: url.searchParams.get("interval") || "",
   ...(skipped && skipped.length ? { skipped } : {}),
 });
 
@@ -1853,7 +1921,17 @@ export default {
             // report of "it times out in Clash" names the reason or rules it out.
             // The probe is what the app's green/red dots are based on, so a
             // "half my nodes don't ping" report has to show it.
-            healthUrl: (y.match(/^  url: (.+)$/m) || [null, null])[1],
+            latencyProbe: (() => {
+              const gs = parseGroups(splitYamlSections(y).groups);
+              const builtin = new Set(["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBAL"]);
+              return gs.filter((g) => g.proxies.some((p) => !builtin.has(p))).map((g) => ({
+                group: g.name, type: g.type, url: g.url || null, interval: g.interval || 0, lazy: g.lazy,
+                // mihomo hides its own default from the UI, and a hidden probe is
+                // a blank latency column in the app: report it rather than make
+                // someone re-read the YAML to find that out.
+                advertised: !!g.url && g.url !== MIHOMO_DEFAULT_TEST_URL,
+              }));
+            })(),
             expectedStatus: (y.match(/^  expected-status: (.+)$/m) || [null, null])[1] || "(any status)",
             guard: checkProfile(y, yamlOpts(url)),
           };
