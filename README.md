@@ -279,6 +279,54 @@ So the sentence the dashboard can finally tell you is which of the four it is:
 *your own link saved upstream* → fix the row in Edit; *supplier refused* → only then
 is it the supplier.
 
+### Is the converted link doing anything the supplier's doesn't?
+
+Asked directly on 2026-11-10, and the answer needed three separate proofs, because
+"works" and "identical" are different claims. Layer by layer:
+
+**The nodes: identical, and machine-proved.** `/admin/compare?a=<our link>&b=<a link
+whose `t=` is the base64url of the panel URL>` fetches the original file twice plus
+both converted files, normalises every node URI, and diffs all three sets. The run
+behind this section: 24 links in, 24 out, **22 unique node URIs `identical: 22/22`
+in both directions**, `missing_from_it: []`, `extra_in_it: []`, same order, and
+**0 uri diffs between the two supplier fetches** — so nothing rotates underneath us.
+Servers, ports, UUIDs, REALITY public-keys, short-ids, transport, SNI and
+fingerprints pass through untouched; only display names are rebranded. And a VPN
+subscription is a download-once file: traffic never flows through the converter, so
+it cannot add latency or cause a timeout. That is the `note` the endpoint returns.
+
+**The per-node config: the same fields the panel writes.** Checked by feeding the
+panel's own node parameters (the `b06658de-…` uuid, `pbk=70V0gDLKL3niFsNn__…`,
+`sid=3191b53b`, `sni=updates.cdn-apple.com`, `fp=safari`, `flow=xtls-rprx-vision`,
+port 443) through `buildYaml` and comparing dicts. Everything matches, including two
+places where **we used to look more correct than the panel** and were told the
+omission was a bug: the panel omits `reality: true` (mihomo infers REALITY from
+`reality-opts` + `tls: true`) and writes `flow: ''` on ws nodes. Do not "fix" either.
+
+**The config around the nodes: one deliberate difference per line.** The panel's
+header and `dns:` block were re-read line by line, and the first pass found four keys
+we simply did not ship — that gap was real, and is now closed:
+
+| key | panel | us | |
+| --- | --- | --- | --- |
+| `ipv6`, `dns.ipv6` | `true` | **were `false`** → now `true` | fixed. `false` came in with the geo-free profile with the reason "no v6 lookups against v4-only nodes", which was wrong: proxied destinations are resolved by the *node*, so the flag never governed node connectivity — it decides AAAA records and local/DIRECT traffic, which is what these same handsets already do on the panel's file. |
+| `dns.respect-rules` | `true` | absent → now `true` | fixed, and it is not cosmetic: with `fake-ip` on, a domain matched by a DIRECT rule needs this to return its real address instead of a 198.18.x fake-ip — the classic "fake-ip broke my LAN/CN app", and live on the `?cn=1` profile where `GEOIP,CN,DIRECT` exists. |
+| `dns.use-hosts` | `true` | absent → now `true` | fixed, local /etc/hosts entries win. |
+| `bind-address` | `'*'` | absent (mihomo's default) → now written out | cosmetic parity. |
+| `mixed-port`/`allow-lan`/`mode`/`log-level`/`unified-delay`/`tcp-concurrent`/`enhanced-mode`/`fake-ip-range` | — | identical | ✓ |
+| `external-controller` | `127.0.0.1:9090` | **absent on purpose** | we never open a control API on a customer's machine from a file we push. Deliberate security deviation — do not treat it as a parity gap. |
+| resolvers (global profile) | CN trio `223.5.5.5/119.29.29.29/114.114.114.114` | `1.1.1.1/8.8.8.8/9.9.9.9` | deliberate: a phone outside China resolves nothing on the CN trio. `?cn=1` opts into the CN trio + DoH fallback. |
+| `dns.fallback-filter` | `{geoip: true, geosite: [gfw], …}` | `geoip: CN` on `?cn=1` only, none globally | deliberate: both need geodata the app would have to download at import — see the geo-free section in *No latency numbers*. |
+| `fake-ip-filter` | absent | present | superset, harmless. |
+| the two quota lines | two extra vless nodes aimed at the same server | a comment, kept out of test groups | deliberate: they are duplicate nodes, and an info row inside a test group reads as a dead node. |
+| groups / names | `吹雪云` select, `自动选择` url-test 86400, `故障转移` fallback 7200 | `🚀 SP VPN` + `⚡ Auto Speed` + `🔁 Failover` + carrier lines + `🇨🇳 Direct` | the product. Probe policy is the panel's own numbers (gstatic 204, 86400/7200, no `lazy`, no `tolerance`, no `expected-status`), pinned by 92 checks in `test/profile-guard.test.mjs`. |
+
+So: **no difference that changes which server a customer reaches or how that
+connection is negotiated**, and the wrapper now differs only where we have written
+down why. `X-SPVPN-Profile` ends in `;v6-parity` so `curl -i` on the link settles
+it per response without opening the file; `test/profile-guard.test.mjs` pins all
+five lines.
+
 ### Usage change since the previous check
 
 Each successful check compares the new used-GB against the used-GB from the
@@ -901,7 +949,7 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-`npm test` runs **14 suites**: 1011 counted checks across the nine that report a
+`npm test` runs **14 suites**: 1036 counted checks across the nine that report a
 number, 21 `node:test` subtests in three more, and two suites that report a
 verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
 what each suite prints today — they were all stale in this file once already,
@@ -930,7 +978,7 @@ which is its own small argument for reading them from the run, not the README.)
 - `test/reminders.test.mjs` — **45 checks**: day maths, which reminders are due,
   cron idempotency (three passes in one day send once; tomorrow fires again),
   a dead channel not losing the reminder, and the worker routes.
-- `test/profile-guard.test.mjs` — **88 checks**: the 2026-11-10 Clash incident,
+- `test/profile-guard.test.mjs` — **92 checks**: the 2026-11-10 Clash incident,
   pinned. The served profile is safe outside China, quota placeholders stay out
   of the speed-test groups, translation collisions are de-duplicated, Reality and
   CDN-front params survive the rebuild, `?cn=1` still works, `checkProfile`

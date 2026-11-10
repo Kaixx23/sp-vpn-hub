@@ -78,7 +78,17 @@ ok(/^  nameserver: \[1\.1\.1\.1, 8\.8\.8\.8, 9\.9\.9\.9\]$/m.test(y), "global re
 ok(/^  proxy-server-nameserver: \[1\.1\.1\.1, 8\.8\.8\.8\]$/m.test(y),
   "proxy-server-nameserver set — without it node hostnames resolve via the wrong path");
 ok(/^  store-selected: false$/m.test(y), "store-selected:false — Auto Speed re-armed on every update");
-ok(/^ipv6: false$/m.test(y), "ipv6:false — no v6 lookups against v4-only nodes");
+// These five lines are the whole "does the converted file behave like the panel's
+// own" question at the top level, and every one of them is now the panel's value.
+// ipv6 was the exception we had invented a reason for ("no v6 lookups against
+// v4-only nodes") — but proxied destinations are resolved by the NODE, so that
+// flag never governed node connectivity; it decides AAAA + local/DIRECT traffic,
+// which is exactly what the panel's customers already run. Parity is the safe side.
+ok(/^ipv6: true$/m.test(y), "ipv6:true — same as the panel, not our old false");
+ok(/^  ipv6: true$/m.test(y), "dns.ipv6:true — the app gets AAAA as it does on the panel's file");
+ok(/^  respect-rules: true$/m.test(y), "dns.respect-rules:true — DIRECT-matched domains get real IPs, not fake-ip");
+ok(/^  use-hosts: true$/m.test(y), "dns.use-hosts:true — like the panel");
+ok(/^bind-address: '\*'$/m.test(y), "bind-address:'*' — the panel writes the default out, so we do too");
 ok(/^tcp-concurrent: true$/m.test(y), "tcp-concurrent:true — happy-eyeballs for dual-stack node hosts");
 const top = doc["proxy-groups"].find((g) => g.name.startsWith("🚀"));
 ok(top.proxies[0] === "⚡ Auto Speed", "⚡ Auto Speed is the first member of the top group (mihomo default)");
@@ -173,7 +183,7 @@ const fp = profileFingerprint();
 ok(fp.ok, "fingerprint: this build's profile policy is sound");
 ok(fp.needsGeoipDownload === false && fp.cnOnlyDns === false, "fingerprint reports the two incident properties");
 ok(fp.autoSpeedFirst && fp.storeSelectedOff && fp.proxyServerNameserver, "fingerprint reports the four positive properties");
-ok(profileHeader() === "geo-free;global-dns;auto-speed;re-armed;probe-advertised", `header string (${profileHeader()})`);
+ok(profileHeader() === "geo-free;global-dns;auto-speed;re-armed;probe-advertised;v6-parity", `header string (${profileHeader()})`);
 ok(fp.latencyProbe === HEALTH_URL && fp.probeAdvertised === true,
   "/healthz states the probe, so 'is the fix live' needs no screenshot from a customer");
 ok(HEALTH_URL !== MIHOMO_DEFAULT_TEST_URL, "and the value it states is one the core will not hide");

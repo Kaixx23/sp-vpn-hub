@@ -504,17 +504,34 @@ function buildYaml(status, proxies, brand, opts = {}) {
     : "global profile: auto speed-test, fallback, carrier lines, no GeoIP download needed"}`);
   L.push(`# refreshed ${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC`);
   L.push("mixed-port: 7890");
+  // '*' is mihomo's own default, written out so the file matches the panel's
+  // line-for-line where it is free to.
+  L.push("bind-address: '*'");
   L.push("allow-lan: false");
   L.push("mode: rule");
   L.push("log-level: info");
-  L.push("ipv6: false");
+  // ipv6: the panel ships `true` and these same phones work with it, so matching
+  // it is the safe side of a difference we invented. It was false with the reason
+  // "no v6 lookups against v4-only nodes" — but node connectivity never depended
+  // on it: proxied destinations are resolved REMOTELY by the node, so this flag
+  // only decides whether the app also gets AAAA and whether local/DIRECT traffic
+  // may use v6. Nothing here relates to the geodata problem; that is what the
+  // rule and dns.resolver choices below are for.
+  L.push("ipv6: true");
   L.push("unified-delay: true");
   L.push("tcp-concurrent: true");
   L.push("profile:");
   L.push("  store-selected: " + (remember ? "true" : "false"));
   L.push("dns:");
   L.push("  enable: true");
-  L.push("  ipv6: false");
+  L.push("  ipv6: true");
+  // Both from the panel, and both about local/DIRECT lookups rather than the
+  // tunnel: use-hosts lets /etc-hosts entries win, respect-rules is what makes a
+  // domain matched by a DIRECT rule get its REAL address instead of a fake-ip —
+  // the classic "fake-ip broke my LAN/CN app" fix, and it matters on the ?cn=1
+  // profile where GEOIP,CN,DIRECT is in play.
+  L.push("  use-hosts: true");
+  L.push("  respect-rules: true");
   L.push("  enhanced-mode: fake-ip");
   L.push("  fake-ip-range: 198.18.0.1/16");
   L.push('  fake-ip-filter: ["*.lan", "*.local", "+.msftconnecttest.com", "+.msftncsi.com", "time.*.com", "+.pool.ntp.org"]');
@@ -839,6 +856,12 @@ export function profileFingerprint() {
     // customer for a screenshot.
     latencyProbe: HEALTH_URL,
     probeAdvertised: HEALTH_URL !== MIHOMO_DEFAULT_TEST_URL,
+    // The keys the panel sets that we used to differ on. Grepped out of the SAME
+    // generated document the guard inspects, so this signal rots together with the
+    // profile it describes rather than becoming a claim about intent.
+    topologyParity: /^ipv6: true$/m.test(global) && /^  ipv6: true$/m.test(global)
+      && /^  respect-rules: true$/m.test(global) && /^  use-hosts: true$/m.test(global)
+      && /^bind-address: '\*'$/m.test(global),
     storeSelectedOff: /store-selected: false/.test(global),
     needsGeoipDownload: /GEOIP|geoip:/.test(global),
     cnOnlyDns: /223\.5\.5\.5/.test((global.match(/^[ ]*nameserver:.*$/m) || [""])[0]),
@@ -856,7 +879,7 @@ export function profileHeader() {
     // The guard covers the probe codes, so a profile that lost a url, gained
     // `lazy`, or picked the core's hidden default lands on the STALE side.
     return f.ok
-      ? "geo-free;global-dns;auto-speed;re-armed" + (f.probeAdvertised ? ";probe-advertised" : ";probe-hidden")
+      ? "geo-free;global-dns;auto-speed;re-armed" + (f.probeAdvertised ? ";probe-advertised" : ";probe-hidden") + (f.topologyParity ? ";v6-parity" : "")
       : "STALE:" + f.problems.map((p) => p.code).join("+");
   } catch (e) {
     return "unknown";
