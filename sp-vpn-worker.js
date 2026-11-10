@@ -378,6 +378,8 @@ function buildYaml(status, proxies, brand, opts = {}) {
   // the brand becomes a group name and a rule target, so this is the one choke
   // point that can guarantee the profile parses.
   const br = safeBrand(brand);
+  const health = safeHealthUrl(opts.health);
+  const expect = safeExpect(opts.expect);
   const AUTO = "⚡ Auto Speed", FAIL = "🔁 Failover", DIRECT = "🇨🇳 Direct", TOP = "🚀 " + br;
   const CI = { Telecom: "📡", Unicom: "📶", Mobile: "📱" };
   const CN = { Telecom: "电信", Unicom: "联通", Mobile: "移动" };
@@ -501,14 +503,21 @@ function buildYaml(status, proxies, brand, opts = {}) {
     for (const [gname, gtype] of [[AUTO, "url-test"], [FAIL, "fallback"]]) {
       L.push(`- name: ${yq(gname)}`);
       L.push("  type: " + gtype);
-      L.push("  url: http://www.gstatic.com/generate_204");
+      L.push(`  url: ${health}`);
       L.push("  interval: 300");
       // lazy: only health-check the group that is actually in use. Without it
       // mihomo dials EVERY node every interval — when a whole node family is
       // down (a banned CDN front, say) the app fills with red "connect error"
       // lines and burns battery for nodes nobody selected.
       L.push("  lazy: true");
-      L.push("  expected-status: 204");
+      // No expected-status unless the link asks for one. mihomo's default ("*")
+      // counts ANY reply as proof of life; pinning 204 does not, and a Google
+      // 302/rate-limit from a datacenter exit — which is routine — marks the
+      // node dead, so it shows no latency in the app and url-test refuses to
+      // select it, even though the node passes traffic perfectly. That reads to
+      // the customer as "only a few of my countries work". &expect=204 restores
+      // the strict check for anyone who wants it.
+      if (expect) L.push(`  expected-status: "${expect}"`);
       if (gtype === "url-test") L.push("  tolerance: 80");
       if (gtype === "fallback") L.push("  max-failed-times: 3");
       L.push("  proxies:");
@@ -668,6 +677,10 @@ export function checkProfile(y, opts = {}) {
   //    and a user editing `nameserver` breaks the tunnel. Its absence is the
   //    classic "imported fine, every node times out".
   if (!/^[ ]*proxy-server-nameserver:/m.test(y)) bad("no-proxy-nameserver", "missing dns.proxy-server-nameserver");
+  // 3b. The health-check URL has to be reachable the same way from every exit.
+  // An http:// probe is a false negative machine: nodes look dead, get skipped
+  // by url-test, and the customer's traffic would have worked fine.
+  if (/^[ ]*url:[ ]*http:\/\//m.test(y)) bad("insecure-health-url", "health check uses http:// — some exits drop port 80, so live nodes show no latency and are skipped");
 
   // 4. Fresh load must land on Auto Speed. store-selected:true restores the last
   //    tapped node forever, so a stray tap outlives every renewal.
@@ -1212,9 +1225,27 @@ const isOn = (v) => ["1", "true", "yes", "on"].includes(String(v || "").toLowerC
 // ?cn=1 restores the China-ISP profile (CN resolvers + GEOIP rules).
 const isCn = (url) => isOn(url.searchParams.get("cn"));
 // Every profile option that changes the generated YAML, in one place.
+// What proves a node is alive. https on purpose: http:// (port 80) is silently
+// dropped by a number of datacenter exits and CDN fronts, and the node then
+// shows "timeout" in the app while carrying traffic fine over 443.
+export const HEALTH_URL = "https://www.gstatic.com/generate_204";
+// Characters a YAML scalar and a URL can both live with. No quotes, no "#",
+// no commas, no spaces — any of those would corrupt the emitted profile.
+const safeHealthUrl = (v) => {
+  const s = String(v || "").trim().slice(0, 200);
+  return /^https?:\/\/[A-Za-z0-9._~:\/?@!$&*+=;%-]+$/.test(s) ? s : HEALTH_URL;
+};
+// "204", "2xx", "200-204,301" — mihomo's accepted shapes, and nothing else.
+const safeExpect = (v) => {
+  const parts = String(v || "").toLowerCase().split(",").map((s) => s.trim()).filter(Boolean).slice(0, 6);
+  return parts.length && parts.every((p) => /^(\d{3}|\d{3}-\d{3}|\dxx)$/.test(p)) ? parts.join(",") : null;
+};
+
 const yamlOpts = (url, skipped) => ({
   cn: isCn(url),
   remember: isOn(url.searchParams.get("remember")),
+  health: url.searchParams.get("health") || "",
+  expect: url.searchParams.get("expect") || "",
   ...(skipped && skipped.length ? { skipped } : {}),
 });
 
@@ -1815,6 +1846,10 @@ export default {
             resolvers: (y.match(/^  nameserver: .*$/m) || [""])[0].trim(),
             // Full guard against the profile THIS student would receive, so a
             // report of "it times out in Clash" names the reason or rules it out.
+            // The probe is what the app's green/red dots are based on, so a
+            // "half my nodes don't ping" report has to show it.
+            healthUrl: (y.match(/^  url: (.+)$/m) || [null, null])[1],
+            expectedStatus: (y.match(/^  expected-status: (.+)$/m) || [null, null])[1] || "(any status)",
             guard: checkProfile(y, yamlOpts(url)),
           };
           out.ok = proxies.length > 0 && out.yaml.duplicateNames === 0 && out.yaml.guard.ok;

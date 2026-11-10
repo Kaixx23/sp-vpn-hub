@@ -615,6 +615,61 @@ looks identical to "your VPN is broken" for every Clash customer at once. The
 brand is also HTML-escaped on the quota and seller pages, since it arrives from a
 URL any student can forward to another student.
 
+### Only a few nodes show a latency number — the rest look dead
+
+Symptom, reported 2026-11-10: the same 22 nodes give country-after-country of
+working latency when the **seller's own link** is imported into Clash Meta, but
+with the converter link **only a few pin** and the rest show nothing / `timeout`
+— while the profile itself is complete (24 share links in, 24 accounted for,
+`pbk`/`sid`/`flow`/`fp`/SNI/ws `Host`+`path` all identical to the supplier's).
+
+Nothing was being dropped. The difference was **how each config decides that a
+node is alive**, and the converter had it set two ways against itself:
+
+```yaml
+# the old profile
+  url: http://www.gstatic.com/generate_204   # 1) port 80 — several datacenter
+                                             #    exits and CDN fronts drop it
+  expected-status: 204                       # 2) Google answers a datacenter IP
+                                             #    with a redirect / rate limit
+```
+
+mihomo scores each member with `URLTest(ctx, url, expectedStatus)` and a node is
+only *alive* if the probe both **completes** and the status **matches**
+(`adapter/provider/healthcheck.go`). So:
+
+* a node whose exit cannot reach **port 80** never completes → no latency, marked dead;
+* a node that Google **rate-limits** (302, not 204) completes fine and is still marked dead;
+* `⚡ Auto Speed` is a `url-test`, so it **refuses to select** a node the probe failed on —
+  which turns "the probe is blocked" into "your VPN doesn't work in Germany".
+
+The seller's own config sets no `expected-status` and probes over `https`, so
+mihomo's default (`*` — *any* reply means the node is up) applies and every
+country lights up. Same nodes, same parameters, opposite verdict.
+
+**Now the default is `https://www.gstatic.com/generate_204` with no forced
+status.** Two switches, if you need them per customer:
+
+| Parameter | Effect |
+|---|---|
+| `&health=<url>` | any `http(s)` URL your exits can reach — `https://cp.cloudflare.com/generate_204`, `https://www.google.com/generate_204`, a captive portal of your own |
+| `&expect=<codes>` | opt back into strictness: `204`, `2xx`, `200-204,301`. Anything mihomo could not parse is ignored rather than written into the profile |
+
+`/diag?t=<t>` reports both (`yaml.healthUrl`, `yaml.expectedStatus`), because
+"which one is it this time" should not need a guess; and `checkProfile` now
+returns `insecure-health-url` if a `http://` probe ever comes back.
+
+Two things this does **not** change, so you can rule them out when a customer
+reports the same thing:
+
+* **Nodes Clash cannot use are still announced, not hidden** — `unsupported` in
+  `/diag` is the number to look at. If it is 0 and the header says
+  `# 22 nodes`, nothing was dropped.
+* **`lazy: true` stays.** A group that is not in use is not probed, so
+  *Clash Meta only shows latency for the group you are looking at*. Tapping into
+  `⚡ Auto Speed` (or the carrier group) makes the numbers appear; that display
+  detail is not a broken node.
+
 ### "Auto Speed doesn't pick anything"
 
 Traffic enters the top `select` group (`🚀 <brand>`), and mihomo points a
@@ -684,7 +739,7 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-`npm test` runs **14 suites**: 909 counted checks across the nine that report a
+`npm test` runs **14 suites**: 923 counted checks across the nine that report a
 number, 21 `node:test` subtests in three more, and two suites that report a
 verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
 what each suite prints today — they were all stale in this file once already,
@@ -713,7 +768,7 @@ which is its own small argument for reading them from the run, not the README.)
 - `test/reminders.test.mjs` — **45 checks**: day maths, which reminders are due,
   cron idempotency (three passes in one day send once; tomorrow fires again),
   a dead channel not losing the reminder, and the worker routes.
-- `test/profile-guard.test.mjs` — **58 checks**: the 2026-11-10 Clash incident,
+- `test/profile-guard.test.mjs` — **72 checks**: the 2026-11-10 Clash incident,
   pinned. The served profile is safe outside China, quota placeholders stay out
   of the speed-test groups, translation collisions are de-duplicated, Reality and
   CDN-front params survive the rebuild, `?cn=1` still works, `checkProfile`

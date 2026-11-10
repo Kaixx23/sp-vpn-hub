@@ -83,7 +83,15 @@ ok(/^tcp-concurrent: true$/m.test(y), "tcp-concurrent:true — happy-eyeballs fo
 const top = doc["proxy-groups"].find((g) => g.name.startsWith("🚀"));
 ok(top.proxies[0] === "⚡ Auto Speed", "⚡ Auto Speed is the first member of the top group (mihomo default)");
 const auto = doc["proxy-groups"].find((g) => g.name === "⚡ Auto Speed");
-ok(auto["lazy"] === true && auto["expected-status"] === 204, "url-test is lazy + expects 204 — stops dialling dead nodes");
+// This used to read `auto["expected-status"] === 204` and call it a feature. It
+// was the bug: a node is only "alive" if the probe answer matches, and Google
+// answers a datacenter exit with a redirect / rate limit routinely — so the node
+// shows no latency and url-test refuses to select it, while carrying traffic
+// fine. That is the whole of "only a few of my countries work in Clash".
+ok(auto["lazy"] === true, "url-test is lazy — no background dialling of every node");
+ok(auto["expected-status"] === undefined, "…and no forced status, so ANY reply from the node counts as alive");
+ok(/^  url: https:\/\/\S+generate_204$/m.test(y), "health probe is https (http:// on port 80 is dropped by some exits)");
+ok(!/^  url: http:\/\//m.test(y), "no plain-http probe anywhere in the profile");
 ok(auto["tolerance"] === 80, "url-test tolerance 80 — auto selection does not flap");
 const failover = doc["proxy-groups"].find((g) => g.name === "🔁 Failover");
 ok(failover["max-failed-times"] === 3, "fallback has max-failed-times:3");
@@ -221,6 +229,39 @@ ok(codes.includes("needs-geoip") && codes.includes("cn-dns") && codes.includes("
 // A build old enough to predate the guard is itself a failure signal.
 const noGuard = checkProfile("proxies:\n- name: \"a\"\n  udp: true\n", { cn: true });
 ok(noGuard.problems.some((p) => p.code === "cn-missing-geoip"), "a profile claiming cn mode without CN rules is flagged");
+
+// ------------------------------------------------ 8. the latency probe itself
+// Two independent ways a node can be healthy and still look dead, both of which
+// the old profile had, both invisible to any check that only parses the YAML.
+sect("8. health probe — the difference between \u201cnode dead\u201d and \u201cprobe blocked\u201d");
+{
+  const u = (g) => doc["proxy-groups"].find((x) => x.name === g).url;
+  ok(u("⚡ Auto Speed") === u("🔁 Failover"), "both auto groups probe the same URL (a split makes selection unexplainable)");
+  ok(/^https:\/\/www\.gstatic\.com\/generate_204$/.test(u("⚡ Auto Speed")), `default probe: ${u("⚡ Auto Speed")}`);
+
+  const strict = await (await get(sub("&fmt=yaml&expect=204"), "clash-verge/v1.7.7")).text();
+  ok(/expected-status: "204"/.test(strict), "&expect=204 opts back into the strict check (still quoted, so YAML cannot misread it)");
+  const ranges = await (await get(sub("&fmt=yaml&expect=2xx,301"), "clash-verge/v1.7.7")).text();
+  ok(/expected-status: "2xx,301"/.test(ranges), "&expect accepts mihomo's range syntax");
+  const junk = await (await get(sub("&fmt=yaml&expect=42,drop-tables"), "clash-verge/v1.7.7")).text();
+  ok(!/expected-status/.test(junk), "a status list mihomo cannot parse is ignored, not embedded");
+  const inj = await (await get(sub('&fmt=yaml&expect=204"\n  x: "y'), "clash-verge/v1.7.7")).text();
+  ok(!/x:/.test(inj), "…and it cannot break out of the YAML scalar");
+
+  const other = await (await get(sub("&fmt=yaml&health=https://www.google.com/generate_204"), "clash-verge/v1.7.7")).text();
+  ok(/url: https:\/\/www\.google\.com\/generate_204/.test(other), "&health= lets a reseller point the probe at something their exits reach");
+  const bad = await (await get(sub('&fmt=yaml&health=https://x" y#z'), "clash-verge/v1.7.7")).text();
+  ok(/url: https:\/\/www\.gstatic\.com\/generate_204/.test(bad), "a URL that would corrupt the profile falls back to the default");
+  const over = await (await get(sub("&fmt=yaml&health=" + "a".repeat(400)), "clash-verge/v1.7.7")).text();
+  ok(/url: https:\/\/www\.gstatic\.com\/generate_204/.test(over), "an absurdly long probe URL is rejected, not truncated into the file");
+
+  // The guard knows about it, so a future "optimisation" back to http:// or to a
+  // forced status is loud instead of arriving as a customer complaint.
+  const httpProbe = checkProfile(y.replace("url: https://www.gstatic.com/generate_204", "url: http://www.gstatic.com/generate_204"), {});
+  ok(httpProbe.problems.some((x) => x.code === "insecure-health-url"), "an http:// probe is reported as a profile problem");
+  const strictProbe = checkProfile(y + '\n  expected-status: "204"\n', {});
+  ok(!strictProbe.problems.some((x) => x.code === "insecure-health-url"), "…and adding a status back is not itself an error");
+}
 
 console.log("\n" + "─".repeat(62));
 if (failures) { console.log(`💥 ${failures}/${checks} FAILED`); process.exit(1); }
