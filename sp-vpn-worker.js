@@ -164,6 +164,18 @@ function tryDecodeB64(s) {
 // platform limit, leaving headroom to build and stream the response.
 export const FETCH_BUDGET_MS = 7000;
 
+// /admin/refresh walks the WHOLE customer book, one supplier fetch per row. A
+// Netlify function gets 10 s, and that ceiling is a plan limit you raise by
+// asking support — not something netlify.toml can change — so a sweep needing
+// more than 10 s does not come back "slow", it comes back as nothing, and the
+// dashboard reads a dead request as a supplier problem. Measured on this repo:
+// 114 rows at a 500 ms supplier = 9.6 s (at the limit), at 800 ms = 15 s (killed).
+// So the sweep self-limits and hands back a cursor to continue from.
+export const REFRESH_BUDGET_MS = 8000;
+export const REFRESH_MAX_BUDGET_MS = 25000;
+// Never start a batch that cannot finish inside what is left of the request.
+export const REFRESH_MIN_LEFT_MS = 1500;
+
 export async function fetchSubscription(url, budgetMs = FETCH_BUDGET_MS) {
   const uas = [
     "Shadowrocket/2.2.32",
@@ -1130,10 +1142,21 @@ const plainErr = (msg, code = 502) => new Response(msg + "\n", {
 
 // Standard subscription headers (subconverter spec): Clash Verge / v2rayNG show
 // live quota + expiry next to the profile, and "home page" links to the quota page.
+// Every json() response in this worker is a diagnostic or an admin read
+// (/admin/*, /diag, /healthz) — none of them may come back from an edge cache.
+// Netlify answers a repeat URL, query string and all, with the previously stored
+// body: on 2026-11-10 /diag?t=… returned a byte-identical response six minutes
+// apart and only went fresh when the URL changed. Two things broke because of
+// that: a cached page of a paged /admin/refresh replays an old `after` cursor,
+// and a "supplier issue" pill can outlive the incident it described. Saying it on
+// the response is the only place that works — header rules in netlify.toml apply
+// to files Netlify serves from its own store, never to a function's response, and
+// every route on this site is a function response (see [[redirects]]). A caller
+// can still override by passing the header.
 const json = (obj, code = 200, headers = {}) =>
   new Response(JSON.stringify(obj, null, 2) + "\n", {
     status: code,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...headers },
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...headers },
   });
 // The admin output must never hand back a supplier URL in full — that is the
 // exact secret this whole change exists to protect. Host only.
@@ -1506,8 +1529,13 @@ export default {
 
       // ---- dashboard ----
       if (path === "/admin" || path === "/admin/dashboard") {
+        // no-store for the same reason as json(), plus one of its own: the client
+        // JS is INLINED into this page (there is no hashed asset URL to rotate),
+        // so a page served from the edge cache would keep driving an OLD
+        // dashboard against the NEW paging contract — it would read only the
+        // first page (6 of 114) and tell the owner the sweep was finished.
         return new Response(dashboardPage(host), {
-          headers: { "Content-Type": "text/html; charset=utf-8" },
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
         });
       }
       if (path === "/admin/dashboard.json") {
@@ -1693,28 +1721,41 @@ export default {
         // Bounded parallelism: the supplier panel must not see a burst of 50
         // concurrent fetches just because you opened the dashboard.
         const CONC = 6;
-        let updated = 0, failed = 0;
-        // Index-assigned (not pushed) so the report order matches the table
-        // order rather than whichever supplier answered first.
-        const results = new Array(rows.length);
-        for (let i = 0; i < rows.length; i += CONC) {
+        const nInt = (v, dflt) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 0 ? n : dflt; };
+        const budget = Math.min(nInt(url.searchParams.get("budget"), REFRESH_BUDGET_MS) || REFRESH_BUDGET_MS, REFRESH_MAX_BUDGET_MS);
+        const maxBatches = nInt(url.searchParams.get("batch"), 0); // 0 = no cap; the deadline governs
+        // `after` is an offset into THIS list. Checks are idempotent and a failed
+        // one writes nothing, so if a row is revoked mid-sweep and offsets shift,
+        // the worst case is that somebody gets checked twice.
+        const after = Math.min(nInt(url.searchParams.get("after"), 0), rows.length);
+        const deadline = Date.now() + budget;
+        let updated = 0, failed = 0, cursor = after, batches = 0;
+        // Pushed per batch, and batches run one after another, so the report
+        // order still matches the table rather than who answered first.
+        const results = [];
+        for (let i = after; i < rows.length; i += CONC) {
+          const left = deadline - Date.now();
+          if (left < REFRESH_MIN_LEFT_MS) break;
+          if (maxBatches && batches >= maxBatches) break;
+          batches++;
           const batch = rows.slice(i, i + CONC);
-          await Promise.all(batch.map(async (r, k) => {
+          await Promise.all(batch.map(async (r) => {
             // Same single-customer code path as the per-row Renew / Check, so
             // the global refresh calculates and persists the usage delta for
             // every customer it successfully checks. A customer whose supplier
             // fails keeps its previous values AND its previous delta.
             const out = await checkCustomerRow(r, {
-              fetchSubscription, quotaSummary, updateRow: storeUpdate,
+              fetchSubscription: (u) => fetchSubscription(u, Math.max(800, Math.min(FETCH_BUDGET_MS, left - 500))),
+              quotaSummary, updateRow: storeUpdate,
             });
             const base = { token: r.token, customer: r.customer || r.label || null };
             if (!out.ok) {
               failed++;
-              results[i + k] = { ...base, ok: false, error: out.error };
+              results.push({ ...base, ok: false, error: out.error });
               return;
             }
             updated++;
-            results[i + k] = {
+            results.push({
               ...base,
               ok: true,
               renewed: out.expiryChanged,
@@ -1726,17 +1767,25 @@ export default {
               usage_change: out.usageKind,
               message: out.message,
               usage_message: out.usageMessage,
-            };
+            });
           }));
+          cursor += batch.length;
         }
-        const done = results.filter(Boolean);
+        const remaining = Math.max(rows.length - cursor, 0);
         return json({
-          checked: rows.length,
+          // `checked` is what THIS call did; `total` is the whole book. The
+          // dashboard needs both to say "6 of 114" instead of shrugging.
+          checked: cursor - after,
+          total: rows.length,
+          offset: after,
+          remaining,
+          next: remaining > 0 ? cursor : null,
+          partial: remaining > 0,
           updated,
           failed,
-          renewed: done.filter((x) => x.ok && x.renewed).length,
-          marked_paid: done.filter((x) => x.ok && x.marked_paid).length,
-          results: done,
+          renewed: results.filter((x) => x.ok && x.renewed).length,
+          marked_paid: results.filter((x) => x.ok && x.marked_paid).length,
+          results,
         });
       }
 

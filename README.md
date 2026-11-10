@@ -175,6 +175,55 @@ completed. The global `⟳ Refresh quota` still does the same for everyone at
 once; this narrows it to one row so you are not hammering the panel with 80
 fetches to check one person.
 
+### ⟳ Refresh data — the whole book, in pages
+
+`⟳ Refresh data` runs the **same** check for every active customer, because a
+renewal usually covers several of them at once. It used to be one request that
+walked the entire book — and that is a bug the platform, not the supplier,
+guarantees as the customer list grows:
+
+> A Netlify function gets **10 seconds**. That ceiling is a *plan* setting (you
+> ask Netlify support to raise it, up to ~26 s on Pro); `netlify.toml` has no
+> `timeout` key for sync functions, so it cannot be fixed in the repo.
+
+Measured against this repo's own harness (`114` customers, `CONC = 6`):
+
+| supplier latency | one unbounded sweep | verdict at 10 s |
+|---|---|---|
+| 200 ms | 3.8 s | fine |
+| 500 ms | 9.6 s | coin flip |
+| 800 ms | 15.3 s | **killed** |
+
+A killed request returns nothing the dashboard can interpret, so the toast said
+`Refresh failed: …` and the health pill could sit on **`● supplier issue —
+serving cached`** while the panel was answering every request in 112 ms. That is
+the "dashboard says a supplier issue when I check my customers' data and renewal
+date" report from 2026-11-10: a book-size problem wearing a supplier's face.
+
+The sweep therefore budgets itself and pages:
+
+```
+GET /admin/refresh?after=<offset>&budget=<ms>   →  { checked, total, offset,
+        remaining, next, partial, updated, failed, renewed, marked_paid, results }
+```
+
+* it stops when **1.5 s** of the request would not fit another batch, so the
+  response always arrives — `next`/`remaining`/`partial` say where it got to;
+* each row's own supplier fetch is bounded by what is left (`AbortSignal`), so
+  **one unresponsive panel can no longer eat the whole sweep**; those rows are
+  reported as failures and stay written with their previous values;
+* the dashboard follows `next` in a loop, relabelling the button
+  `Checking 48 of 114…`, and its toast distinguishes *cut off* from
+  *the supplier refused*, naming the first customer that failed and why;
+* after the sweep it forces one health re-read (`?force=1`), because the report
+  is cached for 2 minutes and a pill left saying "supplier issue" after a
+  successful sweep is its own false alarm.
+
+Tuning, if you ever need it: `?budget=<ms>` (default 8000, clamped to 25000) and
+`?batch=<n>` to cap batches per request. Both are for the platform's clock, not
+the supplier's politeness — batches stay limited to 6 concurrent fetches either
+way.
+
 ### Usage change since the previous check
 
 Each successful check compares the new used-GB against the used-GB from the
@@ -442,7 +491,7 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/dashboard.json` | GET | Stats + customers, for the client |
 | `/admin/mint` | POST | `link=` + customer fields → `{ token, oneLink }` |
 | `/admin/customer` | POST | Edit a customer's details |
-| `/admin/refresh` | GET | Pull live quota + expiry for **every** active customer |
+| `/admin/refresh` | GET | Pull live quota + expiry — one page of the book per call, `?after=`/`?budget=`/`?batch=` (see *Refresh data*) |
 | `/admin/link/<t>?action=check` | GET | Check supplier expiry/quota only; `renew` remains an alias; never marks paid |
 | `/admin/link/<t>?action=pay` | POST | `paid_until=YYYY-MM-DD` → record a payment for this customer only (today or later) |
 | `/admin/link/<t>?action=unpaid` | POST | Explicitly clear only this customer's payment date |
@@ -797,7 +846,7 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-`npm test` runs **14 suites**: 939 counted checks across the nine that report a
+`npm test` runs **14 suites**: 976 counted checks across the nine that report a
 number, 21 `node:test` subtests in three more, and two suites that report a
 verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
 what each suite prints today — they were all stale in this file once already,
@@ -817,7 +866,7 @@ which is its own small argument for reading them from the run, not the README.)
 - `test/customer-accounts.test.mjs` — shared account/credential inheritance, payment isolation across checks and reminders, additive migrations and concurrent SQL updates.
 - `test/dashboard-ui.test.mjs` — real client/worker interaction: original + shared customer creation, Pay/cancel/retry/Mark unpaid, safe account display and filtering.
 - `test/shared-users.test.mjs` — the read-only shared-link finder: complete-URL matching (including rows mislabeled Individual), same-host/different-token separation, nested/copied/legacy Hub-link resolution, revoked/rotated/generated record handling, missing/cyclic/too-deep chains, leak and no-write/no-network guarantees, HTTP status semantics, and the real dashboard dialog (filter independence, escaping, hidden-on-load, retry, stale replies, Escape and focus restore).
-- `test/renewal.test.mjs` — **151 checks**: per-customer Renew / Check (changed
+- `test/renewal.test.mjs` — **188 checks**: per-customer Renew / Check (changed
   vs unchanged expiry), usage increase / unchanged / reset, no delta on the
   first check, failed checks overwriting nothing, the global refresh still
   working and persisting deltas, revoked + unknown + direct-node customers

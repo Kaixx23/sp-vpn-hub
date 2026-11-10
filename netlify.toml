@@ -14,6 +14,17 @@
   node_bundler = "esbuild"
   external_node_modules = ["@libsql/client", "libsql"]
 
+# A note on caching, because it cost a debugging session: the refresh/paging
+# contract and every admin diagnostic depend on these URLs NOT being served from
+# the edge cache, and you cannot arrange that from this file. Netlify's
+# [[headers]] rules apply only to files served from Netlify's own store, never to
+# a function response — and the rewrite below makes every route on this site a
+# function response. So the header is set in the worker itself (json() and the
+# /admin page both send Cache-Control: no-store). Measured 2026-11-10: /diag?t=…
+# answered a byte-identical body six minutes apart, and only went fresh when the
+# URL changed. If you ever move /all or /sub off this catch-all rewrite, revisit
+# this: those are the routes where caching is a feature.
+
 [[redirects]]
   from = "/*"
   to = "/.netlify/functions/index"

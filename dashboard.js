@@ -551,6 +551,29 @@ const prettyDate = (d) => {
   if (p.length !== 3) return String(d);
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]))));
 };
+// "read 4 min ago" for the renewal cell. A blank date and a stale one used to look
+// identical, and they mean opposite things: blank = never successfully checked (a
+// failed check writes nothing, on purpose), stale = checked, supplier says this.
+// No regex in here on purpose: CLIENT is one outer template literal, so every
+// backslash would have to be doubled and that is easy to get wrong by eye.
+const readAgo = (iso) => {
+  const t = Date.parse(String(iso || ""));
+  if (!Number.isFinite(t) || t <= 0) return "";
+  let s = Math.round((Date.now() - t) / 1000);
+  // V8 reads short junk as a date ("0" parses as 1 Jan 2000), which would render
+  // as a real-looking "read 26 years ago". Anything past ~10 years is not a
+  // check this book ever made, so show nothing — a blank beats a confident lie.
+  if (s > 315576000) return "";
+  if (s < 0) s = 0; // clock skew between the function and the browser
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + " min ago";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + (h === 1 ? " hour ago" : " hours ago");
+  const d = Math.floor(h / 24);
+  if (d < 31) return d + (d === 1 ? " day ago" : " days ago");
+  return prettyDate(String(iso)); // older than a month: the date is more useful
+};
 const initials = (name) => String(name || "SP").trim().split(/\\s+/).filter(Boolean).slice(0, 2).map((x) => x[0]).join("").toUpperCase() || "SP";
 
 function toast(msg, ms) {
@@ -666,7 +689,10 @@ function render() {
         (generatedRow ? '' : '<div class="customer-type"><span class="pill ' + (r.customer_type === 'shared' ? 'amber">Shared link' : 'gray">Individual') + '</span></div><div class="supplier-account"><span class="sub">Supplier account</span>' + accountCell(r) + '<div class="shared-users-btn">' + actionButton("shared-users", r.token, "Find shared users") + '</div></div>') +
         '<div class="sub">' + esc(String(r.token || "").slice(0, 10)) + '…' + (r.legacy ? ' · legacy' : '') + (generatedRow ? ' · generated' : '') + '</div>' + (r.account_email ? '<div class="sub">✉ ' + esc(r.account_email) + '</div>' : '') + (generatedRow ? '<div class="sub">Not counted as a customer or profit.</div>' : '') + '</div></div></td>' +
       '<td class="plan-cell">' + esc(r.plan || (generatedRow ? "Not a customer record" : "No plan set")) + '<div class="sub">' + (generatedRow ? "Created by quota/tool page" : (esc(money(r)) + (r.billing_cycle ? " · " + esc(r.billing_cycle) : "") + (r.price != null && r.months ? " · ≈ " + (Number(r.price) / r.months).toFixed(2) + "/mo" : r.price != null ? " · <span class=warn>no billing cycle → assumed monthly</span>" : "") + (r.profit != null ? ' · <span style="color:var(--mint)">' + (r.profit > 0 ? "+" : "") + r.profit + ' net</span>' : ""))) + '</div></td>' +
-      '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + esc(prettyDate(r.supplier_expires) || "Not checked") + '</div>' + (r.revoked || generatedRow ? "" : actionButton("check", r.token, "Check")) + '</td>' +
+      // The renewal cell shows WHEN it was last read, not just what it says, because
+      // a blank here means the row was never checked — a different fact from "checked
+      // and the date is old". (A failed check also writes nothing, by design.)
+      '<td class="renewal-cell">' + expPill(r) + '<div class="date">' + (esc(prettyDate(r.supplier_expires) || "Not checked") + (r.checked_at ? ' <span class=sub>· read ' + esc(readAgo(r.checked_at)) + '</span>' : '')) + '</div>' + (r.revoked || generatedRow ? "" : actionButton("check", r.token, "Check")) + '</td>' +
       '<td class="usage-cell">' + quotaCell(r) + '</td>' +
       '<td class="paid-cell">' + paid + (r.revoked || generatedRow ? "" : actionButton("pay", r.token, "Pay") + (isPaid ? actionButton("unpaid", r.token, "Mark unpaid") : "")) + '</td>' +
       '<td class="link-cell"><span class="lnk" title="' + esc(one) + '">' + esc(one) + '</span><span class="link-caption"><svg viewBox="0 0 20 20" fill="none"><path d="M7.5 12.5 12.5 7.5M6 14a3 3 0 0 1 0-4.2l1.6-1.6M14 6a3 3 0 0 1 0 4.2l-1.6 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> private link</span></td>' +
@@ -741,14 +767,49 @@ $("#sort").addEventListener("change", (e) => { SORT = e.target.value; render(); 
 
 $("#refresh").addEventListener("click", async (e) => {
   const button = e.currentTarget, label = button.querySelector(".btn-label");
-  button.disabled = true; if (label) label.textContent = "Checking supplier…";
-  try {
-    const response = await fetch("/admin/refresh");
-    const j = await response.json();
-    toast("Payments unchanged. Updated " + j.updated + " of " + j.checked + (j.failed ? " · " + j.failed + " failed" : ""));
-    await load();
-  } catch (err) { toast("Refresh failed: " + err.message); }
-  button.disabled = false; if (label) label.textContent = "Refresh data";
+  button.disabled = true;
+  if (label) label.textContent = "Checking supplier…";
+  // Paged on purpose. One request may only spend ~8 s of the platform's 10 s
+  // function ceiling, so /admin/refresh does a slice and hands back a cursor;
+  // we follow it until the book is done. Before this, a sweep of every customer
+  // was ONE request that Netlify killed mid-way, and the only thing the panel
+  // could report was "Refresh failed" — indistinguishable from the supplier
+  // being down, when in fact the supplier was answering fine.
+  let after = 0, checked = 0, updated = 0, failed = 0, total = 0, why = null, pages = 0, cut = false;
+  for (;;) {
+    if (++pages > 80) { cut = true; break; } // ~13k customers; bail rather than spin
+    let j;
+    try {
+      const r = await fetch("/admin/refresh?after=" + after);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      j = await r.json();
+    } catch (err) {
+      // A dead request is not a supplier verdict. Say how far we got.
+      why = (checked ? "stopped after " + checked + " of " + total + " (" + err.message + ") — click again to continue"
+                      : err.message);
+      cut = true;
+      break;
+    }
+    total = j.total || total;
+    checked += j.checked || 0; updated += j.updated || 0; failed += j.failed || 0;
+    if (!why) { const bad = (j.results || []).find((x) => x && x.ok === false); if (bad) why = (bad.customer ? bad.customer + ": " : "") + bad.error; }
+    if (!j.partial || !j.next) break;
+    if (j.next <= after) { cut = true; break; } // no forward progress: never loop
+    after = j.next;
+    if (label) label.textContent = "Checking " + checked + " of " + total + "…";
+  }
+  button.disabled = false;
+  if (label) label.textContent = "Refresh data";
+  const parts = ["Payments unchanged. Updated " + updated + " of " + checked + " checked"];
+  if (total > checked) parts.push(cut ? "sweep stopped early" : (total - checked) + " not checked");
+  if (failed) parts.push(failed + " with a supplier problem");
+  if (why) parts.push("first one: " + why);
+  toast(parts.join(" · "));
+  await load();
+  // The health pill caches its report for 2 minutes (it fetches the panel, so
+  // an open dashboard must not hammer it). We just proved the pipeline works,
+  // so force one re-read rather than leave "supplier issue" on screen.
+  await loadHealth(true);
 });
 
 // ---- auto-detect: paste a supplier link, the form fills itself ------------
@@ -1026,6 +1087,14 @@ $("#rows").addEventListener("click", async (e) => {
         toast(name + " — " + j.message + (j.usage_message ? " · " + j.usage_message : "") +
           " · Payment unchanged.", 6000);
         await load();
+        // Contradiction check. The pill's report is memoised at the origin for 2
+        // minutes, and its supplier probe only ever tries ONE representative row
+        // per host — so it can be sitting on "supplier issue" from a momentary
+        // blip while this very customer's subscription just answered. A live read
+        // beating the pill is evidence; make the pill account for it. (Only on
+        // success: forcing a re-read for every FAILURE would hammer the panel with
+        // extra fetches during an actual outage.)
+        if (HEALTH && (HEALTH.level === "degraded" || HEALTH.level === "down")) await loadHealth(true);
         return;
       }
       toast("Could not check " + name + ": " + (j.error || ("HTTP " + response.status)), 6000);

@@ -434,6 +434,120 @@ console.log("\n[15] the dashboard renders the new control without losing the old
   let parsed = false;
   try { new vm.Script(script[1]); parsed = true; } catch (e) { console.log("     parse error:", e.message); }
   ok(parsed, "the inlined client script is still valid JavaScript");
+
+  // The sweep now pages, so the page has to say so and follow the cursor.
+  ok(html.includes("/admin/refresh?after="), "the dashboard drives /admin/refresh with an explicit cursor");
+  ok(/of " \+ total/.test(html) || html.includes('Checking " + checked'), "the button counts up while it pages");
+  ok(html.includes("not checked"), "a cut-off sweep is reported as 'not checked', not as a supplier failure");
+
+  // readAgo() decides what the renewal cell means, so run the SHIPPED copy on a
+  // frozen clock rather than trust it reads well: blank must stay blank (never
+  // checked) and every unit boundary must pluralise and not go negative.
+  const fn = html.match(/const readAgo = \(iso\) => \{([\s\S]*?)\n\};/);
+  ok(!!fn, "the dashboard ships readAgo() for the renewal cell");
+  if (fn) {
+    const NOW = Date.UTC(2026, 10, 10, 12, 0, 0);
+    const S = 1000, M = 60 * S, H = 60 * M, D = 24 * H;
+    const ctx = vm.createContext({
+      prettyDate: (s) => "date:" + String(s).slice(0, 10),
+      out: null,
+    });
+    vm.runInContext(
+      // take the helper exactly as shipped (statement form), no re-wrapping
+      // S/M/H/D and NOW live in THIS realm, so the units have to be declared
+      // inside the sandbox too — a vm context shares nothing implicitly.
+      "const NOW = " + NOW + ", S = " + S + ", M = " + M + ", H = " + H + ", D = " + D + ";\n" +
+      "Date.now = () => NOW;\n" + fn[0].replace(/;\s*$/, "") + "\n" +
+      "const iso = (ms) => new Date(NOW - ms).toISOString();\n" +
+      "out = [readAgo(''), readAgo('0'), readAgo('garbage'), readAgo(iso(30 * S))," +
+      " readAgo(iso(-5 * M)), readAgo(iso(5 * M)), readAgo(iso(60 * M)), readAgo(iso(2 * H))," +
+      " readAgo(iso(25 * H)), readAgo(iso(2 * D)), readAgo(iso(40 * D))]", ctx,
+    );
+    const want = ["", "", "", "just now", "just now", "5 min ago", "1 hour ago",
+      "2 hours ago", "1 day ago", "2 days ago", "date:2026-10-01"]; // NOW − 40 d
+    ctx.out.forEach((got, i) => ok(got === want[i], `readAgo → "${want[i]}" (got "${got}")`));
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[16] /admin/refresh pages, so a big book cannot be cut off");
+{
+  // What this pins: the sweep used to be ONE request over every customer. With
+  // ~114 rows and a 500 ms panel that is 9.6 s against Netlify's 10 s function
+  // ceiling (and that ceiling is a plan limit, not a netlify.toml setting), so
+  // the request died mid-book and the dashboard could only say "Refresh failed"
+  // — which reads exactly like a supplier outage when the supplier was fine.
+  const extra = [];
+  for (let n = 0; n < 14; n++) { const who = "bulk" + n; setPanel(who, 1, 1, 100, day(30)); extra.push(await mint(who)); }
+  fetchLog = [];
+
+  const first = await jget("/admin/refresh?after=0&batch=1");
+  const TOTAL = first.total;
+  ok(TOTAL >= 8, `the book has ${TOTAL} checkable customers — more than one page`);
+  ok(first.checked === 6 && first.remaining === TOTAL - 6 && first.partial === true,
+    `one page checks one batch and admits the rest is pending (got ${JSON.stringify({ c: first.checked, r: first.remaining, p: first.partial })})`);
+  ok(first.next === 6, `…and hands back the offset to continue from (next=${first.next})`);
+  ok(first.total === TOTAL && first.checked < first.total, "checked counts THIS call, total counts the book");
+
+  const seen = (first.results || []).slice();
+  let after = first.next, guard = 0, last = first;
+  while (after) {
+    if (++guard > 40) break;
+    last = await jget("/admin/refresh?after=" + after + "&batch=1");
+    seen.push(...(last.results || []));
+    after = last.next;
+  }
+  ok(guard <= 40, `the sweep converged in ${guard + 1} page(s)`);
+  ok(seen.length === TOTAL, `every customer was checked exactly once across pages (${seen.length}/${TOTAL})`);
+  ok(new Set(seen.map((r) => r.token)).size === seen.length, "no customer was checked twice by the paging");
+  ok(last.remaining === 0 && last.partial === false && last.next === null, "the final page reports the book as done");
+  const oks = seen.filter((t) => t.ok === true).length;
+  ok(fetchLog.length >= oks && fetchLog.length <= oks * 3,
+    `one supplier call per checked customer, retries bounded (${fetchLog.length} calls for ${oks} checkable rows)`);
+
+  // A page with no time left must come back honestly instead of being killed.
+  // The panel is made slow AND signal-aware: fetchSubscription bounds each row by
+  // AbortSignal.timeout(what is left of the request), so a stub that ignored the
+  // signal would prove nothing about that bound.
+  const fast = globalThis.fetch;
+  globalThis.fetch = async (u, init) => {
+    await new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error("abort-test: panel too slow")), 4000);
+      const sig = init && init.signal;
+      if (sig) { if (sig.aborted) { clearTimeout(t); reject(new Error("aborted")); return; } sig.addEventListener("abort", () => { clearTimeout(t); reject(new Error("aborted")); }); }
+    });
+    return fast(u, init);
+  };
+  const t0 = Date.now();
+  const tight = await jget("/admin/refresh?after=0&budget=1600");
+  const ms = Date.now() - t0;
+  globalThis.fetch = fast;
+  ok(ms < 3500, `a 1.6 s budget returned in ${ms} ms — it did not wait for a 4 s panel`);
+  ok(tight.failed === 6 && tight.checked === 6, `rows it could not finish are reported as failures, not swallowed (${JSON.stringify({ c: tight.checked, f: tight.failed })})`);
+  ok(tight.remaining === TOTAL - 6 && tight.partial === true, "…and the rest of the book stays queued, so nothing is silently skipped");
+
+  // Garbage or out-of-range cursors cannot corrupt the sweep.
+  const junk = await jget("/admin/refresh?after=abc&batch=zz");
+  ok(junk.offset === 0 && junk.checked > 0, `a non-numeric cursor starts at the top, not at NaN (${JSON.stringify({ o: junk.offset, c: junk.checked })})`);
+  const over = await jget("/admin/refresh?after=99999");
+  ok(over.checked === 0 && over.remaining === 0 && over.partial === false, "an offset past the end is an empty page, not an error");
+  const huge = await jget("/admin/refresh?budget=999999");
+  ok(huge.checked === TOTAL, "an absurd budget is clamped to the platform-safe maximum, not honoured");
+
+  const j2 = await jget("/admin/refresh?after=0&batch=1");
+  const j3 = await jget("/admin/refresh?after=6&batch=1");
+  ok(j2.checked + j3.checked <= TOTAL, "pages report disjoint slices of the book");
+  ok(j2.updated === 6 && j3.updated > 0, `each page counts its own updates (${j2.updated} + ${j3.updated})`);
+
+  // Paging is only safe if the pages are not replayed from the edge cache: a
+  // cached "after=6" would hand back "after=0" a second time and the sweep would
+  // never reach the end of the book. Netlify's [[headers]] rules cannot express
+  // this (they never apply to a function response), so it must come from json().
+  for (const path of ["/admin", "/admin/dashboard.json", "/admin/health", "/admin/refresh?after=0&batch=1", "/diag"]) {
+    const r = await get(path);
+    const cc = r.headers.get("cache-control");
+    ok(cc && cc.includes("no-store"), `${path.split("?")[0]} answers with Cache-Control: no-store (got ${JSON.stringify(cc)})`);
+  }
 }
 
 console.log("\n" + "─".repeat(70));
