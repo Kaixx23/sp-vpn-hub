@@ -15,13 +15,18 @@ import {
   setBackend as storeSetBackend,
   backend as storeBackend,
 } from "./token-store.js";
-import { dashboardPage, summarise } from "./dashboard.js";
+import { dashboardPage, summarise, isSystemGeneratedRow, cycleMonths } from "./dashboard.js";
+import { customerType, validCustomerType, supplierKey, supplierAccounts, resolveCustomerLink, validPaidUntil } from "./customer-accounts.js";
+import { sharedUsersReport, sharedUsersForToken } from "./shared-users.js";
+import { PLAN_CATALOG, profitOf } from "./plans.js";
+import { checkCustomerRow, usageKind, usageMessage } from "./renewal.js";
 import { runRemindersFromEnv } from "./reminders.js";
 import {
   hasBeenSent as storeHasBeenSent,
   markSent as storeMarkSent,
   listReminders as storeListReminders,
 } from "./token-store.js";
+import { generateQrSvg, qrMakerPage } from "./qr.js";
 
 // ---------------- translation ----------------
 const INFO_PREFIX = [
@@ -800,6 +805,8 @@ input[type=submit]{width:100%;margin-top:14px;background:linear-gradient(90deg,#
 .dim{color:var(--dim);font-size:12px;margin-top:14px;text-align:center;line-height:1.6}
 .ok{color:var(--green);font-size:13px;text-align:center;margin-top:8px;font-weight:600}
 .row{border-top:1px solid var(--line);margin-top:16px;padding-top:14px}
+.qr-wrap{background:#fff;border-radius:12px;padding:14px;margin:12px 0;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.qr-wrap svg{width:180px;height:180px;margin:0 auto;display:block}
 .msg{font-size:13px;color:#cdd8e8;background:var(--card2);border-radius:10px;padding:12px;line-height:1.65;white-space:pre-wrap}
 .steps{margin-top:16px;font-size:14px;line-height:1.85;color:#cbd5e1}`;
 
@@ -815,7 +822,8 @@ else{var x=document.createElement('textarea');x.value=t;document.body.appendChil
 function cm(k,ok){var el=document.getElementById(k);el.style.display='block';var t=el.textContent;
 function d(){document.getElementById(ok).style.display='block'}
 if(navigator.clipboard){navigator.clipboard.writeText(t).then(d)}
-else{var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();document.execCommand('copy');x.remove();d()}}</script>`;
+else{var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();document.execCommand('copy');x.remove();d()}}
+function tqr(id){var el=document.getElementById(id);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'block':'none'}</script>`;
 
 const homePage = () => page("Check your data", `
 <h1>⚡ SP VPN — check your data</h1>
@@ -825,7 +833,7 @@ const homePage = () => page("Check your data", `
 <textarea name="link" placeholder="Paste your subscription link here"></textarea>
 <input type="submit" value=" Show my quota">
 </form>
-<div class="steps">1️⃣ Paste the link your seller gave you<br>2️⃣ Tap <b>Show my quota</b><br>3️⃣ You'll get <b>your own personal link</b> — save it. Next time you just tap it.</div>`);
+<div class="steps">1️⃣ Paste the link your seller gave you<br>2️⃣ Tap <b>Show my quota</b><br>3️⃣ You'll get <b>your own personal link &amp; QR code</b> — save it. Next time you just tap it.<br><br>📱 Need to make a QR code? <a href="/qr" style="color:var(--blue)">Open QR Maker</a></div>`);
 
 const formPage = (title, sub, action, btn) => page(title, `
 <h1>⚡ ${title}</h1>
@@ -837,7 +845,7 @@ const formPage = (title, sub, action, btn) => page(title, `
 <textarea name="links" placeholder="https://provider.example/api/sub?token=…"></textarea>
 <input type="submit" value="${btn}">
 </form>
-<div class="steps">For each link you get: ✨ the ONE link (any app) · 🔗 live quota link · 📋 ready-to-send message</div>`);
+<div class="steps">For each link you get: ✨ ONE link (all apps) · 📱 QR Code (scan &amp; go) · 🔗 live quota link · 📋 ready-to-send message · <a href="/qr" style="color:var(--blue)">QR Maker</a></div>`);
 
 const errorPage = (msg) => page("Error", `
 <h1>⚡ SP VPN</h1>
@@ -851,9 +859,7 @@ function quotaBody(host, tok, brand, status, proxies, linksTotal) {
   const bHtml = escHtml(safeBrand(brand));
   const s = quotaSummary(status);
   const one = `${host}/all/${encodeURIComponent(brand)}?t=${encodeURIComponent(tok)}`;
-  // Explicit YAML link: works even when the Clash app sends a User-Agent we
-  // don't recognise (Clash Mi, mihomo-party, generic CFNetwork/okhttp shells).
-  const sub = `${one}&fmt=yaml`;
+  const sub = `${host}/sub/${encodeURIComponent(tok)}?brand=${encodeURIComponent(brand)}`;
   let quota;
   if (s) {
     const pct = Math.min(100, ((s.tot - s.left) / s.tot) * 100);
@@ -875,15 +881,37 @@ function quotaBody(host, tok, brand, status, proxies, linksTotal) {
 ${quota}
 <div class="dim" style="text-align:center;margin-top:10px">${proxies.length} of ${linksTotal} nodes ready</div>
 <div class="me"><div class="t">🔗 <b>YOUR personal link</b> — save it:</div><div class="u" id="pl">${one}</div></div>
-<button class="btn gray" style="margin-top:8px" onclick="cp('pl','cop1')">📋 Copy my personal link</button>
+<div style="display:flex;gap:8px">
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="cp('pl','cop1')">📋 Copy personal link</button>
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="tqr('qr_pl')">📱 Show QR</button>
+</div>
 <div class="ok" id="cop1" style="display:none">✅ copied</div>
+<div id="qr_pl" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "Personal Quota Link" })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan to open your live data page</div>
+</div>
+
 <div class="me" style="margin-top:14px"><div class="t">✨ <b>ONE VPN LINK — all apps</b> (Shadowrocket / v2rayNG / Clash / Hiddify — auto-detects, named "${bHtml}", English node names):</div><div class="u" id="al">${one}</div></div>
-<button class="btn green" style="margin-top:8px" onclick="cp('al','copa')">📋 Copy the ONE link</button>
+<div style="display:flex;gap:8px">
+<button class="btn green" style="flex:1;margin-top:8px" onclick="cp('al','copa')">📋 Copy ONE link</button>
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="tqr('qr_al')">📱 Show QR</button>
+</div>
 <div class="ok" id="copa" style="display:none">✅ copied — that's all your client needs</div>
-<div class="me" style="margin-top:14px"><div class="t">🔄 <b>Clash / Clash Mi / mihomo link</b> (always YAML, auto-updates) — Profiles → + → add URL:</div><div class="u" id="su">${sub}</div></div>
-<div class="dim" style="margin-top:6px">On a Chinese ISP? add <b>&amp;cn=1</b> to that link for the CN-optimized rules.</div>
-<button class="btn gray" style="margin-top:8px" onclick="cp('su','cop2')">📋 Copy Clash link</button>
+<div id="qr_al" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "ONE VPN Link" })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan in Shadowrocket, Clash, or v2rayNG</div>
+</div>
+
+<div class="me" style="margin-top:14px"><div class="t">🔄 <b>Clash auto-update</b> (Verge/Fugu): Profiles → New → remote URL:</div><div class="u" id="su">${sub}</div></div>
+<div style="display:flex;gap:8px">
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="cp('su','cop2')">📋 Copy Clash link</button>
+<button class="btn gray" style="flex:1;margin-top:8px" onclick="tqr('qr_su')">📱 Show QR</button>
+</div>
 <div class="ok" id="cop2" style="display:none">✅ copied</div>
+<div id="qr_su" class="qr-wrap" style="display:none">
+  ${generateQrSvg(sub, { title: "Clash Auto-Update Link" })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan in Clash Meta / Verge</div>
+</div>
 ${COPY_JS}`;
 }
 
@@ -898,12 +926,17 @@ function rebrandResults(host, brand, rows) {
 ${r.summary ? `<div class="dim" style="text-align:center">🚀 ${r.summary.left.toFixed(2)} GB left · expires ${r.summary.exp}</div>` : ""}
 <div class="me"><div class="t">✨ <b>ONE LINK — works in all apps</b> (Shadowrocket, v2rayNG, NekoBox, Hiddify, Clash):</div><div class="u" id="al${n}">${one}</div></div>
 <div class="me"><div class="t">🔗 <b>Client's private quota</b> link (live GB, auto-refresh):</div><div class="u" id="pl${n}">${one}</div></div>
-<div style="display:flex;gap:8px">
-<button class="btn green" style="flex:1;margin-top:8px" onclick="cp('al${n}','cosp${n}')">📋 Copy one link</button>
-<button class="btn gray" style="flex:1;margin-top:8px" onclick="cp('pl${n}','cosp2${n}')">📋 Copy quota link</button>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn green" style="flex:1;min-width:120px;margin-top:8px" onclick="cp('al${n}','cosp${n}')">📋 Copy one link</button>
+<button class="btn gray" style="flex:1;min-width:120px;margin-top:8px" onclick="tqr('qr_al${n}')">📱 Show QR</button>
+<button class="btn gray" style="flex:1;min-width:120px;margin-top:8px" onclick="cp('pl${n}','cosp2${n}')">📋 Copy quota link</button>
 </div>
 <div class="ok" id="cosp${n}" style="display:none">✅ copied</div>
-<div class="ok" id="cosp2${n}" style="display:none">✅ copied</div></div>`);
+<div class="ok" id="cosp2${n}" style="display:none">✅ copied</div>
+<div id="qr_al${n}" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "ONE Link " + n })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan with Shadowrocket, Clash, or v2rayNG</div>
+</div></div>`);
   });
   parts.push(COPY_JS);
   return page(`Rebranded as ${bHtml}`, parts.join(""));
@@ -922,7 +955,7 @@ function toolResults(host, brand, rows) {
 
 1) VPN — add this ONE link in your app (Shadowrocket / v2rayNG / NekoBox / Hiddify / Clash — auto-detects, arrives named "${bMsg}"):
 ${one}
-   Clash users (Clash Mi / Verge / FlClash / ClashX) — use this instead, it always returns YAML and auto-updates:
+   Clash (Verge/Fugu) users — use this instead, it auto-updates:
 ${sub}
 
 2) Check your data anytime (live):
@@ -932,11 +965,18 @@ If your plan renews: open ${one} and paste your new subscription link.`;
     parts.push(`<div class="row"><b>Link ${n} — ${r.proxies.length} nodes</b>
 ${r.summary ? `<div class="dim" style="text-align:center">🚀 ${r.summary.left.toFixed(2)} GB left · expires ${r.summary.exp}</div>` : ""}
 <div class="me"><div class="t">✨ <b>ONE LINK — all apps</b>:</div><div class="u" id="al${n}">${one}</div></div>
-<div class="me"><div class="t">🔄 <b>Clash / Clash Mi</b> link (always YAML, auto-updates):</div><div class="u" id="su${n}">${sub}</div></div>
+<div class="me"><div class="t">🔄 <b>Clash auto-update</b> link:</div><div class="u" id="su${n}">${sub}</div></div>
 <div class="me"><div class="t">🔗 <b>Client's private quota</b> link:</div><div class="u" id="pl${n}">${one}</div></div>
-<button class="btn" onclick="cm('m${n}','copm${n}')">📋 Copy ready-to-send message</button>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn" style="flex:2;min-width:140px;margin-top:8px" onclick="cm('m${n}','copm${n}')">📋 Copy message</button>
+<button class="btn gray" style="flex:1;min-width:100px;margin-top:8px" onclick="tqr('qr_tool${n}')">📱 Show QR</button>
+</div>
 <div class="msg" id="m${n}" style="display:none">${msg.replace(/</g, "&lt;")}</div>
-<div class="ok" id="copm${n}" style="display:none">✅ message copied — send it to your client</div></div>`);
+<div class="ok" id="copm${n}" style="display:none">✅ message copied — send it to your client</div>
+<div id="qr_tool${n}" class="qr-wrap" style="display:none">
+  ${generateQrSvg(one, { title: "ONE Link " + n })}
+  <div style="color:#334155;font-size:12px;font-weight:600;margin-top:6px">Scan with Shadowrocket, Clash, or v2rayNG</div>
+</div></div>`);
   });
   parts.push(COPY_JS);
   return page(`${bHtml} — client packs`, parts.join(""));
@@ -979,6 +1019,11 @@ async function collectRows(brand, linksText, host) {
 // ---------------- data (with 5-min cache to protect the supplier) ----------------
 const _cache = new Map();
 const TTL = 300000;
+
+// Health-report cache: an open dashboard polls /admin/health, and the report
+// itself fetches the supplier — cache it so polling cannot hammer the panel.
+const HEALTH_TTL_MS = 120000;
+let _healthCache = { t: 0, report: null };
 
 async function getDecoded(tok) {
   // Token state is resolved on EVERY request so revocation takes effect
@@ -1026,59 +1071,48 @@ const plainErr = (msg, code = 502) => new Response(msg + "\n", {
 
 // Standard subscription headers (subconverter spec): Clash Verge / v2rayNG show
 // live quota + expiry next to the profile, and "home page" links to the quota page.
-const json = (obj, code = 200) =>
+const json = (obj, code = 200, headers = {}) =>
   new Response(JSON.stringify(obj, null, 2) + "\n", {
     status: code,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: { "Content-Type": "application/json; charset=utf-8", ...headers },
   });
 // The admin output must never hand back a supplier URL in full — that is the
 // exact secret this whole change exists to protect. Host only.
-// Recheck one saved supplier subscription and persist its latest renewal and
-// quota state. The delta compares this check with the immediately previous
-// check; the first check has no comparison value.
-async function refreshCustomer(row) {
-  const previousExpiry = row.supplier_expires || null;
-  const previousUsed = row.used_gb == null ? null : Number(row.used_gb);
-  const { status } = await fetchSubscription(row.supplier_url);
-  const s = quotaSummary(status);
-  if (!s) throw new Error("supplier did not return quota or expiry information");
-  const used = Math.round((s.up + s.down) * 100) / 100;
-  const usageDelta = previousUsed == null ? null : Math.round((used - previousUsed) * 100) / 100;
-  const updated = await storeUpdate(row.token, {
-    supplier_expires: s.exp,
-    total_gb: s.tot,
-    used_gb: used,
-    usage_delta_gb: usageDelta,
-    checked_at: new Date().toISOString(),
-  });
-  return {
-    customer: redact(updated),
-    previousExpiry,
-    expiry: s.exp,
-    expiryChanged: previousExpiry !== null && previousExpiry !== s.exp,
-    previousUsedGb: previousUsed,
-    usedGb: used,
-    usageDeltaGb: usageDelta,
-  };
-}
-
-const redact = (r) => ({
+const generatedKind = (r) => r.label === "quota-page" ? "quota-page" : r.label === "seller-tool" ? "seller-tool" : null;
+const redact = (r, accounts = supplierAccounts([r])) => ({
   token: r.token,
   label: r.label,
+  system_generated: isSystemGeneratedRow(r),
+  system_kind: isSystemGeneratedRow(r) ? generatedKind(r) : null,
   customer: r.customer || null,
+  customer_type: customerType(r),
+  supplier_account: accounts.get(supplierKey(r.supplier_url)) || null,
   plan: r.plan || null,
   price: r.price ?? null,
   currency: r.currency || null,
   billing_cycle: r.billing_cycle || null,
   paid_until: r.paid_until || null,
   notes: r.notes || null,
+  // The reseller's login on the supplier panel for this customer — used to
+  // renew the account. Shown only on /admin routes.
+  account_email: r.account_email || null,
+  account_password: r.account_password || null,
   supplier_expires: r.supplier_expires || null,
   total_gb: r.total_gb ?? null,
   used_gb: r.used_gb ?? null,
+  // Usage movement since the immediately previous SUCCESSFUL check.
+  // usage_delta_gb is null until a customer has been checked twice — the
+  // dashboard renders that as "no comparison yet" rather than "no new usage".
+  prev_used_gb: r.prev_used_gb ?? null,
   usage_delta_gb: r.usage_delta_gb ?? null,
+  usage_change: usageKind(r.usage_delta_gb ?? null),
+  usage_message: usageMessage(r.usage_delta_gb ?? null),
   checked_at: r.checked_at || null,
   revoked: !!r.revoked,
   created_at: r.created_at,
+  // price - catalogue cost of the plan (null when the plan is unknown).
+  // Anonymous quota/tool links are not customers, so they never carry profit.
+  profit: isSystemGeneratedRow(r) ? null : profitOf(r),
   supplier_host: (() => {
     try { return new URL(r.supplier_url).host; } catch (e) { return "direct-node-list"; }
   })(),
@@ -1187,7 +1221,7 @@ const yamlOpts = (url, skipped) => ({
 export default {
   async fetch(request, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
-    await storeInit().catch(() => {}); // a backend hiccup must not 500 every route
+    await storeInit(env).catch(() => {}); // a backend hiccup must not 500 every route
     // m0 is declared here rather than down with the route variables: the admin
     // routes use it, and a let-declaration further down would be hoisted into
     // a temporal dead zone.
@@ -1205,24 +1239,103 @@ export default {
           if (!rows.length) return html(errorPage("No valid links found — paste the subscription URL your supplier gave you (starts with http or https)"));
           return html((path === "/tool" ? toolResults : rebrandResults)(host, brand, rows));
         }
-        if (path === "/admin/mint") {
+        if (path === "/admin/inspect") {
+          // The dashboard's "paste a link, we fill the form" helper: fetch the
+          // subscription once and return everything derivable from it — quota,
+          // expiry, node count. The supplier URL itself never goes back out.
           const link = (data.link || "").trim();
-          const label = (data.label || "").trim().slice(0, 200) || null;
           if (!/^(https?:\/\/|[a-z0-9+.-]+:\/\/)/i.test(link)) {
-            return json({ error: "link must be a subscription URL or node link" }, 400);
+            return json({ ok: false, error: "link must be a subscription URL or node link" }, 400);
           }
+          try {
+            if (!/^https?:\/\//i.test(link)) {
+              // Direct node link(s) — no panel behind them, so no quota/expiry.
+              const ns = link.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+              const proxies = ns.map(parseNode).filter(Boolean);
+              return json({ ok: true, direct: true, nodes: ns.length, validNodes: proxies.length });
+            }
+            const { status, links } = await fetchSubscription(link);
+            const s = quotaSummary(status);
+            const used = s ? Math.round((s.up + s.down) * 100) / 100 : null;
+            return json({
+              ok: true,
+              nodes: links.length,
+              validNodes: links.map(parseNode).filter(Boolean).length,
+              expires: s ? s.exp : null,
+              total_gb: s ? s.tot : null,
+              used_gb: used,
+              left_gb: s ? Math.round(s.left * 100) / 100 : null,
+              used_pct: s && s.tot ? Math.round(((s.up + s.down) / s.tot) * 1000) / 10 : null,
+              // Matched plan price from the catalogue (null when the quota
+              // is not a known plan) so the form can auto-fill pricing.
+              pricing: s && PLAN_CATALOG[s.tot] ? PLAN_CATALOG[s.tot] : null,
+            });
+          } catch (e) {
+            return json({ ok: false, error: String(e.message || e) }, 502);
+          }
+        }
+        if (path === "/admin/shared-link") {
+          try {
+            const source = resolveCustomerLink(data.link, host, await storeList(), "shared");
+            return json({ account: source.account });
+          } catch (e) {
+            return json({ error: e.status ? e.message : "Could not look up the supplier account." }, e.status || 500);
+          }
+        }
+        if (path === "/admin/shared-users") {
+          // Discovery is read-only and GET-based; never accept a POST body here.
+          return json({ error: "Shared-user discovery supports GET only." }, 405, { Allow: "GET", "Cache-Control": "no-store" });
+        }
+        if (path === "/admin/mint") {
+          const type = data.customer_type || "individual";
+          if (!validCustomerType(type)) return json({ error: "customer_type must be individual or shared" }, 400);
+          if (data.paid_until) return json({ error: "Create the customer first, then use Pay to record their payment." }, 400);
+          const label = (data.label || "").trim().slice(0, 200) || null;
+          let source;
+          try { source = resolveCustomerLink(data.link, host, await storeList(), type); }
+          catch (e) { return json({ error: e.status ? e.message : "Could not look up the supplier account." }, e.status || 500); }
           const num = (v) => (v === "" || v === undefined || v === null ? null : Number(v));
           const txt = (v) => (v ? String(v).trim().slice(0, 200) : null);
-          const token = await storeMint(link, label, {
+          // Details detected up front by POST /admin/inspect (the dashboard's
+          // auto-fill). Stored at creation so the row shows live quota + expiry
+          // immediately, with no separate Refresh click. Strictly validated —
+          // junk fields are dropped, never stored.
+          const dateOnly = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "").trim()) ? String(v).trim() : null);
+          const gb = (v) => { const n = num(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+          const detected = {
+            supplier_expires: dateOnly(data.supplier_expires),
+            total_gb: gb(data.total_gb),
+            used_gb: gb(data.used_gb),
+          };
+          const hasDetected = detected.supplier_expires != null || detected.total_gb != null || detected.used_gb != null;
+          const token = await storeMint(source.supplierUrl, label, {
             customer: txt(data.customer),
+            customer_type: type,
+            supplier_account: type === "shared" ? source.sourceRow?.supplier_account || null : txt(data.supplier_account) || source.sourceRow?.supplier_account || null,
             plan: txt(data.plan),
             price: num(data.price),
             currency: txt(data.currency),
             billing_cycle: txt(data.billing_cycle),
-            paid_until: txt(data.paid_until),
             notes: txt(data.notes),
+            account_email: type === "shared" ? source.sourceRow?.account_email || null : txt(data.account_email),
+            account_password: type === "shared" ? source.sourceRow?.account_password || null : txt(data.account_password),
+            ...(hasDetected ? { ...detected, checked_at: new Date().toISOString() } : {}),
           });
           return json({ token, oneLink: `${host}/all/${encodeURIComponent(brand)}?t=${token}` });
+        }
+        if ((m0 = path.match(/^\/admin\/link\/([^/]+)$/)) && ["pay", "paid", "unpaid"].includes(url.searchParams.get("action"))) {
+          const t = m0[1];
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === t);
+          if (!cur) return json({ error: "unknown token" }, 404);
+          if (cur.revoked) return json({ error: "cannot record payment for a revoked customer" }, 400);
+          const unpaid = url.searchParams.get("action") === "unpaid";
+          const paidUntil = unpaid ? null : (data.paid_until || "").trim();
+          if (!unpaid && !validPaidUntil(paidUntil)) return json({ error: "Choose a valid paid-until date (today or later)." }, 400);
+          // Deliberately update ONE customer by token, not everyone on the
+          // supplier URL. Do not fetch the supplier or infer that they paid.
+          const updated = await storeUpdate(t, { paid_until: paidUntil });
+          return updated ? json({ ...redact(updated, supplierAccounts(rows)), ok: true, paid: !unpaid, customer: redact(updated, supplierAccounts(rows)) }) : json({ error: "unknown token" }, 404);
         }
         if (path === "/admin/reminders") {
           const out = await runRemindersFromEnv(env || {}, {
@@ -1232,14 +1345,34 @@ export default {
           return json(out);
         }
         if (path === "/admin/customer") {
+          if (data.paid_until !== undefined) return json({ error: "Use Pay to record a customer's payment." }, 400);
+          if (data.customer_type !== undefined && !validCustomerType(data.customer_type)) {
+            return json({ error: "customer_type must be individual or shared" }, 400);
+          }
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === data.token);
+          if (!cur) return json({ error: "unknown token" }, 404);
           const patchObj = {};
-          for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label"]) {
+          for (const k of ["customer", "customer_type", "plan", "currency", "billing_cycle", "notes", "label"]) {
             if (data[k] !== undefined) patchObj[k] = data[k] ? String(data[k]).trim().slice(0, 200) : null;
           }
           if (data.price !== undefined) patchObj.price = data.price === "" ? null : Number(data.price);
           if (data.revoked !== undefined) patchObj.revoked = data.revoked === "1";
-          const updated = await storeUpdate(data.token || "", patchObj);
-          return updated ? json(redact(updated)) : json({ error: "unknown token" }, 404);
+          // An account name belongs to the supplier link. Renaming it on the
+          // original customer also updates its shared customers, not billing.
+          if ((data.customer_type || customerType(cur)) === "individual") {
+            const accountPatch = {};
+            for (const key of ["supplier_account", "account_email", "account_password"]) {
+              if (data[key] !== undefined) accountPatch[key] = String(data[key]).trim().slice(0, 200) || null;
+            }
+            if (Object.keys(accountPatch).length) {
+              for (const row of rows.filter((r) => supplierKey(r.supplier_url) === supplierKey(cur.supplier_url))) {
+                await storeUpdate(row.token, accountPatch);
+              }
+            }
+          }
+          const updated = await storeUpdate(cur.token, patchObj);
+          return updated ? json(redact(updated, supplierAccounts(await storeList()))) : json({ error: "unknown token" }, 404);
         }
         if (path === "/") {
           const link = (data.link || "").trim();
@@ -1275,41 +1408,282 @@ export default {
       }
       if (path === "/admin/dashboard.json") {
         const rows = await storeList();
-        return json({ generated: new Date().toISOString(), stats: summarise(rows), customers: rows.map(redact) });
+        const accounts = supplierAccounts(rows);
+        // `store` names the active backend ("turso" | "sqlite-file" | "memory" |
+        // "d1") so a misconfigured deploy is visible from the dashboard itself:
+        // "memory" means TOKEN_STORE_URL was NOT picked up and links will not
+        // survive a cold start.
+                // `months` is the billing period the price covers (null = cannot be
+        // told), computed server-side so the table and the headline numbers can
+        // never disagree about what "3mo" meant.
+        return json({
+          generated: new Date().toISOString(),
+          store: storeBackend().name,
+          stats: summarise(rows),
+          customers: rows.map((r) => ({ ...redact(r, accounts), months: cycleMonths(r) })),
+        });
+      }
+      if (path === "/admin/health") {
+        // Live health of the whole pipeline: token store -> supplier -> the
+        // converter itself (end-to-end, fetched like a customer's app would).
+        // Cached 2 minutes so a polling dashboard cannot hammer the supplier.
+        // ?force=1 bypasses the cache.
+        const force = url.searchParams.get("force") === "1";
+        if (_healthCache.report && !force && Date.now() - _healthCache.t < HEALTH_TTL_MS) {
+          return json({ ..._healthCache.report, cached: true, age_ms: Date.now() - _healthCache.t });
+        }
+        const report = { generated: new Date().toISOString(), checks: {} };
+        let rows = [];
+        try {
+          const t0 = Date.now();
+          rows = await storeList();
+          report.checks.store = {
+            ok: true, ms: Date.now() - t0, backend: storeBackend().name,
+            customers: rows.filter((r) => !isSystemGeneratedRow(r)).length,
+            generated: rows.filter(isSystemGeneratedRow).length,
+            active: rows.filter((r) => !r.revoked && !isSystemGeneratedRow(r)).length,
+          };
+        } catch (e) {
+          report.checks.store = { ok: false, error: String(e.message || e) };
+        }
+        if (report.checks.store.ok) {
+          const active = rows.filter((r) => !r.revoked && !isSystemGeneratedRow(r));
+          // One representative supplier link per unique supplier host.
+          const byHost = new Map();
+          for (const r of active) {
+            try { const h = new URL(r.supplier_url).host; if (!byHost.has(h)) byHost.set(h, r); } catch (e) {}
+          }
+          report.checks.supplier = { ok: true, hosts: {} };
+          await Promise.all([...byHost.entries()].slice(0, 5).map(async ([h, r]) => {
+            const t0 = Date.now();
+            try {
+              const { status, links } = await fetchSubscription(r.supplier_url);
+              const s = quotaSummary(status);
+              report.checks.supplier.hosts[h] = {
+                ok: true, ms: Date.now() - t0, nodes: links.length,
+                quota_parsed: !!s, expires: s ? s.exp : null,
+              };
+            } catch (e) {
+              report.checks.supplier.ok = false;
+              report.checks.supplier.hosts[h] = { ok: false, ms: Date.now() - t0, error: String(e.message || e) };
+            }
+          }));
+          // Converter end-to-end: fetch our own one-link exactly like a
+          // customer's VPN app does — exercises worker -> supplier -> cache ->
+          // transform -> base64, the full path.
+          const target = active[0];
+          if (target) {
+            const t0 = Date.now();
+            try {
+              const one = `${host}/all/${encodeURIComponent(target.label || "SP VPN")}?t=${encodeURIComponent(target.token)}`;
+              const { status, links } = await fetchSubscription(one);
+              report.checks.converter = {
+                ok: true, ms: Date.now() - t0, nodes: links.length,
+                quota_parsed: !!quotaSummary(status),
+              };
+            } catch (e) {
+              report.checks.converter = { ok: false, ms: Date.now() - t0, error: String(e.message || e) };
+            }
+          } else {
+            report.checks.converter = { ok: true, skipped: "no active customers yet" };
+          }
+        }
+        // Is this deployment the build the README describes? A failed deploy
+        // looks perfectly alive: /healthz answers 200 while serving the old
+        // CN-only profile every Clash customer times out on. So the dashboard's
+        // own health check asks the RUNNING build what its profile policy is,
+        // computed by rendering buildYaml on a fixture — it cannot drift out of
+        // sync with the generator the way a hardcoded "version" string would.
+        report.checks.profile = { ...profileFingerprint(), label: profileHeader() };
+        const c = report.checks;
+        report.ok = !!(c.store && c.store.ok && c.supplier && c.supplier.ok && c.converter && c.converter.ok
+          && (!c.profile || c.profile.ok));
+        report.level = !(c.store && c.store.ok) || !(c.converter && c.converter.ok) ? "down"
+          : !(c.supplier && c.supplier.ok) || !(c.profile && c.profile.ok) ? "degraded" : "ok";
+        report.note = "Supplier and converter checks run from our server — they prove the pipeline works end-to-end. They cannot measure China-to-node latency: VPN traffic never flows through this server.";
+        _healthCache = { t: Date.now(), report };
+        return json(report);
+      }
+      if (path === "/admin/compare") {
+        // Diagnostics — byte-diff the ORIGINAL supplier subscription against two
+        // converter one-links. `a` and `b` must be https://*.netlify.app URLs;
+        // the original supplier URL is recovered from B's ?t= base64 token (the
+        // sp-global link format embeds it). Returns comparison facts only.
+        const a = url.searchParams.get("a") || "";
+        const b = url.searchParams.get("b") || "";
+        if (!/^https:\/\/[a-z0-9-]+\.netlify\.app\//i.test(a) || !/^https:\/\/[a-z0-9-]+\.netlify\.app\//i.test(b)) {
+          return json({ error: "a and b must be https://<site>.netlify.app/… URLs" }, 400);
+        }
+        let supplier = "";
+        try { supplier = b64d(new URL(b).searchParams.get("t") || ""); } catch (e) { supplier = ""; }
+        if (!/^[a-z0-9+.-]+:\/\//i.test(supplier)) {
+          return json({ error: "could not recover the supplier URL from b's token (expected the sp-global base64 link format)" }, 400);
+        }
+        const grab = async (u) => {
+          const t0 = Date.now();
+          try {
+            const { status, links } = await fetchSubscription(u);
+            return { ok: true, ms: Date.now() - t0, status, links };
+          } catch (e) { return { ok: false, ms: Date.now() - t0, error: String(e.message || e) }; }
+        };
+        // Two original fetches: if the supplier rotates nodes between requests,
+        // that — not the converters — explains any set differences.
+        const [o, ra, rb, o2] = await Promise.all([grab(supplier), grab(a), grab(b), grab(supplier)]);
+
+        const uri = (l) => l.split("#")[0].toLowerCase(); // case-insensitive, as apps parse it
+        const setName = (l) => safeDecode(l.split("#")[1] || "");
+        const hostOf = (u) => String(u.split("@")[1] || u).split(/[?:]/)[0];
+        const set = (links) => new Set(links.map(uri));
+        const base = {
+          fetched: {
+            original: { ok: o.ok, ms: o.ms, nodes: o.links ? o.links.length : 0, status: o.status || o.error },
+            a: { ok: ra.ok, ms: ra.ms, nodes: ra.links ? ra.links.length : 0, status: ra.status || ra.error },
+            b: { ok: rb.ok, ms: rb.ms, nodes: rb.links ? rb.links.length : 0, status: rb.status || rb.error },
+          },
+        };
+        if (!(o.ok && ra.ok && rb.ok)) return json(base);
+
+        const oSet = set(o.links), aSet = set(ra.links), bSet = set(rb.links);
+        const diff = (xSet) => ({
+          identical: [...oSet].filter((u) => xSet.has(u)).length + "/" + oSet.size,
+          missing_from_it: [...oSet].filter((u) => !xSet.has(u)).map(hostOf).slice(0, 12),
+          extra_in_it: [...xSet].filter((u) => !oSet.has(u)).map(hostOf).slice(0, 12),
+        });
+        const aMap = new Map(ra.links.map((l) => [uri(l), l]));
+        const bMap = new Map(rb.links.map((l) => [uri(l), l]));
+        const perfect =
+          [...oSet].every((u) => aSet.has(u)) && aSet.size === oSet.size &&
+          [...oSet].every((u) => bSet.has(u)) && bSet.size === oSet.size;
+        return json({
+          ...base,
+          counts: { original: o.links.length, a: ra.links.length, b: rb.links.length },
+          a_vs_original: diff(aSet),
+          b_vs_original: diff(bSet),
+          a_vs_b: {
+            identical_sets: aSet.size === bSet.size && [...aSet].every((u) => bSet.has(u)),
+            only_in_a: [...aSet].filter((u) => !bSet.has(u)).map(hostOf).slice(0, 12),
+            only_in_b: [...bSet].filter((u) => !aSet.has(u)).map(hostOf).slice(0, 12),
+            same_order: ra.links.map(uri).join() === rb.links.map(uri).join(),
+          },
+          supplier_rotation: o2.ok
+            ? {
+                nodes_second_fetch: o2.links.length,
+                uri_diffs_between_two_original_fetches:
+                  [...oSet].filter((u) => !set(o2.links).has(u)).length +
+                  [...set(o2.links)].filter((u) => !oSet.has(u)).length,
+              }
+            : { error: o2.error },
+          name_samples: o.links.slice(0, 8).map((l) => ({
+            original: setName(l),
+            a: aMap.has(uri(l)) ? setName(aMap.get(uri(l))) : "(missing)",
+            b: bMap.has(uri(l)) ? setName(bMap.get(uri(l))) : "(missing)",
+          })),
+          verdict: perfect
+            ? "✅ both converters pass the original nodes through byte-identically — same servers, ports, UUIDs, REALITY keys; only display names are rebranded"
+            : "⚠️ differences found — see missing/extra lists (check supplier_rotation: if the source itself changes between fetches, rotation explains it)",
+          note: "VPN traffic never flows through either converter — apps connect directly to the node servers. The subscription file is downloaded once; it cannot change node speed or cause timeouts.",
+        });
       }
       if (path === "/admin/refresh") {
-        const rows = (await storeList()).filter((r) => !r.revoked);
+        const rows = (await storeList()).filter((r) => !r.revoked && !isSystemGeneratedRow(r));
         // Bounded parallelism: the supplier panel must not see a burst of 50
         // concurrent fetches just because you opened the dashboard.
         const CONC = 6;
         let updated = 0, failed = 0;
+        // Index-assigned (not pushed) so the report order matches the table
+        // order rather than whichever supplier answered first.
+        const results = new Array(rows.length);
         for (let i = 0; i < rows.length; i += CONC) {
           const batch = rows.slice(i, i + CONC);
-          await Promise.all(batch.map(async (r) => {
-            try {
-              await refreshCustomer(r);
-              updated++;
-            } catch (e) {
+          await Promise.all(batch.map(async (r, k) => {
+            // Same single-customer code path as the per-row Renew / Check, so
+            // the global refresh calculates and persists the usage delta for
+            // every customer it successfully checks. A customer whose supplier
+            // fails keeps its previous values AND its previous delta.
+            const out = await checkCustomerRow(r, {
+              fetchSubscription, quotaSummary, updateRow: storeUpdate,
+            });
+            const base = { token: r.token, customer: r.customer || r.label || null };
+            if (!out.ok) {
               failed++;
+              results[i + k] = { ...base, ok: false, error: out.error };
+              return;
             }
+            updated++;
+            results[i + k] = {
+              ...base,
+              ok: true,
+              renewed: out.expiryChanged,
+              marked_paid: out.markedPaid,
+              paid_until: out.paidUntil,
+              supplier_expires: out.row.supplier_expires ?? null,
+              used_gb: out.row.used_gb ?? null,
+              usage_delta_gb: out.usageDeltaGb,
+              usage_change: out.usageKind,
+              message: out.message,
+              usage_message: out.usageMessage,
+            };
           }));
         }
-        return json({ checked: rows.length, updated, failed });
+        const done = results.filter(Boolean);
+        return json({
+          checked: rows.length,
+          updated,
+          failed,
+          renewed: done.filter((x) => x.ok && x.renewed).length,
+          marked_paid: done.filter((x) => x.ok && x.marked_paid).length,
+          results: done,
+        });
       }
 
       // ---- link lifecycle ----
       if ((m0 = path.match(/^\/admin\/link\/([^/]+)$/))) {
         const t = m0[1];
         const action = url.searchParams.get("action");
-        if (action === "renew") {
-          const cur = (await storeList()).find((r) => r.token === t);
-          if (!cur) return json({ error: "unknown token" }, 404);
-          if (cur.revoked) return json({ error: "cannot check a revoked customer" }, 400);
-          try {
-            return json(await refreshCustomer(cur));
-          } catch (e) {
-            return json({ error: e.message || "supplier check failed" }, 502);
-          }
+        if (["pay", "paid", "unpaid"].includes(action)) return json({ error: "Use POST to update a payment." }, 405, { Allow: "POST" });
+        if (action === "check" || action === "renew") {
+          // "Renew / Check" — you renewed this ONE customer with the supplier
+          // by hand; this verifies it landed. It re-reads only this customer's
+          // saved subscription and persists what the supplier now reports.
+          // It never buys, renews or changes anything on the supplier side.
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === t);
+          if (!cur) return json({ ok: false, token: t, error: "unknown token" }, 404);
+          const out = await checkCustomerRow(cur, {
+            fetchSubscription, quotaSummary, updateRow: storeUpdate,
+          });
+          // A failed check writes nothing — the row keeps its previous expiry,
+          // quota and usage delta.
+          if (!out.ok) return json({ ok: false, token: t, error: out.error }, out.code);
+          return json({
+            ok: true,
+            token: t,
+            renewed: out.expiryChanged,
+            expiryChanged: out.expiryChanged,
+            expiry: out.row.supplier_expires ?? null,
+            previousExpiry: out.previous.supplier_expires,
+            usageDeltaGb: out.usageDeltaGb,
+            usedGb: out.row.used_gb ?? null,
+            previousUsedGb: out.previous.used_gb,
+            expiry_changed: out.expiryChanged,
+            marked_paid: out.markedPaid,
+            paid_until: out.paidUntil,
+            previous_paid_until: out.previous.paid_until,
+            previous_expiry: out.previous.supplier_expires,
+            supplier_expires: out.row.supplier_expires ?? null,
+            previous_used_gb: out.previous.used_gb,
+            used_gb: out.row.used_gb ?? null,
+            total_gb: out.row.total_gb ?? null,
+            usage_delta_gb: out.usageDeltaGb,
+            usage_change: out.usageKind,
+            checked_at: out.row.checked_at || null,
+            message: out.message,
+            usage_message: out.usageMessage,
+            // Redacted so the refreshed row can be merged straight into the
+            // dashboard table without a full reload — and without ever
+            // carrying the supplier URL.
+            customer: redact(out.row, supplierAccounts(rows)),
+          });
         }
         if (action === "rotate") {
           const cur = (await storeList()).find((r) => r.token === t);
@@ -1317,7 +1691,9 @@ export default {
           // Carry the customer's details onto the new link, but never its
           // identity: token / created_at / revoked belong to the new row.
           const carry = {};
-          for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "checked_at"]) {
+          // prev_used_gb / usage_delta_gb ride along so a rotated link keeps
+          // the usage comparison it had; everything else is unchanged.
+          for (const k of ["customer", "customer_type", "supplier_account", "account_email", "account_password", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "checked_at", "prev_used_gb", "usage_delta_gb"]) {
             if (cur[k] != null) carry[k] = cur[k];
           }
           const fresh = await storeMint(cur.supplier_url, cur.label, carry);
@@ -1332,7 +1708,7 @@ export default {
           const gone = await storeRemove(t);
           return gone ? json({ token: t, deleted: true }) : json({ error: "unknown token" }, 404);
         }
-        return json({ error: "action must be renew | rotate | revoke | delete" }, 400);
+        return json({ error: "action must be check | renew | pay/paid/unpaid (POST) | rotate | revoke | delete" }, 400);
       }
       if (path === "/admin/reminders/run") {
         // GET so a platform cron can hit it directly (Vercel/Netlify crons
@@ -1349,7 +1725,30 @@ export default {
       }
       if (path === "/admin/links") {
         const rows = await storeList();
-        return json({ count: rows.length, links: rows.map(redact) });
+        const accounts = supplierAccounts(rows);
+        return json({ count: rows.length, links: rows.map((r) => redact(r, accounts)) });
+      }
+      if (path === "/admin/shared-users") {
+        // Read-only discovery. No supplier/network calls and no writes happen
+        // anywhere in this path: the helper groups rows already in memory.
+        const noStore = { "Cache-Control": "no-store" };
+        if (request.method !== "GET") {
+          return json({ error: "Shared-user discovery supports GET only." }, 405, { ...noStore, Allow: "GET" });
+        }
+        const tokenParam = url.searchParams.get("token");
+        try {
+          const rows = await storeList();
+          if (tokenParam !== null) {
+            if (!tokenParam.trim()) return json({ error: "token parameter must not be empty." }, 400, noStore);
+            const report = sharedUsersForToken(rows, host, tokenParam.trim());
+            if (!report) return json({ error: "Unknown customer record." }, 404, noStore);
+            return json(report, 200, noStore);
+          }
+          return json(sharedUsersReport(rows, host), 200, noStore);
+        } catch (e) {
+          // Generic, safe message: never echo a supplier URL, token or key.
+          return json({ error: "Could not load customer data. Please try again." }, 500, noStore);
+        }
       }
 
       if (path === "/") return html(homePage());
@@ -1426,6 +1825,14 @@ export default {
         }
         return json(out, out.ok === false ? 502 : 200);
       }
+      if (path === "/qr" || path === "/qr-maker") return html(qrMakerPage(host));
+      if (path === "/qr/svg" || path === "/qr.svg") {
+        const text = url.searchParams.get("text") || url.searchParams.get("t") || "";
+        if (!text) return plainErr("missing text parameter", 400);
+        return new Response(generateQrSvg(text), {
+          headers: { "Content-Type": "image/svg+xml; charset=utf-8" },
+        });
+      }
 
       if ((m = path.match(/^\/q\/([^/]+)$/))) {
         const brand = url.searchParams.get("brand") || "SP VPN";
@@ -1457,9 +1864,18 @@ export default {
         return plain(btoa(unescape(encodeURIComponent(buildShare(status, links, brand)))), extra);
       }
       if ((m = path.match(/^\/sub\/([^/]+)$/))) {
+        // /sub is the Clash auto-update URL, so it is always YAML. A token may
+        // still arrive with a .yaml suffix (people paste the /all URL with the
+        // extension into the "update URL" box) — strip it here, or the store
+        // lookup would fail on "<tok>.yaml" and the app shows a timeout.
         const tok = splitExt(m[1]).name;
         const brand = url.searchParams.get("brand") || "SP VPN";
-        const { status, links, proxies } = filterNodes(await getDecoded(tok), url);
+        const all = await getDecoded(tok);
+        const { status, links, proxies } = filterNodes(all, url);
+        // Distinguish "the filter matched nothing" from "this subscription has
+        // nothing Clash can use" — the first is the customer's own parameter and
+        // needs a 400 with the reason, the second is the supplier's data.
+        if (all.links.length && !links.length) return plainErr(FILTERED_OUT, 400);
         if (!proxies.length) return plainErr("No vless://, vmess:// or trojan:// nodes found in that link — Clash apps can't use it.");
         return yamlRes(buildYaml(status, proxies, brand, yamlOpts(url, skippedNodeNames(links, proxies))), subHeaders(status, `${host}/q/${tok}`));
       }
@@ -1476,12 +1892,13 @@ export default {
         const brand = safeDecode(m[1]) || "SP VPN";
         const tok = url.searchParams.get("t") || "";
         if (!tok) return plainErr("missing ?t= parameter", 400);
-        const { status, links } = filterNodes(await getDecoded(tok), url);
-        if (!links.length) return plainErr(FILTERED_OUT, 400);
+        const { status, links } = await getDecoded(tok);
+        if (!links.length) return plainErr("No nodes found in that link.");
         return plain(btoa(unescape(encodeURIComponent(buildShare(status, links, brand)))), subHeaders(status, `${host}/q/${tok}`));
       }
       return html(errorPage("Not found"));
     } catch (e) {
+      if (path?.startsWith("/admin/")) return json({ error: "Could not save or load customer data. Please try again." }, 500);
       // subscription endpoints: return a plain-text error with a 5xx status so
       // Clash/v2ray apps display the actual reason instead of failing to parse HTML
       if (/^\/(all|sub|sr|share)\//.test(path)) {
@@ -1498,7 +1915,7 @@ export default {
   // see README → Scheduling.
   async scheduled(event, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
-    await storeInit().catch(() => {});
+    await storeInit(env).catch(() => {});
     await runRemindersFromEnv(env || {}, {
       listAll: storeList, updateRow: storeUpdate,
       hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,

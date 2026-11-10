@@ -211,6 +211,28 @@ ok(killed.status === 400, "filtering everything out is a clean 400, not an empty
 const badrx = await get(sub("&fmt=yaml&exclude=([unclosed"), "clash.meta/1.19.17");
 ok(badrx.status === 200, "an invalid regex is ignored rather than breaking the customer's link");
 
+// The Clash auto-update URL is a second implementation of the same decision
+// (apps put it in "update URL", never in the address bar, so nobody notices it
+// drifting until a customer's nodes silently stop filtering). /all is the
+// reference; these assert /sub was not left behind — a merge once restored the
+// /all fixes and quietly left /sub serving an unfiltered, un-negotiated profile.
+sect("5b. /sub mirrors /all: filters, suffix, clean 400s");
+{
+  const subUrl = (qs) => `/sub/${token}${qs}`;
+  const subAll = await (await get(subUrl(""), "clash-verge/2.4.1")).text();
+  ok(/proxy-groups:/.test(subAll) && /IP-CIDR,127\.0\.0\.0\/8,DIRECT,no-resolve/.test(subAll),
+    "/sub serves the geo-free profile (not the old CN-only one)");
+  const subInc = yaml.load(await (await get(subUrl("?include=Japan"), "clash-verge/2.4.1")).text());
+  ok(subInc.proxies.length > 0 && subInc.proxies.every((x) => /Japan/.test(x.name)),
+    `&include= filters on /sub too (${subInc.proxies.length} proxies)`);
+  const subKilled = await get(subUrl("?exclude=.*"), "clash-verge/2.4.1");
+  ok(subKilled.status === 400 && /include|exclude/.test(await subKilled.text()),
+    "filtering everything out on /sub is the same clear 400, not 'no vless nodes'");
+  const suffixed = await get(`/sub/${token}.yaml`, "Shadowrocket/2.2.32");
+  ok(suffixed.status === 200 && /proxy-groups:/.test(await suffixed.text()),
+    "a .yaml suffix on /sub still resolves the token (people paste the /all URL)");
+}
+
 // ------------------------------------------------------------- resilience --
 sect("6. supplier-side failures degrade, they do not cascade");
 ok(fetchedWith.length > 0 && /Shadowrocket/.test(fetchedWith[0]),

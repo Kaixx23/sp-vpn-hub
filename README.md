@@ -1,5 +1,13 @@
 # SP VPN Hub — supplier-leak fix + customer link registry
 
+> **Business source of truth**
+>
+> Live business repository: `Kaixx23/sp-vpn-hub`
+> Live business branch: `arena/01a0e3a9-sp-vpn-hub`
+> Live site: `https://sp-vpn.netlify.app/`
+>
+> Future AI/coding sessions should read [`BUSINESS_SOURCE_OF_TRUTH.md`](./BUSINESS_SOURCE_OF_TRUTH.md) before making changes. The live business code is on `arena/01a0e3a9-sp-vpn-hub`, not necessarily `main`.
+
 Drop-in replacement for `sp-global` that fixes the supplier-link leak and adds a
 token registry (the database your dashboard will sit on).
 
@@ -148,11 +156,142 @@ back real expiry + used/total GB. That's the supplier's own
 worker's existing `quotaSummary()` — no new parsing, and you get quota tracking
 for free. Refresh runs at concurrency 6 so your supplier never sees a burst.
 
+### Check — one customer at a time
+
+Renewing happens on the supplier's panel, by hand, one customer at a time. The
+dashboard's job is to confirm it landed. Every active row has a **Check**
+button that re-reads **only that customer's** saved subscription and persists
+what the supplier now reports:
+
+```
+Renewed: expiry updated to 2026-10-29     ·  Usage reset by 44.5 GB
+Checked: expiry remains 2026-10-17        ·  No new usage since last check
+Checked: expiry remains 2026-10-08        ·  +25.0 GB used since last check
+```
+
+It is **read-only against the supplier** — a single GET, no body, nothing can be
+purchased or renewed by pressing it. It only verifies a renewal you already
+completed. The global `⟳ Refresh quota` still does the same for everyone at
+once; this narrows it to one row so you are not hammering the panel with 80
+fetches to check one person.
+
+### Usage change since the previous check
+
+Each successful check compares the new used-GB against the used-GB from the
+**immediately previous successful check** and persists the difference:
+
+| Situation | Shown |
+|---|---|
+| used more data | `+5.0 GB used since last check` |
+| unchanged | `No new usage since last check` |
+| supplier reset the counter after a renewal | `Usage reset by 190.0 GB` |
+| first ever successful check | nothing — there is no previous value to compare |
+
+The comparison is stored, not computed on the fly, so it stays on screen until
+that customer is next checked successfully.
+
+**A failed check writes nothing.** If the panel is down or answers without a
+parsable `STATUS=` line, the row keeps its previous expiry, quota, used-GB *and*
+its previous delta, and `checked_at` is not bumped — a flaky supplier can never
+destroy your last known-good numbers. That is true for the per-customer button,
+the global refresh and the reminder cron alike: all three share one code path
+(`renewal.js → checkCustomerRow()`).
+
 A link with **no recorded expiry is surfaced separately**, never counted as
 healthy — an unknown must not hide a renewal.
 
 `＋ Add customer` mints a link and stores name / plan / price / currency /
-billing cycle / paid-until / notes in one step, returning the ready-to-send link.
+billing cycle / notes in one step, returning the ready-to-send link.
+
+### Individual and shared customers
+
+1. Add the **first customer** as **Individual customer**. Paste the original
+   supplier link and enter the **Supplier account** name or email (not a password).
+2. Add the **second customer** as **Shared link**. Paste the first customer's
+   SP VPN one-link, or the same registered supplier URL. The form finds and shows
+   the existing supplier account automatically; you do not have to enter it again.
+   Existing **Panel account email / password** fields are inherited server-side
+   from the original customer too. The lookup preview does not return the password.
+3. Save. Both customer rows show the **same supplier account**, while retaining
+   their own name, plan, price, notes and payment record. A third customer can
+   also share the second customer's link.
+
+The new customer gets a separate opaque link backed by the **same underlying
+supplier URL**, not a chain of links fetching each other. Revoking or rotating
+one customer's link does not revoke the others. Quota/expiry belong to the
+supplier account; shared quota is **not per-person usage**.
+
+Accounts are matched by the complete supplier URL, **not just its hostname**:
+two subscriptions on the same supplier panel stay separate. Only the account
+label, host, opaque account identifier and active customer count are displayed;
+the supplier URL and its secret query parameters stay on the server. You can
+search by account name and filter Individual or Shared customers. Editing an
+individual customer's account name renames it for the customers sharing that
+supplier link without changing their payments.
+
+### Find shared links / Find shared users (discovery only)
+
+Two read-only buttons answer one question: *which saved customers are backed by
+the same supplier subscription?*
+
+- **Find shared links** sits above the customer table and scans **every** saved
+  record, ignoring the current search box and filters. It lists each supplier
+  subscription used by **two or more active customer records**.
+- **Find shared users** is on every real customer row, next to its supplier
+  account. It shows that customer's group, highlights the selected customer and
+  states how many **other active** records share the link
+  ("No other active customer records found" when none do).
+
+Matching uses the **complete underlying supplier subscription URL** — including
+its account-identifying query parameters, with fragments ignored — never the
+hostname, account email/label, plan, dates, customer-type label or the
+customer's outward-facing opaque link. Historical duplicates still marked
+*Individual* are still grouped correctly. Older records whose saved
+`supplier_url` is another customer's Hub link (`/all/…?t=`, `/sr/…?t=`,
+`/q/<token>`, `/sub/<token>` — including `.yaml`/`.txt`/`.conf`/`.json`
+suffixes — and `/share/<token>`) are followed in memory, including nested and
+legacy base64 Hub links, until the original supplier source is found. Missing
+originals, invalid links, cycles and chains deeper than eight hops are flagged
+**Needs review** rather than being treated as independent subscriptions.
+
+The scan is strictly read-only: it makes no supplier/network requests, performs
+no database writes, and never renews, revokes, rotates, deletes, relabels
+records or infers a payment. Revoked/rotated records are shown separately
+(collapsed) and never counted as additional active people; anonymous
+quota-page/seller-tool records are excluded entirely. Reports contain only safe
+account metadata (label, host), customer names, plan, payment status/date and
+last-checked supplier expiry — supplier URLs, upstream tokens, panel passwords
+and raw matching keys never leave the server, including in errors. The dialog
+explains that it finds **registered customer records, not live devices**:
+someone who received a copied link but was never added to the dashboard cannot
+be identified. Separating access for a shared subscription is a separate, later
+task — different private Hub links do not make renewals independent while they
+point at the same supplier subscription.
+
+### Check is not Pay
+
+- **Check** on a customer reads the supplier's current expiry and quota only.
+  **Refresh quota** and scheduled reminder refreshes do the same. A later
+  supplier expiry **never records payment**, even for an individual customer.
+- **Pay** opens a confirmation for that customer. Confirm their **Paid until**
+  date and press **Pay — mark as paid**. It changes **only that customer's**
+  payment record, not the other people sharing the supplier account. This is
+  bookkeeping: it does not charge anyone or renew the supplier subscription.
+- New customers are **Unpaid / No payment recorded** until Pay is confirmed.
+  A recorded date through today or later shows **Paid**; once that date passes,
+  the customer is **Unpaid** again, regardless of the supplier expiry.
+- **Mark unpaid** explicitly clears only the selected customer’s recorded date,
+  useful for correcting a payment that was previously marked automatically.
+- Adding/editing customer details cannot mark a payment. Existing recorded
+  `paid_until` dates are preserved during upgrade; new payments go through the
+  Pay action. API clients must stop sending `paid_until` to `/admin/mint` or
+  `/admin/customer` and use the POST Pay route instead.
+
+`＋ Add customer` stores the customer type / supplier account / name / plan /
+price / currency / billing cycle / notes and returns the ready-to-send link.
+Existing customers default to Individual; their link and recorded payment dates stay
+intact. You can change their type with **edit**. Database columns are added
+on startup for SQLite/Turso and D1; no destructive reset is needed.
 
 ### Data model
 
@@ -161,11 +300,80 @@ One table. The leak fix and the dashboard are the same database.
 ```
 token            TEXT PRIMARY KEY     -- 24 random bytes, hex
 supplier_url     TEXT NOT NULL        -- the secret; never leaves the server
-label, customer, plan, price, currency, billing_cycle, paid_until, notes
-supplier_expires, total_gb, used_gb, checked_at   -- written by /admin/refresh
+label, customer, customer_type, supplier_account
+plan, price, currency, billing_cycle, paid_until, notes
+account_email, account_password       -- the supplier-panel login you renew with
+supplier_expires, total_gb, used_gb, checked_at   -- written by a check
+prev_used_gb     REAL                 -- used_gb at the previous successful check
+usage_delta_gb   REAL                 -- used_gb - prev_used_gb (NULL = first check)
 revoked          INTEGER              -- 1 = link is dead
 created_at       TEXT
 ```
+
+**Migrations are additive only.** `token-store.js` holds an `ADDED_COLUMNS` list
+and runs `ALTER TABLE links ADD COLUMN` for anything missing on every boot,
+guarded by `PRAGMA table_info` and a duplicate-column catch. No table is ever
+dropped or recreated and no existing row is rewritten, so deploying a schema
+change to a live Turso database with paying customers in it is a non-event.
+
+The same two columns are checked in as reviewable SQL at
+`migrations/001-usage-delta.sql`, should you prefer to apply them ahead of the
+deploy:
+
+```bash
+turso db shell your-db < migrations/001-usage-delta.sql
+# or, against whatever TOKEN_STORE_URL points at:
+npm run migrate
+```
+
+`test/migration.test.mjs` proves this: it builds a database on the *previous*
+production schema, fills it with production-shaped rows, boots the new store
+against it, and asserts every original column and every original value is
+byte-identical afterwards.
+
+### Revenue / month — what the number means
+
+The **Revenue / month** card is a *monthly run-rate*, computed per currency:
+
+```
+mrr = Σ (price ÷ months covered by that price)      separately for RMB, USD, …
+```
+
+Previously it was `Σ price` over active customers, labelled "/ month". That
+number was wrong in two independent ways, and both made the business look better
+than it is:
+
+* **Face price, not monthly.** A 120 charged once a year and a 10 charged every
+  month were added together. A customer you gave a 12-month discount counted as
+  **12× the monthly revenue** of the customer paying you every month — so the
+  more loyal your book looked, the more inflated the card was.
+* **Currencies were summed.** The catalogue prices in RMB; anything typed by hand
+  may be USD, VND, or nothing at all. `RMB 10 + USD 8 = 18` is not money.
+
+The period comes from `billing_cycle`, and failing that from the plan label —
+`200GB / 3mo`, `512GB 一年`, `包月`, `quarterly`, `30天` all parse
+(`cycleMonths()` in `dashboard.js`). Two escape costs are shown rather than
+hidden:
+
+| You see | It means |
+|---|---|
+| `RMB 10 · monthly-normalised, before costs` | one currency, safe to read as a number |
+| `2 currencies` + `RMB 10 · USD 8 · not summed` | the book is mixed; fix it by setting a currency on every row, there is deliberately no total |
+| `1 row priced with no billing cycle (assumed monthly)` | that price was **not** monthly-checked; open the row and set the cycle |
+
+A row whose period is unknown is **assumed monthly** — that is what this catalogue
+sells, so the card stays useful while the data is thin — but it is counted in the
+caption and tagged in the table (`no billing cycle → assumed monthly`) so the
+assumption is yours to correct, not ours to hide.
+
+`atRisk30` (shown as *X at risk ≤30d*) is the monthly revenue of customers whose
+supplier expiry is inside 30 days or already overdue: what actually disappears if
+nobody chases anyone. Revoked and system-generated rows are excluded from all of
+it, as they are from customer counts.
+
+Profit is untouched by this, and for a reason worth knowing: `profitOf()` in
+`plans.js` returns `null` unless the row's currency **and** billing cycle match the
+catalogue, so it was never able to make the mistake the revenue card made.
 
 ## Reminders
 
@@ -234,7 +442,13 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/dashboard.json` | GET | Stats + customers, for the client |
 | `/admin/mint` | POST | `link=` + customer fields → `{ token, oneLink }` |
 | `/admin/customer` | POST | Edit a customer's details |
-| `/admin/refresh` | GET | Pull live quota + expiry from the supplier |
+| `/admin/refresh` | GET | Pull live quota + expiry for **every** active customer |
+| `/admin/link/<t>?action=check` | GET | Check supplier expiry/quota only; `renew` remains an alias; never marks paid |
+| `/admin/link/<t>?action=pay` | POST | `paid_until=YYYY-MM-DD` → record a payment for this customer only (today or later) |
+| `/admin/link/<t>?action=unpaid` | POST | Explicitly clear only this customer's payment date |
+| `/admin/shared-link` | POST | `link=` → find the original customer's supplier account without returning its secret URL/password |
+| `/admin/shared-users` | GET | Read-only groups of customers sharing one supplier subscription (groups with ≥2 active records); `Cache-Control: no-store` |
+| `/admin/shared-users?token=<customer-token>` | GET | One customer's group, including unique/revoked records and `Needs review` warnings. 404 unknown/non-customer token, 400 empty token, 405 + `Allow: GET` for other methods |
 | `/admin/reminders` | GET | Reminder history (kind, date, message text) |
 | `/admin/reminders` | POST | Run a reminder pass now |
 | `/admin/reminders/run` | GET | Same, as a GET — for platform crons |
@@ -243,6 +457,8 @@ Everything from `sp-global` works unchanged, plus:
 | `/admin/link/<t>?action=rotate` | GET | Kill + reissue, carries the customer's details |
 | `/admin/link/<t>?action=delete` | GET | Remove the row entirely |
 
+| `/sub/<token>` | GET | The Clash **auto-update** URL — always YAML, honours `&include=` / `&exclude=` / `&cn=1` / `&remember=1` like `/all`, and accepts a `.yaml` suffix on the token |
+| `/admin/health` | GET | End-to-end pipeline check the dashboard pill reads: store → supplier → converter **→ is this deployment's profile policy current** (`checks.profile`, `?force=1` to bypass its 2-min cache) |
 | `/diag?t=<t>` | GET | Self-service diagnosis — what format *this* client gets, supplier latency, YAML sanity, **and whether this deployment is current** |
 | `/healthz` | GET | Liveness **plus profile policy**. `?full=1` for the whole fingerprint. HTTP 503 when the profile policy has regressed |
 
@@ -343,6 +559,11 @@ first two, and the guard checks that mode too — so a profile claiming CN mode 
 missing its rules fails instead of being excused.
 
 ### Per-client behaviour, pinned by `test/client-matrix.test.mjs`
+
+*(110 checks — including 5 that hold `/sub/<token>`, the Clash **auto-update** URL, to
+the same filtering, suffix and error behaviour as `/all`. A merge once restored
+the `/all` fixes and left `/sub` behind: same link, same app, silently different
+profile.)*
 
 Each app is sent the format it can actually read, chosen from its `User-Agent`.
 106 checks run every client below against a supplier fixture built to be as
@@ -463,18 +684,32 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-773 checks total. (The counts below are what `npm test` prints — they were all
-stale in this file before, which is its own small argument for keeping tests in
-the repo rather than trusting a README.)
+`npm test` runs **14 suites**: 909 counted checks across the nine that report a
+number, 21 `node:test` subtests in three more, and two suites that report a
+verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
+what each suite prints today — they were all stale in this file once already,
+which is its own small argument for reading them from the run, not the README.)
 
-- `test/full-proof.mjs` — **475 checks**: the original client-matrix suite, run
+- `test/full-proof.mjs` — **305 checks**: the original client-matrix suite, run
   against the patched worker. Proves no client broke.
 - `test/opaque-token.test.mjs` — **40 checks**: leak closed, opaque links serve
   every client type, legacy links still work, revocation is immediate, rotation,
   admin redaction, DB-outage fallback.
-- `test/dashboard.test.mjs` — **49 checks**: the renewal maths in `summarise()`,
-  live quota refresh, the dashboard routes, customer editing, and that no route
-  ever leaks a supplier URL.
+- `test/dashboard.test.mjs` — **143 checks**: the renewal *and revenue* maths in `summarise()`,
+  live quota refresh, the dashboard routes, customer editing, panel account
+  fields, profit, health, and that no route ever leaks a supplier URL.
+- `test/migration.test.mjs` — **34 checks**: the additive migration applied to a
+  database built on the *previous* production schema, asserting every existing
+  column and value survives byte-identically and that re-running is a no-op.
+- `test/customer-accounts.test.mjs` — shared account/credential inheritance, payment isolation across checks and reminders, additive migrations and concurrent SQL updates.
+- `test/dashboard-ui.test.mjs` — real client/worker interaction: original + shared customer creation, Pay/cancel/retry/Mark unpaid, safe account display and filtering.
+- `test/shared-users.test.mjs` — the read-only shared-link finder: complete-URL matching (including rows mislabeled Individual), same-host/different-token separation, nested/copied/legacy Hub-link resolution, revoked/rotated/generated record handling, missing/cyclic/too-deep chains, leak and no-write/no-network guarantees, HTTP status semantics, and the real dashboard dialog (filter independence, escaping, hidden-on-load, retry, stale replies, Escape and focus restore).
+- `test/renewal.test.mjs` — **151 checks**: per-customer Renew / Check (changed
+  vs unchanged expiry), usage increase / unchanged / reset, no delta on the
+  first check, failed checks overwriting nothing, the global refresh still
+  working and persisting deltas, revoked + unknown + direct-node customers
+  handled safely, the action being read-only against the supplier, and supplier
+  URLs staying redacted from every admin API.
 - `test/reminders.test.mjs` — **45 checks**: day maths, which reminders are due,
   cron idempotency (three passes in one day send once; tomorrow fires again),
   a dead channel not losing the reminder, and the worker routes.
@@ -537,6 +772,71 @@ npm run verify -- https://<your-host> --token=<a-customer-token>
 
 `verify` exits non-zero if the live build is older than this repo or has
 regressed. It is worth wiring into CI after any deploy.
+
+---
+
+## Redeploying from a brand-new repo
+
+Nothing in this project is pinned to a particular repository, site name, domain
+or account:
+
+* every customer-facing URL is built at request time from the incoming `Host`
+  header (`x-forwarded-proto` + `url.host`), so the one-links rebrand themselves
+  to whatever domain serves them;
+* all storage is chosen from environment variables (`TOKEN_STORE_URL`,
+  `TOKEN_STORE_AUTH_TOKEN`) or a D1 binding — nothing is compiled in;
+* there is no build step, no CDN and no external asset to re-point.
+
+So a fresh repo is a copy-and-push, and the deploy is four environment
+variables. See `.env.example`.
+
+**1. Create the new repo**
+
+```bash
+# from a clean checkout of the branch you want to ship
+git clone --depth 1 <this-repo> sp-vpn-hub-new && cd sp-vpn-hub-new
+rm -rf .git && git init && git add -A && git commit -m "SP VPN Hub"
+gh repo create <you>/<new-repo> --private --source=. --push
+```
+
+**2. Point a new Netlify site at it**
+
+Netlify → *Add new site* → *Import an existing project* → pick the new repo.
+`netlify.toml` already supplies everything: functions directory, `NODE_VERSION
+20`, the esbuild bundler, `@libsql/client` kept external (it ships a native
+binding esbuild cannot bundle), and the catch-all redirect to the function.
+Leave the build command empty and the publish directory as-is.
+
+**3. Choose the database**
+
+| Goal | What to set |
+|---|---|
+| **Keep every existing customer** | Point `TOKEN_STORE_URL` / `TOKEN_STORE_AUTH_TOKEN` at the **same Turso database** the old site uses. The new site picks up all customers instantly — the database is the source of truth, not the repo. |
+| **Start clean** | `turso db create <new-db>`, use its URL + token. The schema is created on first request. |
+| **Copy the data to a new database** | `npm run backup > customers.json` against the old one, then `node bin/backup.mjs --restore customers.json` against the new one. |
+
+Set them in Netlify → *Site configuration* → *Environment variables*, then
+redeploy.
+
+> Two sites pointed at one Turso database is fine — it is a normal shared
+> SQLite server, and every write here is a single-row upsert. It is also the
+> zero-downtime cutover: bring the new site up on the same database, check it,
+> then move the domain.
+
+**4. Verify before you cut over**
+
+```bash
+curl -s https://<new-site>.netlify.app/healthz                 # -> ok
+curl -s https://<new-site>.netlify.app/admin/dashboard.json | head -c 200
+```
+
+The dashboard's health pill and the `store` field in `dashboard.json` name the
+active backend. If it says `memory`, `TOKEN_STORE_URL` was not picked up and
+customers will vanish on the next cold start — fix that before sending anyone
+a link. It should read `turso`.
+
+⚠ **`/admin/*` has no authentication.** A new public URL is a new unprotected
+dashboard. See *Before you deploy*.
 
 ---
 

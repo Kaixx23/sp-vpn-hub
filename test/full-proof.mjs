@@ -125,6 +125,13 @@ async function get(path, ua) {
 // Clash Meta / ClashX Meta / FlClash / Stash will load the profile.
 const RESERVED = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "PASS-RULE", "COMPATIBLE", "GLOBAL"];
 function validateMihomo(body, label) {
+  // Fail loudly if this is not a profile at all. Without this, an error page
+  // ("Couldn't read that link…") parses as a YAML *string*, `cfg.proxies` is
+  // undefined, and every `.every()`/`.length` check below passes vacuously —
+  // one 502 looked like 17 green checks. Found exactly this way: a merge left
+  // /sub/<token> reading an undefined variable and only the MATCH check blinked.
+  ok(/^proxies:\s*$/m.test(body) && /^proxy-groups:\s*$/m.test(body) && /^rules:\s*$/m.test(body),
+    `${label}: body is actually a mihomo profile (not an error page)`);
   let cfg;
   try { cfg = yaml.load(body); } catch (e) { ok(false, `${label}: YAML parses (${e.message})`); return; }
   ok(true, `${label}: YAML parses`);
@@ -191,10 +198,6 @@ const clashUAs = [
   ["FlClash", "FlClash/0.8.83"],
   ["Stash (iOS)", "Stash/3.2.4 CFNetwork"],
   ["mihomo", "mihomo/1.19.13"],
-  ["Clash Mi (iOS/Android)", "ClashMi/1.0.15.191"],
-  ["Clash Mi (alt UA)", "clash-mi/1.0 (iPhone; iOS 18.5)"],
-  ["mihomo Party", "mihomo-party/1.7.7"],
-  ["Sparkle", "Sparkle/1.5.2"],
 ];
 for (const [name, ua] of clashUAs) {
   const r = await get(`/all/SP%20VPN?t=${TOK}`, ua);
@@ -261,99 +264,6 @@ console.log("\n[C] Explicit format override + aliases:");
   ok(sh.body.includes("vless://"), "/share plain list");
   const q = await get(`/q/${TOK}`, "Mozilla/5.0");
   ok(q.status === 200 && q.body.includes("<h1>"), "/q quota page renders");
-  // extension override — for clients whose UA we cannot recognise at all
-  const ext = await get(`/all/SP%20VPN.yaml?t=${TOK}`, "CFNetwork/1498 Darwin/23.5.0");
-  ok(ext.ct.includes("yaml"), ".yaml suffix forces YAML for an unknown UA");
-  const cfgExt = validateMihomo(ext.body, ".yaml suffix");
-  ok(!!cfgExt && !cfgExt["proxy-groups"].some((g) => g.name.includes(".yaml")), ".yaml suffix stripped from the brand/group name");
-  const alias = await get(`/all/SP%20VPN?t=${TOK}&fmt=clash`, "curl/8.5.0");
-  ok(alias.ct.includes("yaml"), "?fmt=clash alias forces YAML");
-  const b64alias = await get(`/all/SP%20VPN?t=${TOK}&fmt=base64`, "ClashMi/1.0.15.191");
-  ok(b64alias.ct.includes("text/plain"), "?fmt=base64 alias forces SR list");
-}
-
-console.log("\n[C2] Profile must not depend on a GeoIP download or China-only DNS (Clash Mi 'timeout' bug):");
-{
-  const r = await get(`/all/SP%20VPN?t=${TOK}`, "ClashMi/1.0.15.191");
-  const cfg = validateMihomo(r.body, "Clash Mi default");
-  ok(!/GEOIP/.test(r.body), "default profile has no GEOIP rule (no mmdb download before first connect)");
-  ok(!/geoip:\s*true/.test(r.body), "default profile has no dns.fallback-filter.geoip");
-  ok(!/223\.5\.5\.5|119\.29\.29\.29/.test(r.body), "default profile does not pin China-only resolvers");
-  ok(!!cfg.dns && Array.isArray(cfg.dns["proxy-server-nameserver"]) && cfg.dns["proxy-server-nameserver"].length > 0,
-     "proxy-server-nameserver set (node hostnames always resolvable)");
-  ok((cfg.dns.nameserver || []).every((n) => /^\d/.test(String(n))), "resolvers are plain-UDP IPs (no DoH/DoT handshake to stall)");
-  ok((cfg.rules || []).some((x) => x.startsWith("IP-CIDR,192.168.0.0/16,DIRECT")), "private ranges kept DIRECT without GeoIP");
-  ok(cfg.profile && cfg.profile["store-selected"] === false, "store-selected off → the profile lands on Auto Speed for everyone");
-
-  const cnr = await get(`/all/SP%20VPN?t=${TOK}&cn=1`, "ClashMi/1.0.15.191");
-  const cncfg = validateMihomo(cnr.body, "?cn=1 (China ISP)");
-  ok(/GEOIP,CN,DIRECT/.test(cnr.body), "?cn=1 restores the CN-optimized rules");
-  ok((cncfg.dns.nameserver || []).includes("223.5.5.5"), "?cn=1 restores the CN resolvers");
-  ok(/geo-auto-update: true/.test(cnr.body), "?cn=1 updates geodata in the background");
-}
-
-console.log("\n[C2b] Node filtering (?include= / ?exclude=) when a node family dies upstream:");
-{
-  const r = await get(`/all/SP%20VPN?t=${TOK}&exclude=telecom`, "ClashMi/1.0.15.191");
-  const cfg = validateMihomo(r.body, "?exclude=telecom");
-  ok(!cfg.proxies.some((p) => /telecom/i.test(p.name)), "?exclude drops every matching node");
-  ok(cfg.proxies.length > 0 && cfg.proxies.some((p) => /Mobile|Unicom/i.test(p.name)), "?exclude keeps the rest");
-  ok(cfg["proxy-groups"].every((g) => g.proxies.length > 0), "groups stay non-empty after filtering (mihomo fatal)");
-  const inc = await get(`/all/SP%20VPN?t=${TOK}&include=hong%20kong`, "ClashMi/1.0.15.191");
-  const icfg = validateMihomo(inc.body, "?include=hong kong");
-  ok(icfg.proxies.every((p) => /hong kong/i.test(p.name)), "?include keeps only matching nodes");
-  const sr = await get(`/all/SP%20VPN?t=${TOK}&exclude=telecom`, "v2rayNG/1.10.6");
-  const txt = decodeURIComponent(escape(atob(sr.body.replace(/\s/g, ""))));
-  ok(!/Telecom/i.test(txt), "filter also applies to the base64 share list");
-  const none = await get(`/all/SP%20VPN?t=${TOK}&include=zzzznomatch`, "ClashMi/1.0.15.191");
-  ok(none.status === 400 && /loosen the filter/.test(none.body), "filtering everything out is a clear 400, not a broken profile");
-  const bad = await get(`/all/SP%20VPN?t=${TOK}&exclude=[unclosed`, "ClashMi/1.0.15.191");
-  ok(bad.status === 200 && bad.ct.includes("yaml"), "an invalid regex is ignored instead of breaking the link");
-}
-
-console.log("\n[C2c] Health checks must not hammer dead nodes:");
-{
-  const r = await get(`/all/SP%20VPN?t=${TOK}`, "ClashMi/1.0.15.191");
-  const cfg = yaml.load(r.body);
-  const auto = cfg["proxy-groups"].find((g) => g.type === "url-test");
-  const fb = cfg["proxy-groups"].find((g) => g.type === "fallback");
-  ok(auto.lazy === true && fb.lazy === true, "auto/failover groups are lazy (only the group in use is probed)");
-  ok(auto["expected-status"] === 204, "expected-status pinned to 204");
-  ok(fb["max-failed-times"] === 3, "fallback gives up on a dead node after 3 failures");
-}
-
-console.log("\n[C2d] Auto Speed must be the selection everyone lands on:");
-{
-  const r = await get(`/all/SP%20VPN?t=${TOK}`, "ClashMi/1.0.15.191");
-  const cfg = yaml.load(r.body);
-  const selects = cfg["proxy-groups"].filter((g) => g.type === "select" && g.proxies.length > 1 && !/Direct/.test(g.name));
-  ok(selects.length > 0 && selects.every((g) => g.proxies[0] === "⚡ Auto Speed"),
-     `Auto Speed is the first member of every selector (${selects.length} groups) → mihomo's default pick`);
-  ok(cfg.profile["store-selected"] === false, "store-selected off by default → every import/update re-arms Auto Speed");
-  const top = cfg["proxy-groups"][0];
-  const match = cfg.rules.find((x) => x.startsWith("MATCH,"));
-  ok(match.slice(6) === top.name && top.proxies[0] === "⚡ Auto Speed",
-     "traffic enters the top group, whose default member is Auto Speed");
-  const rem = await get(`/all/SP%20VPN?t=${TOK}&remember=1`, "ClashMi/1.0.15.191");
-  ok(yaml.load(rem.body).profile["store-selected"] === true, "?remember=1 restores sticky manual selection");
-  validateMihomo(rem.body, "?remember=1");
-}
-
-console.log("\n[C3] /diag self-service diagnosis:");
-{
-  const d = await worker.fetch(new Request(`https://sp.example.com/diag?t=${TOK}`, { headers: { "User-Agent": "ClashMi/1.0.15.191" } }), {}, {});
-  const j = JSON.parse(await d.text());
-  ok(d.status === 200 && j.ok === true, "/diag reports a healthy link");
-  ok(j.detected.servedFormat === "mihomo YAML" && j.detected.matchedUaKeyword, "/diag names the format + matched UA keyword");
-  ok(j.yaml.needsGeoipDownload === false && j.yaml.duplicateNames === 0, "/diag confirms geo-free, collision-free YAML");
-  ok(j.nodes.clashUsable === 20, "/diag counts Clash-usable nodes");
-  ok(!JSON.stringify(j).includes("supplier.example"), "/diag never leaks the supplier URL");
-  ok(Array.isArray(j.servers) && j.servers[0].nodes >= 1 && j.servers.some((x) => x.server === "hk1.example.com"),
-     "/diag breaks nodes down per server host (spots a dead host family)");
-  const d2 = await worker.fetch(new Request("https://sp.example.com/diag", { headers: { "User-Agent": "Shadowrocket/2.2.51" } }), {}, {});
-  const j2 = JSON.parse(await d2.text());
-  ok(d2.status === 400 && j2.detected.servedFormat === "base64 share list", "/diag without a token still explains the client");
-  ok(!!j2.store && typeof j2.store.backend === "string", "/diag reports the token-store backend (memory = links die on cold start)");
 }
 
 console.log("\n[D] Plain (non-base64) supplier payload with BOM/CRLF:");

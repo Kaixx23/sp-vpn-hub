@@ -2,3 +2,10 @@ node_modules/
 tokens.db
 tokens.db-journal
 *.log
+tokens.db-wal
+tokens.db-shm
+preview.db*
+*.backup.json
+customers.json
+.env
+.preview/
