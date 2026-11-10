@@ -235,6 +235,8 @@ ok(noGuard.problems.some((p) => p.code === "cn-missing-geoip"), "a profile claim
 // the old profile had, both invisible to any check that only parses the YAML.
 sect("8. health probe — the difference between \u201cnode dead\u201d and \u201cprobe blocked\u201d");
 {
+  ok(/^# latency probe: https:\/\/\S+generate_204 · any reply counts as alive$/m.test(y),
+    "the profile states its own probe, so 'no pin' is answerable from the file");
   const u = (g) => doc["proxy-groups"].find((x) => x.name === g).url;
   ok(u("⚡ Auto Speed") === u("🔁 Failover"), "both auto groups probe the same URL (a split makes selection unexplainable)");
   ok(/^https:\/\/www\.gstatic\.com\/generate_204$/.test(u("⚡ Auto Speed")), `default probe: ${u("⚡ Auto Speed")}`);

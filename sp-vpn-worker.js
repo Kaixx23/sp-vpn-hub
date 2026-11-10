@@ -439,6 +439,11 @@ function buildYaml(status, proxies, brand, opts = {}) {
     L.push(`#       those work fine in Shadowrocket / v2rayNG / NekoBox / Hiddify — use the plain link for them`);
   }
   L.push(`# default selection: ${AUTO}${remember ? " (your last manual pick is remembered)" : " — re-armed on every update"}`);
+  // Which probe decides the green dots, stated in the file itself: "my nodes
+  // don't ping" is answered by the top of the profile instead of by guessing
+  // whether the app has the current build — and a client that cached an old
+  // profile shows the old probe line, which is how you tell those apart.
+  L.push(`# latency probe: ${health} · ${expect ? "expects " + expect : "any reply counts as alive"}`);
   // Real nodes only — the quota placeholders are not servers, and promising a
   // customer "24 nodes" when two of them are a bandwidth readout is how you get
   // "half my nodes are broken" tickets.

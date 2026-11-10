@@ -655,6 +655,14 @@ status.** Two switches, if you need them per customer:
 | `&health=<url>` | any `http(s)` URL your exits can reach — `https://cp.cloudflare.com/generate_204`, `https://www.google.com/generate_204`, a captive portal of your own |
 | `&expect=<codes>` | opt back into strictness: `204`, `2xx`, `200-204,301`. Anything mihomo could not parse is ignored rather than written into the profile |
 
+Every profile also says which probe it was built with, at the top of the file itself:
+
+```
+# latency probe: https://www.gstatic.com/generate_204 · any reply counts as alive
+```
+
+which is the quickest way to tell "the app is showing me a cached old profile"
+from "the deployment is behind" — both are answered by that one line, and
 `/diag?t=<t>` reports both (`yaml.healthUrl`, `yaml.expectedStatus`), because
 "which one is it this time" should not need a guess; and `checkProfile` now
 returns `insecure-health-url` if a `http://` probe ever comes back.
