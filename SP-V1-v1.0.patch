@@ -1,0 +1,2304 @@
+From e22213dd23e5bdd908fe0c3d7ea7c1d7b34d18b6 Mon Sep 17 00:00:00 2001
+From: Arena Agent <arena@arena.ai>
+Date: Tue, 10 Nov 2026 09:19:22 +0000
+Subject: [PATCH] =?UTF-8?q?v1.0=20=E2=80=94=20a=20converter=20that=20serve?=
+ =?UTF-8?q?s=20the=20supplier's=20own=20bytes,=20with=20the=20hub=20as=20f?=
+ =?UTF-8?q?allback?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The hub rebuilds the subscription: rebranded names, geo-free DNS, its own groups
+and rules, its own probe policy. All defensible, all differences, and every
+difference is a possible ticket. This site removes the category.
+
+exact (default) — fetch the panel's response for this client and return those
+bytes unchanged. No trim, no BOM strip, no CRLF normalisation, no re-encode, no
+added comment, no renamed node. Their external-controller, their CN resolvers,
+their fallback-filter, their curated rules and GEOIP,CN,DIRECT, their Chinese
+group names, their quota pseudo-nodes inside the auto/fallback groups,
+skip-cert-verify: false on every node and flow: '' on the ws ones. A Clash client
+is pointed at the panel's own YAML switch (type=clash&flag=meta) because that is
+how the panel decides what to send; the User-Agent and Accept headers are
+forwarded for the same reason. Nothing else is.
+
+safe — the hub's rebuilt profile, fetched from HUB_BASE_URL at request time, not
+copied into this repo: a copy of that generator would drift from the one that
+customers already use. It is the automatic fallback when the panel answers a bot
+challenge or sends something the client cannot import, and it is one parameter
+away (?profile=safe) for an app that cannot download geodata.
+
+Everything the hub learned the hard way is carried over, because it applies just
+as much to a passthrough: no-store on every response (function responses are
+cached by path with the query stripped, so /all/SP VPN is one entry for the whole
+site) — and /e/<token> is the recommended link form because a per-customer path
+makes that guarantee structural; token resolved before the cache is consulted, so
+revocation lands on the next request rather than the next TTL; a store outage
+serves the last good file for 24h with X-SPVPN-Stale; a loop-back needs host and
+route to match, since a branded domain legitimately serves both; single-flight so
+twelve app refreshes are one panel hit; 6.5s + 2.6s budgeted inside the
+unconfigurable 10s; and no supplier URL or panel token in any response, ever.
+
+/admin/verify?t= is the reason this is deployable: it fetches our own public URL
+and the panel's response independently and diffs them byte by byte, printing the
+offset and a window when they differ. `npm test` runs 181 checks against fixtures
+with a BOM and CRLF on purpose, and asserts Buffer.compare === 0.
+
+No dashboard, no billing, no renewals: sp-vpn-hub owns the customers. token-store.js
+is a verbatim copy of its store client so both hosts read one database, and a link
+moves between modes by changing its host.
+---
+ .gitignore                 |   6 +
+ README.md                  | 182 +++++++++
+ bin/serve.mjs              |  27 ++
+ bin/verify-live.mjs        |  94 +++++
+ exact-worker.js            | 738 +++++++++++++++++++++++++++++++++++++
+ netlify.toml               |  27 ++
+ netlify/functions/index.js |  54 +++
+ package.json               |  15 +
+ test/exact.test.mjs        | 564 ++++++++++++++++++++++++++++
+ token-store.js             | 462 +++++++++++++++++++++++
+ 10 files changed, 2169 insertions(+)
+ create mode 100644 .gitignore
+ create mode 100644 README.md
+ create mode 100644 bin/serve.mjs
+ create mode 100755 bin/verify-live.mjs
+ create mode 100644 exact-worker.js
+ create mode 100644 netlify.toml
+ create mode 100644 netlify/functions/index.js
+ create mode 100644 package.json
+ create mode 100644 test/exact.test.mjs
+ create mode 100644 token-store.js
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..7dab538
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++node_modules/
++.env
++.env.*
++*.log
++.DS_Store
++.netlify/
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..abaf2c2
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,182 @@
++# SP-V1 — the converter that converts nothing
++
++`v1.0` · companion to [sp-vpn-hub](https://github.com/Kaixx23/sp-vpn-hub)
++
++A customer's app downloads a file from a subscription panel, and then connects to
++the nodes inside it. **This host serves that file byte-for-byte.** Not a rebuild,
++not a rebrand, not a "better" profile — the supplier's own bytes, so every node,
++ping, port, key, group, DNS server, rule and quota line is exactly what their link
++gives. If the panel's config is right for an app, this is identical; if the panel's
++config is wrong for an app, `?profile=safe` hands over the hub's rebuilt profile
++instead. Both modes ship, so a difference of opinion never becomes an outage.
++
++```
++node bin/verify-live.mjs https://your-site.netlify.app <token>   # proves it in production
++```
++
++---
++
++## Deploy (about 5 minutes, no build step)
++
++1. **New Netlify site** → *Add new site → Import an existing project* → this repo.
++   Nothing to configure: `netlify.toml` sets `NODE_VERSION=20`, points
++   `functions` at `netlify/functions`, keeps `@libsql/client` external (its native
++   binding cannot be bundled), and rewrites `/*` to the function.
++2. **Environment** (Site settings → Environment variables):
++
++   | Variable | Value | Needed |
++   | --- | --- | --- |
++   | `TOKEN_STORE_URL` | the **same** Turso/libSQL URL as the hub | yes — this is what makes existing customer tokens work here |
++   | `TOKEN_STORE_AUTH_TOKEN` | the same token as the hub | yes |
++   | `HUB_BASE_URL` | `https://sp-vpn.netlify.app` | only for `safe` mode; this is the default if unset |
++
++   No function timeout is configurable here (10 s is the platform default), so the
++   code budgets itself instead: 6.5 s for the supplier hop, 2.6 s for the fallback
++   hop, which is why a slow panel degrades instead of killing the request.
++3. **Give customers a link.** Recommended, token in the path:
++
++   ```
++   https://<your-site>/e/<token>            ← auto-negotiated format
++   https://<your-site>/e/<token>.yaml       ← force mihomo YAML
++   https://<your-site>/e/<token>?fmt=sr     ← force the node list
++   ```
++
++   Every hub-shaped URL also works unchanged, so moving a customer across is a
++   host swap, not a new link: `/all/SP VPN?t=<token>`, `/sub/<token>`,
++   `/share/<token>`, `/q/<token>`.
++
++   `/e/<token>` is preferred because function responses here are cached by **path**
++   with the query stripped: `/all/SP VPN` is one cache entry for the whole site.
++   `Cache-Control: no-store` is set on every response for that reason, and a
++   token-in-path makes the guarantee structural rather than dependent on a header.
++
++## The two modes
++
++| | what the app receives | when to use it |
++| --- | --- | --- |
++| **`exact`** (default) | the supplier panel's own bytes, verbatim. Clash-family clients are asked for the panel's mihomo YAML (`&type=clash&flag=meta` — the panel's own switch); everything else gets its base64 link list. Their `external-controller`, their CN resolvers, their `fallback-filter`, their ~600 curated rules, their `GEOIP,CN,DIRECT`, their Chinese group names, their two quota pseudo-nodes inside the auto/fallback groups, `skip-cert-verify: false` on every node, `flow: ''` on the ws ones. | When the requirement is *"behaves exactly like the supplier's link, in Clash Meta and everything else."* |
++| **`safe`** | `sp-vpn-hub`'s rebuilt profile: geo-free DNS that resolves anywhere, no geodata download needed at import, English rebrand, carrier groups, a probe `url` on the group customers actually open so latency numbers appear. | When an app cannot import the panel's file — usually a client that cannot download `geoip.metadb` — or when the customer wants the branded layout. |
++
++`safe` is fetched from the hub at request time. It is deliberately **not** a copy of
++the hub's generator: a copy drifts, a proxy cannot. The hub stays the only place that
++profile is defined.
++
++**Automatic fallback.** If the panel refuses (Cloudflare challenge, 429/403) or
++answers with something the client cannot use, `exact` failing is not an error — the
++request transparently returns the safe profile instead, and says so:
++
++```
++X-SPVPN-Mode: safe
++X-SPVPN-Fallback: exact-throttled        # or exact-unusable | forced-by-profile-param
++```
++
++If both hops fail, the response names each hop (`supplier: … ; hub: …`) rather than
++blaming the supplier for what was a rate limit — the lesson that cost a whole support
++thread. And if the *token store* blinks, the last good file is served for up to 24 h
++with `X-SPVPN-Stale: <age>`.
++
++### Knobs
++
++| Parameter | Effect |
++| --- | --- |
++| `?profile=safe` | skip exact entirely — no panel fetch at all |
++| `?profile=exact` / `?fallback=0` | strict: never fall back, report the failure instead. Use this when you want to *see* a problem |
++| `?raw=1` | ask the stored URL exactly as stored — no `type=clash&flag=meta` appended. For panels that already answer YAML, or to prove the parameter is the only thing we add |
++| `?fmt=yaml` / `?fmt=sr`, `.yaml` / `.txt` suffix | force the format, whatever the User-Agent says |
++
++## What "byte-exact" honestly means
++
++Three things this site does, and no more:
++
++1. **Chooses the endpoint.** A Clash-family client is pointed at the panel's YAML
++   variant; the bytes of that response are then copied, never parsed.
++2. **Forwards `User-Agent` and `Accept`** — because that is how the panel decides
++   what to send. Nothing else is forwarded.
++3. **Adds headers.** `Cache-Control: no-store`, `X-SPVPN-*`, and passes through the
++   panel's `subscription-userinfo` / `profile-update-interval` / `content-disposition`
++   when it sends them (that is how quota reaches the app). The body is never touched:
++   no trim, no BOM strip, no CRLF normalisation, no re-encode, no added comment.
++
++Which means: no rebranding, no DNS substitution, no geodata-free rule set, no extra
++groups — the four things the hub does, and the four differences this repo exists to
++remove. VPN traffic never passes through either converter; the file is downloaded
++once, so this server cannot change a node's speed.
++
++## Diagnostics
++
++| | |
++| --- | --- |
++| `GET /healthz` | version, default mode, whether the panel answers, whether the hub fallback hop is reachable, cache counters. Cached 120 s (it fetches upstream); `?force=1` bypasses |
++| `GET /diag?t=<token>` | which mode served, size/sha/node+rule counts, the first 12 lines of what the app gets, the fallback reason, the panel host (token always `[scrubbed]`) |
++| `GET /admin/verify?t=<token>[&kind=raw][&v=<bust>]` | **the proof.** Fetches this site's own public URL *and* the panel's response, independently, and diffs them byte by byte: `identical`, `first_diff_offset`, a window around it, both sha256s, node counts, and `served_mode` |
++
++`identical: false` with `served_mode: "safe"` is not a bug — that is the fallback
++serving a rebuilt profile because the panel refused. `identical: false` with
++`served_mode: "exact"` would mean this repo is broken, and the tests below are why
++that combination is hard to ship by accident.
++
++## Tests
++
++```
++npm test          # 181 checks, no dev dependencies, no network
++```
++
++`test/exact.test.mjs` runs the worker against a stubbed panel and hub, on a fixture
++deliberately hostile to a helpful proxy — UTF-8 BOM, CRLF endings, flow-style YAML,
++a Chinese group name, a full-width colon inside a node name, commas inside quoted
++rules — and asserts **`Buffer.compare(served, fixture) === 0`**. That one comparison
++is the product claim. Around it:
++
++- **§1–4** pure logic: the YAML-variant URL is built idempotently and never
++  overwrites a `type=` from the row; the client-negotiation table is the hub's
++  (Karing, Verge, Mi, Stash → YAML; Shadowrocket, curl → list); what counts as a
++  usable profile vs a list vs a challenge; a 500 is *not* a rate limit; `scrub()`
++  removes the panel token; the loop-back guard needs host **and** route, because a
++  branded domain legitimately serves both a panel and customer links.
++- **§5–6** byte-identity on both formats, `X-SPVPN-*` headers, panel Content-Type
++  and `subscription-userinfo` passed through, the client's UA forwarded, the hub
++  not touched at all.
++- **§7** every failure shape: challenge → `safe` with `exact-throttled`; HTTP 200
++  of rubbish → `exact-unusable`; `?fallback=0` → 502 naming the timeout and no hub
++  fetch; both hops down → 503 with each hop's own reason; the fallback hop is
++  verified to hit the hub's `/all/SP VPN?t=…&fmt=yaml`, so the hub cannot negotiate
++  a base64 list for a Clash app.
++- **§8** `?profile=safe` touches the panel zero times.
++- **§9** unknown token → 410 without an upstream fetch; **revocation takes effect on
++  the next request even with a warm 5-minute cache** (token is resolved *before* the
++  cache is consulted); store down + cold cache → 503 that names *our* dependency and
++  never says "supplier"; store down + warm cache → the same byte-exact body with
++  `X-SPVPN-Stale`.
++- **§10** 12 simultaneous refreshes are 1 upstream fetch (single-flight); a second
++  wave inside the TTL is 0; a row whose upstream is the hub itself → 422
++  `self_referential`, and the hub is not dialed.
++- **§11–14** health levels (`ok` / `degraded` when the rescue hop is down / supplier
++  failure visible), `/diag`, `/admin/verify` passing **and** failing on a tampered
++  response, plus a sweep proving no response body this run produced contains the
++  panel token or the supplier URL.
++
++## Support playbook
++
++| Customer says | Do |
++| --- | --- |
++| "your link doesn't work in Clash, the panel's does" | `curl -i <their URL>` → `X-SPVPN-Mode`. `exact` + broken means the panel's own file is broken for that app (it will be for their panel link too) → `&profile=safe`. `safe` when they expected `exact` → read `/diag`'s `exact_attempt[].reason`: throttled, or unusable |
++| "the pings don't show" | In `exact` the ping policy is the panel's: their `select` group has no `url`, so numbers appear in `自动选择`/`故障转移`, and their file needs `geoip.metadb` before `GEOIP` rules apply. `safe` puts a probe on the top group and needs no download |
++| "quota is wrong" | The panel decides. Both modes read its `STATUS=` line / `subscription-userinfo`; nothing here computes a number. Use the hub dashboard |
++| "I want my old link back" | Nothing was taken away: their old hub link keeps working on the hub host; this host is additive |
++
++## What this repo is not
++
++- **No dashboard, no billing, no renewals, no QR tool.** Customer rows, plans,
++  expiry, reminders and revocation all live in `sp-vpn-hub`, which owns the same
++  tables. `token-store.js` here is a verbatim copy of the hub's client so both
++  sites read one database — keep the two files in sync if a column is added.
++- **Not independent of the panel.** Exact mode *is* the panel: if it is slow or
++  blocking bots, so is this, until the safe hop takes over.
++- **Not a Vercel deployment.** `netlify/functions` only; the hub has the Vercel
++  entry if you need one here.
++
++## Version
++
++`v1.0` — announced at `/healthz`, on every response as `X-SPVPN-Version`, and in
++`exact-worker.js` (`export const VERSION`). Future updates are tagged
++(`git tag v1.1`), so "what changed since I deployed?" is a `git log v1.0..HEAD`.
+diff --git a/bin/serve.mjs b/bin/serve.mjs
+new file mode 100644
+index 0000000..90aeb5b
+--- /dev/null
++++ b/bin/serve.mjs
+@@ -0,0 +1,27 @@
++// Local dev server: node bin/serve.mjs [port]
++//   GET http://localhost:8788/            the landing page
++//   GET http://localhost:8788/e/<token>   the customer link
++//   GET http://localhost:8788/healthz     what this build is doing
++import worker, { VERSION } from "../exact-worker.js";
++
++const port = Number(process.argv[2] || 8788);
++const server = await import("node:http").then((http) => http.createServer(async (req, res) => {
++  const chunks = [];
++  for await (const c of req) chunks.push(c);
++  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
++  const request = new Request(url, {
++    method: req.method,
++    headers: new Headers(req.headers),
++    body: chunks.length ? Buffer.concat(chunks) : undefined,
++  });
++  try {
++    const r = await worker.fetch(request, process.env, {});
++    const body = Buffer.from(await r.arrayBuffer());
++    res.writeHead(r.status, Object.fromEntries(r.headers));
++    res.end(body);
++  } catch (e) {
++    res.writeHead(500, { "Content-Type": "text/plain" });
++    res.end(String((e && e.message) || e));
++  }
++}));
++server.listen(port, "0.0.0.0", () => console.log(`SP-V1 ${VERSION} listening on http://localhost:${port} — try /healthz and /e/<token>`));
+diff --git a/bin/verify-live.mjs b/bin/verify-live.mjs
+new file mode 100755
+index 0000000..f8dcf4a
+--- /dev/null
++++ b/bin/verify-live.mjs
+@@ -0,0 +1,94 @@
++#!/usr/bin/env node
++// ============================================================================
++// SP-V1 — prove it in production.
++//
++//   node bin/verify-live.mjs https://your-site.netlify.app <customer-token> [--raw]
++//
++// Three questions, answered by the deployed site rather than by this repo:
++//
++//   /healthz         is this build alive, which mode is the default, and is the
++//                    fallback hop (the hub) reachable?
++//   /diag?t=         which document would this customer get, from where, how big,
++//                    and did a fallback fire?
++//   /admin/verify?t= THE claim: our own public response, fetched the way an app
++//                    fetches it, diffed byte-by-byte against the supplier's own
++//                    response for the same client. `identical: true` is the only
++//                    answer that matters; anything else prints the offset and a
++//                    window around it.
++//
++// `&v=<timestamp>` is appended to defeat the edge cache (function responses here
++// are cached by path, so re-running the same URL can legitimately return a
++// cached body).
++// ============================================================================
++const [HOST_ARG, TOK_ARG, ...FLAGS] = process.argv.slice(2);
++const HOST = (HOST_ARG || "").replace(/\/+$/, "");
++const TOK = TOK_ARG || "";
++const KIND = FLAGS.includes("--raw") ? "raw" : "yaml";
++const BRANCH_ONLY = FLAGS.includes("--no-fallback");
++
++if (!/^https:\/\/[a-z0-9.-]+\.netlify\.app$/i.test(HOST) || !TOK) {
++  console.error("usage: node bin/verify-live.mjs https://<site>.netlify.app <token> [--raw] [--no-fallback]");
++  process.exit(2);
++}
++const bust = Date.now().toString(36);
++let failed = 0;
++const line = (ok, msg) => { console.log((ok ? "  ✅ " : "  ❌ ") + msg); if (!ok) failed++; };
++
++const get = async (path) => {
++  const res = await fetch(HOST + path, { headers: { "Cache-Control": "no-cache" } });
++  const text = await res.text();
++  let json = null;
++  try { json = JSON.parse(text); } catch (e) { /* an HTML/YAML body is fine here */ }
++  return { status: res.status, headers: res.headers, text, json };
++};
++
++console.log(`\nSP-V1 live check → ${HOST}  (kind: ${KIND})\n`);
++
++const h = await get("/healthz?force=1&v=" + bust);
++line(h.status === 200, `/healthz answers (${h.status})`);
++line(!!h.json, "/healthz is JSON — if this is HTML you are looking at a cached or mis-routed response");
++if (h.json) {
++  line(h.json.version === "v1.0", `version ${h.json.version}${h.json.version === "v1.0" ? "" : " — this is NOT the v1.0 build"}`);
++  line(h.json.mode_default === "exact", `default mode: ${h.json.mode_default}`);
++  line(!!h.json.checks?.store?.ok, "token store reachable");
++  line(!!h.json.checks?.supplier?.ok, `supplier fetch ok (mode ${h.json.checks?.supplier?.mode}, ${h.json.checks?.supplier?.bytes} bytes, ${h.json.checks?.supplier?.ms}ms)`);
++  const hub = h.json.checks?.hub;
++  if (hub && hub.ok === false) {
++    console.log("  ⚠️  the hub fallback hop is unreachable — ?profile=safe cannot rescue anything until HUB_BASE_URL is right");
++  } else {
++    line(!!hub?.ok, "fallback hop (the hub) reachable");
++  }
++  if (h.json.cache?.stale_served) {
++    console.log(`  ℹ️  ${h.json.cache.stale_served} request(s) so far were served from a stale cache while an upstream failed`);
++  }
++}
++
++const d = await get(`/diag?t=${encodeURIComponent(TOK)}&kind=${KIND}&v=${bust}`);
++line(d.status === 200 || d.status === 502, `/diag answers (${d.status})`);
++if (d.json && d.json.served) {
++  line(d.json.served.mode === "exact" || BRANCH_ONLY === false, `served mode: ${d.json.served.mode}${d.json.served.fallback ? " ← fallback: " + d.json.served.fallback : ""}`);
++  console.log(`      ${d.json.served.bytes} bytes · ${d.json.served.nodes} names · ${d.json.served.rules} rules · content-type ${d.json.served.content_type}`);
++  console.log(`      first line of what an app receives: ${JSON.stringify(d.json.served.head?.[0])}`);
++  line(d.json.loopback === false, "the row points at a panel, not at a converter");
++  line(d.json.supplier?.token === "[scrubbed]", "the panel token is not echoed by diagnostics");
++} else if (d.json) {
++  line(false, `diag reported a problem: ${d.json.error}`);
++}
++
++const v = await get(`/admin/verify?t=${encodeURIComponent(TOK)}&kind=${KIND}&v=${bust}`);
++line(v.status === 200, `/admin/verify answers (${v.status})`);
++if (v.json) {
++  console.log("");
++  line(v.json.identical === true, v.json.verdict);
++  console.log(`      served ${v.json.bytes?.served}B (sha ${String(v.json.sha256?.served).slice(0, 12)}) vs supplier ${v.json.bytes?.supplier}B (sha ${String(v.json.sha256?.supplier).slice(0, 12)})`);
++  if (!v.json.identical && v.json.first_diff_offset >= 0) {
++    console.log(`      first difference at byte ${v.json.first_diff_offset}:`);
++    console.log(`        ours:     ${JSON.stringify(v.json.around_first_diff?.served)}`);
++    console.log(`        supplier: ${JSON.stringify(v.json.around_first_diff?.supplier)}`);
++    console.log(`      served_mode was ${JSON.stringify(v.json.served_mode)} — a safe-mode fallback is a rebuilt profile and WILL differ.`);
++  }
++}
++
++console.log(failed ? `\n💥 ${failed} check(s) failed — this deployment is not serving the supplier's bytes.\n`
++  : `\n🎉 byte-exact in production: ${HOST} serves the supplier's own file.\n`);
++process.exit(failed ? 1 : 0);
+diff --git a/exact-worker.js b/exact-worker.js
+new file mode 100644
+index 0000000..39473c4
+--- /dev/null
++++ b/exact-worker.js
+@@ -0,0 +1,738 @@
++// ============================================================================
++// SP-V1 — the converter that converts nothing.  v1.0
++//
++// WHY THIS REPO EXISTS
++// The hub (sp-vpn-hub) *rebuilds* the supplier's subscription into its own mihomo
++// profile: rebranded node names, geo-free DNS, its own groups, rules and probe
++// policy. That is a product. It is also a set of differences, and every
++// difference is a possible ticket: "the panel's link pings fine, yours doesn't".
++//
++// This host removes the category. It downloads the supplier's own response and
++// hands the app those bytes:
++//
++//   exact  (default) — verbatim passthrough of the supplier's bytes. A
++//                      Clash-family client gets the panel's mihomo YAML (that is
++//                      what `&type=clash&flag=meta` is for on their side); any
++//                      other client gets the panel's base64 link list. Copied,
++//                      never parsed: no trim, no BOM strip, no re-encode, no
++//                      added comment, no renamed node.
++//   safe             — the hub's rebuilt profile, fetched from the hub at request
++//                      time (HUB_BASE_URL). Deliberately NOT a copy of that code:
++//                      a copy drifts, a proxy cannot.
++//
++// GUARANTEED: the nodes, pings, ports, keys, groups, DNS servers, rules and quota
++// lines a customer sees here are exactly the ones they see from the supplier's
++// link, because it is the same file, byte for byte.
++// NOT GUARANTEED: anything else. If the supplier's own profile is wrong for an
++// app, this is wrong the same way — that is what "identical" costs, and it is why
++// both modes ship. `/admin/verify?t=` proves the identity in production, and
++// `?profile=safe` is the way out.
++// ============================================================================
++
++import * as store from "./token-store.js";
++
++export const VERSION = "v1.0";
++export const MODES = ["exact", "safe"];
++
++// A fetched profile is kept this long, so ten app refreshes in a minute are one
++// supplier hit. Same as the hub, on purpose.
++const TTL = 300000;
++// …but it is served for up to this long when the upstream is unreachable: a
++// stale subscription beats every customer's VPN dying during a CDN hiccup.
++const STALE_MAX_MS = 24 * 3600 * 1000;
++// The platform cuts a function off at 10s. Both hops have to fit inside what is
++// left, so each gets an explicit slice instead of its own fresh timeout:
++// 6500 (supplier) + 2600 (hub fallback) < 10000.
++const FETCH_BUDGET_MS = 6500;
++const HUB_BUDGET_MS = 2600;
++const HEALTH_TTL_MS = 120000;
++
++// Headers worth copying from the upstream response. `subscription-userinfo` is
++// the quota line apps render; synthesising our own would be a new difference.
++const PASS_HEADERS = ["subscription-userinfo", "profile-update-interval", "content-disposition"];
++
++// The hub's own defaults, so a customer link only has to change host, not path.
++const DEFAULT_HUB = "https://sp-vpn.netlify.app";
++
++// ---------------------------------------------------------------------------
++// Format negotiation — copied from the hub on purpose. Two sites that negotiate
++// differently would be exactly the kind of difference this repo exists to remove.
++// Keep in sync with sp-vpn-hub/sp-vpn-worker.js.
++// ---------------------------------------------------------------------------
++export const CLASH_UA_KEYS = [
++  "clash", "clashmi", "clash-mi", "clashx", "clashmeta", "mihomo", "meta",
++  "verge", "nyanpasu", "fugu", "flclash", "stash", "streisand", "sparkle",
++  "party", "zash", "reqwest", "tauri",
++  // Karing runs the mihomo core but announces itself as "Karing/x.y.z"; with no
++  // match here it was handed a bare base64 list and had to rebuild a config
++  // itself, losing the auto-speed group and the quota header.
++  "karing",
++];
++
++export function wantsClashYaml({ fmt = "", ua = "", accept = "", ext = "" }) {
++  const f = String(fmt).toLowerCase();
++  const e = String(ext).toLowerCase();
++  if (["yaml", "yml", "clash", "mihomo", "meta"].includes(f)) return true;
++  if (["sr", "b64", "base64", "v2ray", "share", "txt"].includes(f)) return false;
++  if (e === "yaml" || e === "yml") return true;
++  if (e === "txt" || e === "sr") return false;
++  const u = String(ua).toLowerCase();
++  const a = String(accept).toLowerCase();
++  if (CLASH_UA_KEYS.some((k) => u.includes(k))) return true;
++  return a.includes("yaml") || a.includes("yml");
++}
++
++export function splitExt(seg) {
++  const m = String(seg).match(/^(.*)\.(yaml|yml|txt|sr)$/i);
++  return m ? { name: m[1], ext: m[2].toLowerCase() } : { name: seg, ext: "" };
++}
++export const safeDecode = (s) => { try { return decodeURIComponent(s); } catch (e) { return s; } };
++
++// ---------------------------------------------------------------------------
++// The one piece of interpretation in exact mode: WHICH of the panel's endpoints
++// to ask. A subscription panel answers a base64 link list by default and mihomo
++// YAML when asked with type=clash&flag=meta — that is the panel's own switch, so
++// this is not a rewrite of their config, it is requesting the same document the
++// app would request from them. `&raw=1` skips even this and fetches the stored
++// URL exactly as stored, for panels that already answer YAML.
++// ---------------------------------------------------------------------------
++export function clashYamlUrl(supplierUrl) {
++  let u;
++  try { u = new URL(String(supplierUrl)); } catch (e) { return String(supplierUrl); }
++  if (!u.searchParams.has("type")) u.searchParams.set("type", "clash");
++  if (!u.searchParams.has("flag")) u.searchParams.set("flag", "meta");
++  return u.toString();
++}
++
++/**
++ * A bot challenge / rate limit IS a response, and it is not the supplier being
++ * down. Same signatures the hub learned on 2026-11-10, because the two sites
++ * must classify a failure the same way or their dashboards disagree about it.
++ */
++export function isThrottleResponse(status, body) {
++  if (status === 429 || status === 403) return true;
++  const t = String(body || "");
++  if (!t.length || t.length > 4000) return false;
++  return /just a moment|attention required|verify you are a human|cf-chl|challenge-platform|rate limit/i.test(t);
++}
++
++/** Is this a mihomo profile — or a challenge page, an error, an empty file? */
++export function isUsableProfile(text) {
++  const t = String(text || "");
++  if (t.length < 120) return false;
++  if (/^\s*(<(!doctype|html)|\{)/i.test(t)) return false;
++  if (!/(^|\n)\s*-?\s*(proxies|proxy-providers)\s*:/.test(t)) return false;
++  if (!/(^|\n)\s*(proxy-groups|groups)\s*:/.test(t)) return false;
++  return true;
++}
++
++/** Is this a node list — base64-encoded or plain? */
++export function isUsableList(text) {
++  const t = String(text || "").trim();
++  if (t.length < 40) return false;
++  if (/^\s*<(!doctype|html)/i.test(t)) return false;
++  if (/^[a-z0-9+.-]+:\/\//im.test(t)) return true;
++  return /(?:vless|vmess|trojan|hysteria2|tuic|ss):\/\//i.test(tryDecodeB64(t));
++}
++
++function tryDecodeB64(s) {
++  try {
++    const t = String(s).replace(/\s+/g, "");
++    if (!/^[A-Za-z0-9+/=]+$/.test(t)) return "";
++    return Buffer.from(t, "base64").toString("utf8");
++  } catch (e) { return ""; }
++}
++
++/**
++ * Never echo a supplier URL and never echo a token: fetch errors and upstream
++ * bodies both end up in /diag and in customer-facing failure messages. The
++ * supplier URL is the customer's paid access; the hub scrubbed it out of its
++ * dashboard for the same reason.
++ */
++export function scrub(supplierUrl, s) {
++  let out = String(s || "");
++  try { out = out.split(String(supplierUrl)).join(new URL(String(supplierUrl)).host); } catch (e) { /* not a URL */ }
++  out = out.replace(/([?&](?:token|t)=)[^&\s"'`]+/gi, "$1[scrubbed]");
++  return out.slice(0, 400);
++}
++
++// --------------------------------------------------------------------- fetch --
++// Byte-exactness is a property of HOW the body is read, not of what is written at
++// the end. arrayBuffer() and pass the buffer through: reading as text would drop
++// nothing but re-encoding a Response(string) can rewrite CRLF and a BOM, and a
++// `.trim()` — the kind of helpful normalisation that made a difference nobody
++// asked for.
++async function grab(url, budgetMs, request) {
++  const t0 = Date.now();
++  if (!(budgetMs > 0)) return { ok: false, status: 0, error: "no time left in the function budget", ms: 0 };
++  const headers = {};
++  // Forward the CLIENT's User-Agent and Accept, and only those. A subscription
++  // panel sniffs them to decide between YAML and a link list, so forwarding them
++  // is what makes this a passthrough rather than a rewrite; forwarding
++  // Cookie/Authorization from a stranger's request would be a different bug.
++  const ua = request && request.headers && request.headers.get("user-agent");
++  if (ua) headers["User-Agent"] = ua;
++  const accept = request && request.headers && request.headers.get("accept");
++  if (accept) headers["Accept"] = accept;
++  try {
++    const res = await fetch(url, { headers, signal: AbortSignal.timeout(Math.max(300, budgetMs)) });
++    const bytes = new Uint8Array(await res.arrayBuffer());
++    return {
++      ok: res.status >= 200 && res.status < 300,
++      status: res.status,
++      bytes,
++      text: new TextDecoder("utf-8").decode(bytes),
++      headers: res.headers,
++      ms: Date.now() - t0,
++    };
++  } catch (e) {
++    const timedOut = e && (e.name === "TimeoutError" || e.name === "AbortError");
++    const secs = budgetMs % 1000 === 0 ? String(budgetMs / 1000) : (budgetMs / 1000).toFixed(1);
++    return {
++      ok: false,
++      status: 0,
++      error: timedOut ? `upstream did not answer within ${secs}s` : `upstream fetch failed: ${(e && e.message) || e}`,
++      ms: Date.now() - t0,
++    };
++  }
++}
++
++async function sha256(bytes) {
++  try {
++    const buf = bytes instanceof Uint8Array ? bytes : new TextEncoder().encode(String(bytes));
++    const h = await crypto.subtle.digest("SHA-256", buf);
++    return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
++  } catch (e) { return ""; }
++}
++
++const countNames = (t) => (String(t).match(/(^|\n)\s*-?\s*\{?\s*name\s*[:=]/g) || []).length;
++const countRules = (t) => (String(t).match(/(^|\n)\s*-?\s*'?[A-Z][A-Z0-9-]+,/g) || []).length;
++
++// -------------------------------------------------------------------- cache ----
++const _cache = new Map();   // "<token>|<kind>|<mode>|<raw>" -> { t, d }
++const _flight = new Map();  // single-flight: a stampede of app refreshes is one fetch
++let _staleServed = 0;
++
++/** Tests and /healthz diagnostics only: forget every memoised document. */
++export function resetCaches() {
++  _cache.clear();
++  _flight.clear();
++  _staleServed = 0;
++  _health = { t: 0, report: null };
++  return true;
++}
++export const cacheState = () => ({ entries: _cache.size, stale_served: _staleServed, ttl_s: TTL / 1000, stale_max_h: STALE_MAX_MS / 3600000 });
++
++function once(key, fn) {
++  const inflight = _flight.get(key);
++  if (inflight) return inflight;
++  const p = Promise.resolve().then(fn).finally(() => _flight.delete(key));
++  _flight.set(key, p);
++  return p;
++}
++
++// ------------------------------------------------------------------ helpers ----
++const sameHost = (a, b) => String(a || "").toLowerCase().replace(/:\d+$/, "") === String(b || "").toLowerCase().replace(/:\d+$/, "");
++
++// Routes that belong to a *converter* rather than a panel. Shape-based, because a
++// branded domain legitimately serves both the panel and customer links — the hub
++// learned on 2026-11-10 that the host alone proves nothing. A loop-back needs
++// host AND route to match.
++const CONV_ROUTES = /^\/(all|sub|share|e|sr)(\/|$)/i;
++
++export function isLoopback(supplierUrl, hosts) {
++  let u;
++  try { u = new URL(String(supplierUrl)); } catch (e) { return false; }
++  if (!CONV_ROUTES.test(u.pathname)) return false;
++  // Callers hand over a mix of bare hosts and full base URLs (HUB_BASE_URL is a
++  // URL), so normalise both sides — comparing "hub.test" against
++  // "https://hub.test" would miss the loop and turn a customer's own link into a
++  // request storm against us.
++  const hostOf = (h) => {
++    const s = String(h || "");
++    if (!s) return "";
++    try { return new URL(s.includes("//") ? s : "https://" + s).host; } catch (e) { return s; }
++  };
++  return (Array.isArray(hosts) ? hosts : [hosts]).filter(Boolean).some((h) => sameHost(u.host, hostOf(h)));
++}
++
++const json = (obj, status = 200) => new Response(JSON.stringify(obj, null, 2), {
++  status,
++  headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-SPVPN-Version": VERSION },
++});
++const plain = (s, status = 200, extra = {}) => new Response(String(s), {
++  status,
++  headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-SPVPN-Version": VERSION, ...extra },
++});
++
++function pickHeaders(headers) {
++  const out = {};
++  if (!headers || typeof headers.forEach !== "function") return out;
++  headers.forEach((v, k) => { if (PASS_HEADERS.includes(k.toLowerCase())) out[k.toLowerCase()] = v; });
++  return out;
++}
++
++/**
++ * Map this site's path onto the hub's, so `?profile=safe` hands the SAME customer
++ * token to the other converter. `/e/<token>` (token in the path) has no hub
++ * equivalent, so it becomes the hub's `/all/<brand>?t=` form.
++ */
++export function hubRequestUrl(hubBase, url, kind, tok) {
++  const u = new URL(String(hubBase));
++  const onOurPath = /^\/e\/[^/]+$/.test(url.pathname);
++  const q = new URLSearchParams(url.search);
++  if (onOurPath) {
++    u.pathname = "/all/SP VPN";
++    q.set("t", tok);
++  } else {
++    u.pathname = url.pathname;
++  }
++  // A YAML client must be handed YAML by the hub whatever its User-Agent says:
++  // the hub negotiates, and an unrecognised UA there means a base64 list.
++  if (kind === "yaml" && !q.has("fmt")) q.set("fmt", "yaml");
++  const s = q.toString();
++  u.search = s ? "?" + s : "";
++  return u.toString();
++}
++
++// ============================================================================
++// The decision.
++//
++//   exact  →  the supplier's bytes for this client      (default)
++//   safe   →  the hub's rebuilt profile                   (fallback, or forced)
++//
++// A failure of `exact` is not an error, it is a fallback, and the response says
++// which happened — `X-SPVPN-Fallback` for curl, `tried[]` for the tools. A
++// failure of BOTH is the only real error, and it names the cause of each hop
++// instead of blaming "the supplier" for a rate limit.
++// ============================================================================
++async function resolveBytes({ tok, kind, url, request, env }) {
++  const wantMode = String(url.searchParams.get("profile") || "").toLowerCase();
++  const strict = url.searchParams.get("fallback") === "0" || wantMode === "exact";
++  const forceSafe = wantMode === "safe";
++  const hubBase = env.HUB_BASE_URL || DEFAULT_HUB;
++  // Every knob that changes what the upstream is asked for belongs in the key:
++  // ?raw=1 and ?profile=safe are different documents, and sharing one cache entry
++  // would serve the wrong bytes to the wrong app.
++  const key = [tok, kind, forceSafe ? "safe" : "exact", url.searchParams.get("raw") === "1" ? "raw" : "auto"].join("|");
++  const hit = _cache.get(key);
++
++  // Token state is read on EVERY request, before the cache is consulted, because a
++  // revoked customer must stop within one refresh — not within five minutes. Only
++  // the expensive upstream fetch is memoised (see the hub's getDecoded, same rule).
++  let supplierUrl = null;
++  let storeErr = "";
++  try { supplierUrl = await store.resolve(tok); } catch (e) { storeErr = scrub(null, (e && e.message) || String(e)); }
++  if (!supplierUrl) {
++    // Two different noes, and the customer-facing wording must not conflate them:
++    // the store being unreachable is our problem (serve what we have), an unknown
++    // or revoked token is the customer's (stop).
++    if (storeErr && hit && Date.now() - hit.t < STALE_MAX_MS) {
++      _staleServed++;
++      return { ...hit.d, fromCache: true, staleAge: Math.round((Date.now() - hit.t) / 1000), note: "token-store-unreachable" };
++    }
++    const err = new Error(storeErr
++      ? "link store unreachable (" + storeErr + ") — no cached profile for this link yet"
++      : "unknown or revoked link");
++    err.status = storeErr ? 503 : 410;
++    throw err;
++  }
++  if (hit && Date.now() - hit.t < TTL) return { ...hit.d, fromCache: true };
++
++  return once(key, async () => {
++    if (isLoopback(supplierUrl, [url.host, hubBase])) {
++      const err = new Error("this link's upstream is itself a converter (" + new URL(supplierUrl).host +
++        ") — that is a loop, not a supplier. Point this row at the supplier panel URL in the hub dashboard.");
++      err.status = 422;
++      err.self_referential = true;
++      throw err;
++    }
++
++    const tried = [];
++
++    // ---- 1. exact ----------------------------------------------------------
++    if (!forceSafe) {
++      const target = url.searchParams.get("raw") === "1"
++        ? String(supplierUrl)
++        : (kind === "yaml" ? clashYamlUrl(supplierUrl) : String(supplierUrl));
++      const r = await grab(target, FETCH_BUDGET_MS, request);
++      const usable = r.ok && (kind === "yaml" ? isUsableProfile(r.text) : isUsableList(r.text));
++      if (usable) {
++        const d = {
++          mode: "exact",
++          bytes: r.bytes,
++          sha: await sha256(r.bytes),
++          contentType: (r.headers && r.headers.get("content-type"))
++            || (kind === "yaml" ? "text/yaml; charset=utf-8" : "text/plain; charset=utf-8"),
++          passthrough: pickHeaders(r.headers),
++          nodes: countNames(r.text),
++          ms: r.ms,
++          tried,
++        };
++        _cache.set(key, { t: Date.now(), d });
++        return d;
++      }
++      tried.push({
++        mode: "exact",
++        status: r.status || 0,
++        ms: r.ms || 0,
++        throttled: isThrottleResponse(r.status, r.text || r.error || ""),
++        reason: r.ok
++          ? "not a usable " + (kind === "yaml" ? "mihomo profile" : "node list")
++          : (r.error || ("upstream answered HTTP " + r.status)),
++      });
++    }
++
++    // ---- 2. safe: the hub's rebuilt profile --------------------------------
++    if (strict) {
++      const err = new Error(tried.length ? scrub(supplierUrl, tried[0].reason) : "exact mode only, and no cached profile to serve");
++      err.status = 502;
++      err.tried = tried;
++      throw err;
++    }
++    const hubUrl = hubRequestUrl(hubBase, url, kind, tok);
++    const hr = await grab(hubUrl, HUB_BUDGET_MS, request);
++    const hUsable = hr.ok && (kind === "yaml" ? isUsableProfile(hr.text) : isUsableList(hr.text));
++    if (hUsable) {
++      const d = {
++        mode: "safe",
++        bytes: hr.bytes,
++        sha: await sha256(hr.bytes),
++        contentType: (hr.headers && hr.headers.get("content-type"))
++          || (kind === "yaml" ? "text/yaml; charset=utf-8" : "text/plain; charset=utf-8"),
++        passthrough: pickHeaders(hr.headers),
++        nodes: countNames(hr.text),
++        ms: hr.ms,
++        // What went wrong upstream is the interesting half of a fallback: it is
++        // how a support reply says "the panel was throttling us" instead of
++        // "your link is broken".
++        note: tried.length ? (tried[0].throttled ? "exact-throttled" : "exact-unusable") : "forced-by-profile-param",
++        tried,
++      };
++      _cache.set(key, { t: Date.now(), d });
++      return d;
++    }
++
++    // ---- 3. both hops failed: serve what we have, or say exactly why --------
++    if (hit) {
++      _staleServed++;
++      return { ...hit.d, staleAge: Math.round((Date.now() - hit.t) / 1000), note: "stale-cache-both-hops-failed", tried };
++    }
++    const err = new Error("supplier: " + scrub(supplierUrl, (tried[0] && tried[0].reason) || "not attempted") +
++      "; hub: " + scrub(hubBase, hr.ok ? "answered something this client cannot use (HTTP " + hr.status + ")" : (hr.error || "HTTP " + hr.status)));
++    err.status = 503;
++    err.throttled = !!(tried[0] && tried[0].throttled);
++    err.tried = tried;
++    throw err;
++  });
++}
++
++function bytesResponse(d) {
++  const h = new Headers({
++    "Content-Type": d.contentType,
++    // no-store on everything: function responses here are cached by PATH with the
++    // query stripped, so `/all/SP VPN` is ONE entry for every customer. Serving
++    // customer B customer A's file is the worst failure mode a subscription
++    // converter can have — the token is in the query on the hub-compatible routes.
++    "Cache-Control": "no-store",
++    "X-SPVPN-Mode": d.mode,
++    "X-SPVPN-Version": VERSION,
++    "X-SPVPN-Profile": d.mode === "exact" ? "supplier-bytes" : "hub-profile",
++  });
++  for (const k of PASS_HEADERS) if (d.passthrough && d.passthrough[k]) h.set(k, d.passthrough[k]);
++  if (d.note) h.set("X-SPVPN-Fallback", String(d.note).slice(0, 120));
++  // `typeof`, not truthiness: an entry can be seconds old, and "we served a
++  // cached file because the store was down" is exactly the fact you want to see
++  // in the response when it happens — including when the age rounds to 0.
++  if (typeof d.staleAge === "number") h.set("X-SPVPN-Stale", String(d.staleAge) + "s");
++  if (d.sha) h.set("X-SPVPN-Content-Sha256", String(d.sha).slice(0, 16));
++  return new Response(d.bytes, { status: 200, headers: h });
++}
++
++const LANDING = (host, hubBase) => `<!doctype html>
++<meta charset="utf-8">
++<title>SP VPN · exact passthrough ${VERSION}</title>
++<style>
++ body{font:15px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0d10;color:#e8eaed;margin:0;padding:32px 20px}
++ .w{max-width:46rem;margin:0 auto}
++ code{background:#171a1f;padding:2px 6px;border-radius:5px;font-size:.9em;word-break:break-all}
++ .c{background:#12151a;border:1px solid #23272e;border-radius:10px;padding:14px 16px;margin:14px 0}
++ a{color:#79b8ff}
++ .m{color:#9aa0a6;font-size:.9rem}
++</style>
++<div class="w">
++  <h1>SP-V1 · exact</h1>
++  <p>Version <code>${VERSION}</code>. This host converts nothing: it downloads your
++  supplier's own subscription and hands your app those bytes, so nodes, pings,
++  groups, DNS and rules are identical to the supplier's link.</p>
++
++  <div class="c">
++    <b>Link to give a customer</b><br>
++    <code>https://${host}/e/&lt;token&gt;</code><br>
++    <span class="m">Format is chosen from the app's User-Agent, exactly as the hub does
++    it. Force one with <code>.yaml</code>, <code>?fmt=yaml</code> or <code>?fmt=sr</code>.
++    Hub-shaped links keep working: <code>/all/SP VPN?t=&lt;token&gt;</code>,
++    <code>/sub/&lt;token&gt;</code>, <code>/share/&lt;token&gt;</code>.</span>
++  </div>
++
++  <div class="c">
++    <b>Two modes</b><br>
++    <code>exact</code> (default) — the supplier's bytes, verbatim. Falls back to
++    <code>safe</code> if the panel refuses or returns something unusable.<br>
++    <code>?profile=safe</code> — the rebuilt profile from
++    <code>${hubBase.replace(/^https?:\/\//, "")}</code>, for apps that need geo-free DNS
++    and no geodata download.<br>
++    <code>?fallback=0</code> — never fall back; the way to prove which mode answered.
++  </div>
++
++  <p class="m"><a href="/healthz">/healthz</a> · <a href="/diag?t=&lt;token&gt;">/diag?t=…</a>
++  · <a href="/admin/verify?t=&lt;token&gt;">/admin/verify?t=…</a> — byte-diff of what we
++  serve against what the supplier serves</p>
++</div>`;
++
++// ============================================================================
++export default {
++  async fetch(request, env = {}) {
++    let url;
++    try { url = new URL(request.url); } catch (e) { return plain("bad request", 400); }
++    const path = url.pathname.replace(/\/+$/, "") || "/";
++    try { store.backend(env); } catch (e) { /* the store falls back to process.env */ }
++    const hubBase = env.HUB_BASE_URL || DEFAULT_HUB;
++
++    try {
++      if (path === "/" || path === "/index.html") {
++        return new Response(LANDING(url.host, hubBase), {
++          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-SPVPN-Version": VERSION },
++        });
++      }
++      if (path === "/healthz" || path === "/health") return await healthz(url, request, env, hubBase);
++
++      if (path === "/diag") {
++        const tok = url.searchParams.get("t") || "";
++        if (!tok) return plain("usage: /diag?t=<token>[&kind=raw]", 400);
++        return await diag(request, env, hubBase, tok, url);
++      }
++      if (path === "/admin/verify" || path === "/verify") {
++        const tok = url.searchParams.get("t") || "";
++        if (!tok) return plain("usage: /admin/verify?t=<token>[&kind=raw][&v=<bust>]", 400);
++        return await verify(request, env, hubBase, tok, url);
++      }
++
++      // ------------------------------------------------------ customer routes --
++      let tok = "";
++      let kind = "raw";
++      let m;
++      const neg = (seg, forced) => (forced || wantsClashYaml({
++        fmt: url.searchParams.get("fmt") || "",
++        ua: request.headers.get("user-agent") || "",
++        accept: request.headers.get("accept") || "",
++        ext: seg,
++      })) ? "yaml" : "raw";
++
++      if ((m = path.match(/^\/e\/([^/]+)$/))) {
++        const seg = splitExt(safeDecode(m[1]));
++        tok = seg.name;
++        kind = neg(seg.ext);
++      } else if ((m = path.match(/^\/all\/([^/?]*)$/))) { // * not +: an empty brand must fall back, not 404
++        tok = url.searchParams.get("t") || "";
++        const seg = splitExt(safeDecode(m[1]));
++        kind = neg(seg.ext);
++      } else if ((m = path.match(/^\/sub\/([^/]+)$/))) {
++        // /sub is an auto-update URL: always YAML. A pasted `.yaml` suffix must be
++        // stripped before the store lookup or the token would be "<tok>.yaml".
++        tok = splitExt(safeDecode(m[1])).name;
++        kind = "yaml";
++      } else if ((m = path.match(/^\/share\/([^/]+)$/))) {
++        tok = splitExt(safeDecode(m[1])).name; // a shared link is always the node list
++        kind = "raw";
++      } else if ((m = path.match(/^\/q\/([^/]+)$/))) {
++        const r = await resolveBytes({ tok: safeDecode(m[1]), kind: "raw", url, request, env });
++        const text = new TextDecoder("utf-8").decode(r.bytes);
++        const find = (s) => s.split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith("STATUS="));
++        const line = find(text) || find(tryDecodeB64(text)) || "(the supplier sent no status line)";
++        return new Response(
++          `<!doctype html><meta charset="utf-8"><title>quota</title>` +
++          `<body style="font:16px/1.7 ui-monospace,monospace;background:#0b0d10;color:#e8eaed;padding:28px">` +
++          `<div>${line.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c])}</div>` +
++          `<div style="color:#9aa0a6;margin-top:14px">mode ${r.mode} · ${r.bytes.byteLength} bytes · ${VERSION}` +
++          (r.staleAge ? ` · cached ${r.staleAge}s` : (r.fromCache ? " · from cache" : "")) +
++          `</div></body>`,
++          { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
++      } else {
++        return plain("not found — see / for the link format", 404);
++      }
++      if (!tok) return plain("missing token", 400);
++      return bytesResponse(await resolveBytes({ tok, kind, url, request, env }));
++    } catch (e) {
++      const status = e && e.status ? e.status : 502;
++      const body = { ok: false, error: scrub(null, (e && e.message) || String(e)), version: VERSION };
++      if (e && e.self_referential) body.self_referential = true;
++      if (e && e.throttled) body.throttled = true;
++      if (e && e.tried) body.tried = e.tried.map((t) => ({ ...t, reason: scrub(null, t.reason) }));
++      // An app shows "update failed" whatever we return; the JSON body is for the
++      // dashboard and whoever has the network tab open, and it names the hop.
++      return json(body, status);
++    }
++  },
++};
++
++// ------------------------------------------------------------------ /healthz ----
++let _health = { t: 0, report: null };
++async function healthz(url, request, env, hubBase) {
++  if (url.searchParams.get("force") !== "1" && _health.report && Date.now() - _health.t < HEALTH_TTL_MS) {
++    return json({ ..._health.report, cached_ms: Date.now() - _health.t });
++  }
++  const report = {
++    ok: false,
++    version: VERSION,
++    mode_default: "exact",
++    note: "exact = the supplier's own bytes, verbatim; ?profile=safe = the hub's rebuilt profile",
++    checks: { store: null, supplier: null, hub: null },
++  };
++  let tok = url.searchParams.get("t") || "";
++  try {
++    if (!tok) {
++      const rows = (await store.listAll()).filter((r) => !r.revoked);
++      rows.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
++      tok = rows.length ? rows[0].token : "";
++    }
++    report.checks.store = { ok: true, note: tok ? "reachable" : "reachable, no links minted yet" };
++  } catch (e) {
++    report.checks.store = { ok: false, error: scrub(null, (e && e.message) || String(e)) };
++  }
++  if (tok) {
++    try {
++      const d = await resolveBytes({
++        tok, kind: "yaml",
++        url: new URL("https://" + url.host + "/e/x?fmt=yaml"),
++        request, env,
++      });
++      report.checks.supplier = {
++        ok: true, mode: d.mode, bytes: d.bytes.byteLength, nodes: d.nodes, ms: d.ms,
++        from_cache: !!d.fromCache, stale_age_s: d.staleAge || 0,
++        ...(d.note ? { fallback: d.note } : {}),
++      };
++    } catch (e) {
++      report.checks.supplier = { ok: false, error: scrub(null, (e && e.message) || String(e)), throttled: !!e.throttled };
++    }
++    // Is the fallback hop alive? If it is not, `?profile=safe` cannot rescue
++    // anything — and that has to be visible before a customer needs it.
++    try {
++      const h = await grab(hubBase + "/healthz", HUB_BUDGET_MS, request);
++      report.checks.hub = { ok: h.ok, status: h.status, ms: h.ms, host: String(hubBase).replace(/^https?:\/\//, "") };
++    } catch (e) {
++      report.checks.hub = { ok: false, error: scrub(null, (e && e.message) || String(e)) };
++    }
++  } else {
++    report.checks.supplier = { ok: false, skipped: "no active customer links yet" };
++    report.checks.hub = { ok: true, skipped: "no active customer links yet" };
++  }
++  report.cache = cacheState();
++  const c = report.checks;
++  report.ok = !!(c.store && c.store.ok && c.supplier && c.supplier.ok);
++  report.level = !(c.supplier && c.supplier.ok) ? "down" : !(c.hub && c.hub.ok) ? "degraded" : "ok";
++  report.note = "supplier.ok proves this host can reach the panel and get a profile a client can import. VPN traffic never flows through here — the file is downloaded once, so this server cannot slow a node down.";
++  _health = { t: Date.now(), report };
++  return json(report);
++}
++
++// --------------------------------------------------------------------- /diag ----
++async function diag(request, env, hubBase, tok, url) {
++  const out = { version: VERSION, mode_requested: String(url.searchParams.get("profile") || "exact (default)") };
++  const kind = url.searchParams.get("kind") === "raw" ? "raw" : "yaml";
++  try {
++    const d = await resolveBytes({ tok, kind, url, request, env });
++    const text = new TextDecoder("utf-8").decode(d.bytes);
++    out.ok = true;
++    out.served = {
++      mode: d.mode, bytes: d.bytes.byteLength, sha256: d.sha, nodes: d.nodes,
++      lines: text.split(/\r?\n/).length, ms: d.ms, from_cache: !!d.fromCache,
++      stale_age_s: d.staleAge || 0, fallback: d.note || null,
++      rules: kind === "yaml" ? countRules(text) : 0,
++      content_type: d.contentType,
++      passthrough_headers: Object.keys(d.passthrough || {}),
++      // First lines only: enough to see WHICH config the app is getting (its own
++      // group names, its own dns block) without putting node credentials into a
++      // diagnostic endpoint.
++      head: kind === "yaml" ? text.split(/\r?\n/).slice(0, 12) : [text.slice(0, 60) + "…"],
++    };
++    if (d.tried && d.tried.length) out.exact_attempt = d.tried.map((t) => ({ ...t, reason: scrub(null, t.reason) }));
++  } catch (e) {
++    out.ok = false;
++    out.error = scrub(null, (e && e.message) || String(e));
++    if (e.self_referential) out.self_referential = true;
++    if (e.throttled) out.throttled = true;
++    if (e.tried) out.tried = e.tried.map((t) => ({ ...t, reason: scrub(null, t.reason) }));
++  }
++  try {
++    const sup = await store.resolve(tok);
++    if (sup) {
++      out.supplier = {
++        host: new URL(sup).host,
++        yaml_url_params: [...new URL(clashYamlUrl(sup)).searchParams.keys()].sort(),
++        token: "[scrubbed]",
++      };
++      out.loopback = isLoopback(sup, [url.host, hubBase]);
++    }
++  } catch (e) { out.supplier = { error: scrub(null, (e && e.message) || String(e)) }; }
++  // Report the path the RESCUE hop would use for this customer, not /diag itself:
++  // what an owner wants to see here is "safe mode = this token, on the hub".
++  out.hub_fallback_path = hubRequestUrl(hubBase, new URL("https://" + url.host + "/e/" + tok), kind, tok)
++    .replace(/^https?:\/\/[^/]+/, "").split("?")[0];
++  out.cache = cacheState();
++  return json(out, out.ok ? 200 : 502);
++}
++
++// -------------------------------------------------------------- /admin/verify --
++// The question this repo exists to answer, answerable against production: are the
++// bytes an app gets from here byte-identical to the bytes the supplier sends that
++// same app? Two independent fetches, compared — not a self-report.
++async function verify(request, env, hubBase, tok, url) {
++  const kind = url.searchParams.get("kind") === "raw" ? "raw" : "yaml";
++  const supplierUrl = await store.resolve(tok).catch(() => null);
++  if (!supplierUrl) return json({ ok: false, error: "unknown or revoked link" }, 410);
++  const target = kind === "yaml" ? clashYamlUrl(supplierUrl) : String(supplierUrl);
++  // What the app would receive: fetched through our own PUBLIC url, so the edge,
++  // the headers and the mode negotiation are all in the loop. `&v=` is the owner's
++  // cache-buster, because function responses here are cached by path.
++  const bust = url.searchParams.get("v") ? "&v=" + encodeURIComponent(url.searchParams.get("v")) : "";
++  const selfUrl = kind === "yaml"
++    ? `https://${url.host}/all/SP%20VPN?fmt=yaml&t=${encodeURIComponent(tok)}${bust}`
++    : `https://${url.host}/share/${encodeURIComponent(tok)}${bust ? bust.replace("&", "?") : ""}`;
++  const [ours, theirs] = await Promise.all([
++    grab(selfUrl, FETCH_BUDGET_MS, request),
++    grab(target, FETCH_BUDGET_MS, request),
++  ]);
++  const a = ours.bytes || new Uint8Array(0);
++  const b = theirs.bytes || new Uint8Array(0);
++  let firstDiff = -1;
++  const n = Math.min(a.length, b.length);
++  for (let i = 0; i < n; i++) { if (a[i] !== b[i]) { firstDiff = i; break; } }
++  const identical = ours.ok && theirs.ok && a.length === b.length && firstDiff === -1 && a.length > 0;
++  const out = {
++    identical,
++    kind,
++    version: VERSION,
++    bytes: { served: a.length, supplier: b.length, delta: a.length - b.length },
++    sha256: { served: await sha256(a), supplier: await sha256(b) },
++    first_diff_offset: firstDiff,
++    fetched: {
++      served: { ok: ours.ok, status: ours.status, ms: ours.ms },
++      supplier: { ok: theirs.ok, status: theirs.status, ms: theirs.ms },
++    },
++    nodes: { served: countNames(new TextDecoder().decode(a)), supplier: countNames(new TextDecoder().decode(b)) },
++    served_mode: (ours.headers && ours.headers.get("x-spvpn-mode")) || null,
++    supplier_host: new URL(supplierUrl).host,
++    verdict: identical
++      ? "✅ byte-identical to the supplier's own response for this client — same file, so the same nodes, the same pings, the same rules"
++      : (theirs.ok
++        ? "⚠️ served bytes differ from the supplier's. Check served_mode: a safe-mode fallback is a rebuilt profile and WILL differ — that is what the fallback is for."
++        : "⚠️ the supplier fetch failed, so nothing could be compared"),
++    note: "Two independent fetches of the same subscription, compared byte by byte. VPN traffic never passes through either converter; this only proves the file is not altered.",
++  };
++  if (!identical && firstDiff >= 0) {
++    const from = (buf) => new TextDecoder().decode(buf.slice(Math.max(0, firstDiff - 60), firstDiff + 60));
++    out.around_first_diff = { served: from(a), supplier: from(b) };
++  }
++  return json(out, 200);
++}
+diff --git a/netlify.toml b/netlify.toml
+new file mode 100644
+index 0000000..bc460bc
+--- /dev/null
++++ b/netlify.toml
+@@ -0,0 +1,27 @@
++# SP-V1 — Netlify deployment. Same shape as the hub's, on purpose: the two sites
++# read one token store and must behave identically everywhere a customer looks.
++#
++#   NODE_VERSION 20          — the code uses modern fetch/Response globals.
++#   external_node_modules    — @libsql/client ships a native binding esbuild
++#                              cannot bundle; Netlify keeps it a runtime require.
++[build]
++  functions = "netlify/functions"
++  environment = { NODE_VERSION = "20" }
++
++[functions]
++  node_bundler = "esbuild"
++  external_node_modules = ["@libsql/client", "libsql"]
++
++# CACHING — read this before touching it. Netlify's [[headers]] rules never apply
++# to a function response, and function responses here are cached by PATH with the
++# query string stripped. On the hub-compatible routes (/all/SP VPN?t=<token>) the
++# token is in the query, so one cache entry would be shared by every customer on
++# the site. That is why the worker itself sends `Cache-Control: no-store` on every
++# response, and why `/e/<token>` (token in the PATH) is the recommended link form
++# here: a per-customer path cannot be served to the wrong person even if a cache
++# rule is ever added. The hub measured a byte-identical /diag body six minutes
++# apart; a stale profile is invisible until someone's VPN breaks.
++[[redirects]]
++  from = "/*"
++  to = "/.netlify/functions/index"
++  status = 200
+diff --git a/netlify/functions/index.js b/netlify/functions/index.js
+new file mode 100644
+index 0000000..fe4a0f1
+--- /dev/null
++++ b/netlify/functions/index.js
+@@ -0,0 +1,54 @@
++// SP-V1 — Netlify Functions entry. Adapts an incoming request to the worker's
++// fetch(request, env, ctx) interface. Copied from the hub (sp-vpn-hub) so the two
++// sites wire up identically, including the legacy v1-event path that `netlify dev`
++// and older tooling still use.
++import worker from "../../exact-worker.js";
++
++const isWebRequest = (input) => typeof Request !== "undefined" && input instanceof Request;
++
++const normHeaders = (headers = {}) => {
++  const out = {};
++  if (!headers) return out;
++  if (typeof headers.forEach === "function" && typeof headers.get === "function") {
++    headers.forEach((v, k) => { out[k.toLowerCase()] = v; });
++    return out;
++  }
++  for (const [k, v] of Object.entries(headers)) {
++    out[k.toLowerCase()] = Array.isArray(v) ? String(v.join(", ")) : String(v);
++  }
++  return out;
++};
++
++const requestFromV1Event = (event) => {
++  const method = (event.httpMethod || "GET").toUpperCase();
++  const headers = normHeaders(event.headers);
++  let body = null;
++  if (["POST", "PUT", "PATCH"].includes(method)) {
++    body = event.isBase64Encoded
++      ? Buffer.from(event.body || "", "base64").toString("utf8")
++      : (event.body || "");
++  }
++  let rawUrl = event.rawUrl;
++  if (!rawUrl) {
++    const proto = (headers["x-forwarded-proto"] || "https").split(",")[0];
++    const host = headers["x-forwarded-host"] || headers["host"] || "localhost";
++    const qs = event.querystring ? "?" + event.querystring : "";
++    rawUrl = `${proto}://${host}${event.rawPath || event.path || "/"}${qs}`;
++  }
++  return new Request(rawUrl, { method, headers, body });
++};
++
++export default async (input, context) => {
++  const request = isWebRequest(input) ? input : requestFromV1Event(input);
++  // The runtime env (TOKEN_STORE_URL, TOKEN_STORE_AUTH_TOKEN, HUB_BASE_URL) reaches
++  // the worker here; `process` does not exist on the Edge runtime, hence the guard.
++  let env = {};
++  try { env = (typeof process !== "undefined" && process.env) || {}; } catch (e) { env = {}; }
++  if (context && context.env) env = { ...env, ...context.env };
++  const response = await worker.fetch(request, env, context || {});
++  const out = new Headers();
++  response.headers.forEach((v, k) => {
++    if (!["content-length", "transfer-encoding", "connection", "date"].includes(k)) out.set(k, v);
++  });
++  return new Response(response.body, { status: response.status, headers: out });
++};
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..65bc303
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,15 @@
++{
++  "name": "sp-v1",
++  "version": "1.0.0",
++  "private": true,
++  "type": "module",
++  "description": "SP-V1 — byte-exact passthrough in front of a subscription panel, with the hub's rebuilt profile as the fallback.",
++  "scripts": {
++    "test": "node test/exact.test.mjs",
++    "verify": "node bin/verify-live.mjs",
++    "dev": "node bin/serve.mjs"
++  },
++  "dependencies": {
++    "@libsql/client": "^0.14.0"
++  }
++}
+diff --git a/test/exact.test.mjs b/test/exact.test.mjs
+new file mode 100644
+index 0000000..3371e24
+--- /dev/null
++++ b/test/exact.test.mjs
+@@ -0,0 +1,564 @@
++// ============================================================================
++// SP-V1 — the exact-passthrough converter's whole contract, in one file.
++//
++// The product claim is a single sentence: what a customer's app downloads from
++// this host is BYTE-IDENTICAL to what it downloads from the supplier. So almost
++// every check here is a byte comparison against a fixture that is deliberately
++// hostile to a helpful proxy — UTF-8 BOM, CRLF line endings, flow-style YAML, a
++// group name in Chinese, commas and full-width colons inside node names — and the
++// assertion is that none of it changed.
++//
++// The rest covers the parts a passthrough still has to get right: which of the
++// panel's endpoints to ask, what counts as a usable document, which hop failed
++// when it fails, the cache, revocation, and never echoing the supplier's token.
++//
++// Run: node test/exact.test.mjs
++// ============================================================================
++import worker, {
++  VERSION, clashYamlUrl, hubRequestUrl, wantsClashYaml, CLASH_UA_KEYS, splitExt,
++  isUsableProfile, isUsableList, isThrottleResponse, isLoopback, scrub,
++  resetCaches, cacheState,
++} from "../exact-worker.js";
++import * as store from "../token-store.js";
++
++let failures = 0, checks = 0;
++const ok = (cond, msg) => {
++  checks++;
++  console.log((cond ? "  ✅" : "  ❌") + " " + msg);
++  if (!cond) failures++;
++};
++const sect = (t) => console.log("\n[" + t + "]");
++const eq = (a, b, msg) => ok(a === b, `${msg} (${JSON.stringify(a)}${a === b ? "" : " ≠ " + JSON.stringify(b)})`);
++
++// --------------------------------------------------------------- fixtures ----
++const PANEL_TOKEN = "b1a1cdaf628827722776573ffd8f5e6e";
++const SUPPLIER = `https://panel.test/api/v1/chuixue?token=${PANEL_TOKEN}`;
++const HUB = "https://hub.test";
++const HOST = "x.test";
++
++// A profile shaped like the real 吹雪云 one: BOM, CRLF, flow style, group names
++// in Chinese, a full-width colon in a node name, commas inside quoted rules.
++const YAML_PROFILE = "\uFEFF" + [
++  "mixed-port: 7890",
++  "allow-lan: false",
++  "mode: rule",
++  "log-level: info",
++  "external-controller: 127.0.0.1:9090",
++  "ipv6: true",
++  "dns: { enable: true, ipv6: true, enhanced-mode: fake-ip, fake-ip-range: 198.18.0.1/16, use-hosts: true, respect-rules: true, default-nameserver: [223.5.5.5, 119.29.29.29], nameserver: [223.5.5.5], fallback: [1.1.1.1, 8.8.8.8], fallback-filter: { geoip: true, geoip-code: CN, geosite: [gfw] } }",
++  "proxies:",
++  "- { name: 剩余流量：511.78 GB, type: vless, server: chuixuevl1.panel.test, port: 443, uuid: b06658de-1b44-4fad-8a2c-c1c7ca29f112, udp: true, tls: true, skip-cert-verify: false, flow: xtls-rprx-vision, servername: updates.cdn-apple.com, client-fingerprint: safari, reality-opts: { public-key: 70V0gDLKL3niFsNn__9MQhPMCTB_M4kNdbOKNIulii4, short-id: 3191b53b }, network: tcp }",
++  "- { name: 🇯🇵日本•移联01, type: vless, server: chuixuevl1.panel.test, port: 443, uuid: b06658de-1b44-4fad-8a2c-c1c7ca29f112, udp: true, tls: true, skip-cert-verify: false, flow: xtls-rprx-vision, servername: updates.cdn-apple.com, client-fingerprint: safari, reality-opts: { public-key: 70V0gDLKL3niFsNn__9MQhPMCTB_M4kNdbOKNIulii4, short-id: 3191b53b }, network: tcp }",
++  "- { name: 🇯🇵日本•电信01, type: vless, server: chuixuecf.panel.test, port: 443, uuid: b06658de-1b44-4fad-8a2c-c1c7ca29f112, udp: true, tls: true, skip-cert-verify: false, flow: '', client-fingerprint: ios, servername: vipjp1.cyberguard-u1s1.top, network: ws, ws-opts: { path: /chuixue/jp1, headers: { Host: vipjp1.cyberguard-u1s1.top } } }",
++  "proxy-groups:",
++  "- { name: 吹雪云, type: select, proxies: [自动选择, 故障转移, 剩余流量：511.78 GB, 🇯🇵日本•移联01, 🇯🇵日本•电信01] }",
++  "- { name: 自动选择, type: url-test, proxies: [剩余流量：511.78 GB, 🇯🇵日本•移联01, 🇯🇵日本•电信01], url: 'http://www.gstatic.com/generate_204', interval: 86400 }",
++  "- { name: 故障转移, type: fallback, proxies: [🇯🇵日本•移联01, 🇯🇵日本•电信01], url: 'http://www.gstatic.com/generate_204', interval: 7200 }",
++  "rules:",
++  "- 'IP-CIDR,1.1.1.1/32,吹雪云,no-resolve'",
++  "- 'DOMAIN-SUFFIX,cn,DIRECT'",
++  "- 'GEOIP,CN,DIRECT'",
++  "- 'MATCH,吹雪云'",
++].join("\r\n") + "\r\n";
++const YAML_BYTES = Buffer.from(YAML_PROFILE, "utf8");
++
++// What the hub would build instead — same nodes, DIFFERENT document. Used to prove
++// the two modes are not secretly the same thing, and to fake a fallback.
++const HUB_PROFILE = [
++  "# SP VPN — generated for your account (live quota below)",
++  "mixed-port: 7890",
++  "mode: rule",
++  "dns: { enable: true, ipv6: true, enhanced-mode: fake-ip, nameserver: [1.1.1.1, 8.8.8.8, 9.9.9.9] }",
++  "proxies:",
++  '- name: "🇯🇵Japan•Mobile01"',
++  "  type: vless",
++  "proxy-groups:",
++  '- name: "🚀 SP VPN"',
++  "rules:",
++  "- MATCH,🚀 SP VPN",
++].join("\n") + "\n";
++
++const NODE_LINES = [
++  "STATUS=🚀↑:0.11GB,↓:0.12GB,TOT:512GB💡Expires:2026-12-10",
++  "vless://b06658de-1b44-4fad-8a2c-c1c7ca29f112@chuixuevl1.panel.test:443?encryption=none&security=reality&type=tcp#%F0%9F%87%AF%E6%97%A5%E6%9C%AC%E2%80%A2%E7%A7%BB%E8%81%9401",
++  "vless://b06658de-1b44-4fad-8a2c-c1c7ca29f112@chuixuecf.panel.test:443?encryption=none&security=tls&type=ws#%F0%9F%87%AF%E6%97%A5%E6%9C%AC%E2%80%A2%E7%94%B5%E4%BF%A101",
++].join("\r\n") + "\r\n";
++const LIST_B64 = Buffer.from(NODE_LINES, "utf8").toString("base64");
++
++const CHALLENGE = "<html><head><title>Attention Required! | Cloudflare</title></head><body>Just a moment...</body></html>";
++
++// ------------------------------------------------------------ the fake world --
++const state = {
++  panel: "yaml",      // yaml | list | challenge | broken | timeout | down
++  hub: "yaml",        // yaml | down
++  hubHealth: "ok",    // ok | down
++  self: "exact",      // exact (same bytes as the panel) | tamper (a rebuilt doc)
++  delayMs: 0,
++};
++let fetchLog = [];
++const hits = (which) => fetchLog.filter((f) => (which === "panel" ? f.url.includes("panel.test")
++  : which === "hub" ? f.url.includes("hub.test") && !f.url.includes("/healthz")
++  : f.url.includes("x.test"))).length;
++
++const res = (body, init = {}) => new Response(typeof body === "string" ? Buffer.from(body, "utf8") : body, init);
++const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++
++globalThis.fetch = async (u, o) => {
++  const url = String(u);
++  fetchLog.push({ url, ua: (o && o.headers && o.headers["User-Agent"]) || "" });
++  if (state.delayMs) await sleep(state.delayMs);
++
++  if (url.includes("hub.test/healthz")) {
++    if (state.hubHealth === "down") throw new Error("hub health unreachable");
++    return res(JSON.stringify({ ok: true, version: "hub" }), { headers: { "Content-Type": "application/json" } });
++  }
++  if (url.includes("hub.test/")) {
++    if (state.hub === "down") throw new Error("connect ECONNREFUSED hub.test:443");
++    return res(HUB_PROFILE, { headers: { "Content-Type": "text/yaml; charset=utf-8" } });
++  }
++  if (url.includes("x.test/")) {
++    // Our own public route, as an app would see it (that is the point of /admin/verify).
++    if (state.self === "tamper") {
++      return res(HUB_PROFILE, { headers: { "Content-Type": "text/yaml; charset=utf-8", "X-SPVPN-Mode": "safe" } });
++    }
++    const wantList = url.includes("/share/");
++    return res(wantList ? LIST_B64 : YAML_BYTES, {
++      headers: { "Content-Type": wantList ? "text/plain; charset=utf-8" : "application/yaml", "X-SPVPN-Mode": "exact" },
++    });
++  }
++  if (url.includes("panel.test")) {
++    switch (state.panel) {
++      case "challenge": return res(CHALLENGE, { status: 503, headers: { "Content-Type": "text/html" } });
++      case "broken": return res('{"error":"no nodes"}', { status: 200, headers: { "Content-Type": "application/json" } });
++      case "timeout": throw Object.assign(new Error("This operation was aborted"), { name: "TimeoutError" });
++      case "down": throw new Error("fetch failed: socket hang up");
++      case "list": return res(LIST_B64, {
++        status: 200,
++        headers: {
++          "Content-Type": "text/plain; charset=utf-8",
++          "subscription-userinfo": "upload=110000000&download=120000000&total=549755813888&expire=1796860800",
++        },
++      });
++      default: return res(YAML_BYTES, {
++        status: 200,
++        headers: {
++          "Content-Type": "application/yaml",
++          "subscription-userinfo": "upload=110000000&download=120000000&total=549755813888&expire=1796860800",
++        },
++      });
++    }
++  }
++  throw new Error("stub fetch got an unexpected URL: " + url);
++};
++
++const bodies = [];   // every response body this run produced — swept for leaks at the end
++const get = async (path, opts = {}) => {
++  const headers = {};
++  if (opts.ua) headers["User-Agent"] = opts.ua;
++  if (opts.accept) headers["Accept"] = opts.accept;
++  for (const [k, v] of Object.entries(opts.headers || {})) headers[k] = v;
++  const r = await worker.fetch(new Request(`https://${HOST}${path}`, { headers }), { HUB_BASE_URL: HUB }, {});
++  const bytes = new Uint8Array(await r.arrayBuffer());
++  const dec = new TextDecoder("utf-8", { ignoreBOM: true });
++  const text = dec.decode(bytes);
++  bodies.push({ path, status: r.status, bytes, text });
++  return { r, bytes, text };
++};
++
++let TOK = "";
++const freshStore = async () => {
++  store.setBackend(new store.MemoryBackend());
++  await store.ensureInit();
++  resetCaches();
++  fetchLog = [];
++  state.panel = "yaml"; state.hub = "yaml"; state.hubHealth = "ok"; state.self = "exact"; state.delayMs = 0;
++  TOK = await store.mint(SUPPLIER, "tester");
++  return TOK;
++};
++
++// ============================================================================
++sect("1. which URL the panel is asked — the only interpretation in exact mode");
++{
++  const added = clashYamlUrl(SUPPLIER);
++  ok(added.includes("type=clash") && added.includes("flag=meta"), "appends the panel's own YAML switch");
++  ok(added.includes("token=" + PANEL_TOKEN), "the customer's panel token is carried over untouched");
++  eq(new URL(added).pathname, "/api/v1/chuixue", "path untouched");
++  eq(clashYamlUrl(added), added, "idempotent — a stored clash URL is not double-parameterised");
++  ok(clashYamlUrl(SUPPLIER + "&type=surge").includes("type=surge"), "an explicit type= from the row wins (we never overwrite the supplier's choice)");
++  ok(clashYamlUrl("not a url") === "not a url", "a malformed row passes through rather than throwing");
++}
++
++// ============================================================================
++sect("2. client negotiation — same table as the hub, on purpose");
++{
++  const t = (fmt, ua, accept, ext) => wantsClashYaml({ fmt, ua, accept, ext });
++  ok(t("", "clash-verge/v1.7.7", "", "") === true, "Clash Verge → YAML");
++  ok(t("", "Karing/1.2.34", "", "") === true, "Karing → YAML (it runs the mihomo core and says so only in its UA)");
++  ok(t("", "mihomo", "", "") === true, "mihomo → YAML");
++  ok(t("", "clashmi/2.0", "", "") === true, "Clash Mi → YAML");
++  ok(t("", "Shadowrocket/2.2.32", "", "") === false, "Shadowrocket → node list");
++  ok(t("", "curl/8.5.0", "", "") === false, "curl → node list (the safe answer when we cannot tell)");
++  ok(t("", "", "application/x-yaml", "") === true, "Accept: yaml → YAML");
++  ok(t("sr", "clash-verge/v1.7.7", "", "") === false, "?fmt=sr overrides the UA");
++  ok(t("yaml", "curl/8.5.0", "", "") === true, "?fmt=yaml overrides the UA");
++  ok(t("", "curl/8.5.0", "", "yaml") === true, "a .yaml suffix overrides the UA");
++  ok(CLASH_UA_KEYS.includes("karing") && CLASH_UA_KEYS.includes("stash"), "the UA table still covers the clients that bit us");
++  eq(splitExt("SP VPN.yaml").ext, "yaml", "splitExt reads the format suffix");
++  eq(splitExt("SP VPN.yaml").name, "SP VPN", "…and strips it from the brand");
++}
++
++// ============================================================================
++sect("3. what counts as a document, and what counts as a rate limit");
++{
++  ok(isUsableProfile(YAML_PROFILE), "a real profile is usable");
++  ok(!isUsableProfile(CHALLENGE), "a Cloudflare challenge is not");
++  ok(!isUsableProfile('{"error":"no nodes"}'), "a JSON error is not");
++  ok(!isUsableProfile(""), "an empty body is not");
++  ok(!isUsableProfile("proxies:\r\n- { name: x }\r\n"), "proxies with no proxy-groups is a Surge/legacy file, not a mihomo profile");
++  ok(isUsableList(LIST_B64), "base64 node list is usable");
++  ok(isUsableList(NODE_LINES), "plain node list is usable");
++  ok(!isUsableList(CHALLENGE), "an HTML page is not");
++  ok(!isUsableList("short"), "noise is not");
++  ok(isThrottleResponse(429, ""), "429 is a rate limit, not an outage");
++  ok(isThrottleResponse(403, "hi"), "403 ditto");
++  ok(isThrottleResponse(503, CHALLENGE), "503 + a challenge page is a rate limit");
++  ok(!isThrottleResponse(500, "internal error: bad sql"), "a 500 is NOT a rate limit");
++  ok(!isThrottleResponse(200, "x".repeat(5000)), "a long body is not a challenge interstitial");
++}
++
++// ============================================================================
++sect("4. never leak, never loop");
++{
++  const msg = `fetch failed for ${SUPPLIER} after 6s`;
++  const clean = scrub(SUPPLIER, msg);
++  ok(!clean.includes(PANEL_TOKEN), "the panel token does not survive scrub()");
++  ok(clean.includes("panel.test"), "the host survives, because that is the useful part");
++  ok(!scrub(null, "?t=abc123&x").includes("abc123"), "?t= values are scrubbed too");
++  ok(isLoopback("https://hub.test/all/SP VPN?t=" + "a".repeat(48), [HOST, HUB]) === true, "our own hub host + a converter route = a loop");
++  ok(isLoopback("https://x.test/sub/" + "a".repeat(48), [HOST, HUB]) === true, "a row pointing at THIS host is a loop");
++  ok(isLoopback("https://panel.test/api/v1/chuixue?token=x", [HOST, HUB]) === false, "the panel's own API path is not a loop");
++  ok(isLoopback("https://hub.test/api/v1/x?token=y", [HOST, HUB]) === false, "our host with a panel-shaped path is not a loop — a branded domain can serve both");
++}
++
++// ============================================================================
++sect("5. exact mode serves the supplier's bytes, unchanged");
++await freshStore();
++{
++  const { r, bytes, text } = await get(`/e/${TOK}.yaml`, { ua: "clash-verge/v1.7.7" });
++  eq(r.status, 200, "status");
++  eq(Buffer.compare(Buffer.from(bytes), YAML_BYTES), 0, "the body is byte-identical to the panel's, BOM and CRLF included");
++  ok(text.startsWith("\uFEFF"), "even the UTF-8 BOM survived — nobody 'cleaned' it");
++  ok(text.includes("吹雪云"), "the supplier's own group name is in the file, unrebranded");
++  ok(text.includes("🇯🇵日本•移联01"), "the supplier's own node names are in the file, unrebranded");
++  ok(text.includes("剩余流量：511.78 GB"), "the quota pseudo-node is kept exactly as they spell it");
++  ok(!text.includes("# SP VPN"), "not one comment of ours was added");
++  ok(!text.includes("SP VPN — generated"), "the hub's generated header is absent");
++  ok(text.includes("external-controller: 127.0.0.1:9090"), "their external-controller is served, because it is theirs");
++  ok(text.includes("223.5.5.5"), "their CN resolvers are served, because that is what their customers get");
++  eq(r.headers.get("cache-control"), "no-store", "no-store — one cached path must never serve two customers");
++  eq(r.headers.get("x-spvpn-mode"), "exact", "X-SPVPN-Mode: exact");
++  eq(r.headers.get("x-spvpn-version"), VERSION, "X-SPVPN-Version: " + VERSION);
++  eq(r.headers.get("x-spvpn-profile"), "supplier-bytes", "X-SPVPN-Profile says the document came from the supplier");
++  eq(r.headers.get("content-type"), "application/yaml", "the panel's Content-Type is passed through, not replaced with ours");
++  ok((r.headers.get("subscription-userinfo") || "").includes("total=549755813888"), "their quota header reaches the app");
++  eq(r.headers.get("x-spvpn-fallback"), null, "no fallback header when exact worked");
++  ok(fetchLog[0].url.includes("type=clash"), "the panel was asked for its YAML variant");
++  eq(fetchLog[0].ua, "clash-verge/v1.7.7", "the client's own User-Agent was forwarded (that is what selects the format)");
++  eq(hits("hub"), 0, "the hub was not contacted at all");
++}
++
++// ============================================================================
++sect("6. the node list a non-Clash app gets");
++await freshStore();
++{
++  state.panel = "list";
++  const { r, text } = await get(`/e/${TOK}`, { ua: "Shadowrocket/2.2.32" });
++  eq(r.status, 200, "status");
++  eq(text.trim(), LIST_B64.trim(), "the base64 list is the panel's, copied");
++  eq(Buffer.compare(Buffer.from(text, "utf8"), Buffer.from(LIST_B64, "utf8")), 0, "byte-identical, no re-wrapping");
++  ok(new TextDecoder().decode(Buffer.from(text.trim(), "base64")).includes("vless://b06658de"), "and it still decodes to the supplier's links");
++  eq(r.headers.get("x-spvpn-mode"), "exact", "mode exact");
++  eq(hits("panel"), 1, "one upstream fetch");
++  ok(!fetchLog[0].url.includes("flag=meta"), "a link-list client is NOT sent down the YAML endpoint");
++
++  const share = await get(`/share/${TOK}`);
++  ok(share.r.status === 200 && share.text.trim() === LIST_B64.trim(), "/share/<token> is the list too, byte-identical");
++
++  resetCaches();
++  const forced = await get(`/e/${TOK}?fmt=sr&raw=1`, { ua: "clash-verge/v1.7.7" });
++  ok(forced.r.status === 200 && !fetchLog[fetchLog.length - 1].url.includes("type=clash"), "?raw=1 asks the stored URL exactly as stored");
++}
++
++// ============================================================================
++sect("7. when exact fails, the fallback says WHY");
++await freshStore();
++state.panel = "challenge";
++{
++  const { r, text } = await get(`/e/${TOK}.yaml`, { ua: "mihomo" });
++  eq(r.status, 200, "the customer still gets a working subscription");
++  eq(r.headers.get("x-spvpn-mode"), "safe", "mode flipped to safe");
++  eq(r.headers.get("x-spvpn-profile"), "hub-profile", "and says so in X-SPVPN-Profile");
++  eq(r.headers.get("x-spvpn-fallback"), "exact-throttled", "X-SPVPN-Fallback: exact-throttled — a rate limit, not an outage");
++  eq(Buffer.compare(Buffer.from(text, "utf8"), Buffer.from(HUB_PROFILE, "utf8")), 0, "the body is the hub's rebuilt profile, itself copied verbatim");
++  eq(hits("hub"), 1, "the hub was fetched exactly once for the fallback");
++}
++{
++  let hubPath = "";
++  resetCaches(); fetchLog = [];
++  const orig = globalThis.fetch;
++  globalThis.fetch = async (u, o) => {
++    if (String(u).includes("hub.test/")) hubPath = new URL(String(u)).pathname + new URL(String(u)).search;
++    return orig(u, o);
++  };
++  const { r } = await get(`/e/${TOK}.yaml`, { ua: "mihomo" });
++  eq(r.headers.get("x-spvpn-mode"), "safe", "safe mode reached through the rewrite");
++  ok(/\/all\/SP(%20| )VPN/.test(hubPath), "…on the hub's own route (" + hubPath.split("?")[0] + ")");
++  ok(hubPath.includes("t=" + TOK), "…with the same customer token");
++  ok(hubPath.includes("fmt=yaml"), "…and fmt=yaml forced, so the hub cannot negotiate its way into a base64 list for a Clash app");
++  globalThis.fetch = orig;
++}
++{
++  await freshStore();
++  state.panel = "broken";
++  const { r } = await get(`/e/${TOK}.yaml`, { ua: "mihomo" });
++  eq(r.headers.get("x-spvpn-fallback"), "exact-unusable", "an HTTP 200 of rubbish is 'unusable', not 'throttled'");
++  eq(r.headers.get("x-spvpn-mode"), "safe", "and it still falls back");
++
++  await freshStore();
++  state.panel = "timeout";
++  const t = await get(`/e/${TOK}.yaml?fallback=0`, { ua: "mihomo" });
++  eq(t.r.status, 502, "?fallback=0 refuses to fall back and reports the failure");
++  const j = JSON.parse(t.text);
++  ok(j.tried[0].reason.includes("did not answer within"), "the reason names the timeout");
++  eq(j.throttled, undefined, "and does not invent a rate limit");
++  eq(hits("hub"), 0, "strict mode never touches the hub");
++
++  await freshStore();
++  state.panel = "down"; state.hub = "down";
++  const both = await get(`/e/${TOK}.yaml`, { ua: "mihomo" });
++  eq(both.r.status, 503, "both hops down is the only real error");
++  const bj = JSON.parse(both.text);
++  ok(bj.error.startsWith("supplier: "), "it names the supplier hop first");
++  ok(bj.error.includes("hub:"), "…and the hub hop second");
++  ok(bj.error.includes("socket hang up") && bj.error.includes("ECONNREFUSED"), "with each hop's own reason");
++  ok(!bj.error.includes(PANEL_TOKEN), "and no panel token in the message");
++
++  await freshStore();
++  state.panel = "yaml";
++  const strictOk = await get(`/e/${TOK}.yaml?profile=exact`, { ua: "mihomo" });
++  eq(strictOk.r.headers.get("x-spvpn-mode"), "exact", "profile=exact + a healthy panel = exact");
++  ok(strictOk.text.includes("吹雪云"), "byte-exact body again");
++}
++
++// ============================================================================
++sect("8. forced safe mode: straight to the hub, panel untouched");
++await freshStore();
++{
++  const { r } = await get(`/e/${TOK}.yaml?profile=safe`, { ua: "clash-verge/v1.7.7" });
++  eq(r.headers.get("x-spvpn-mode"), "safe", "mode safe");
++  eq(r.headers.get("x-spvpn-fallback"), "forced-by-profile-param", "the header says it was chosen, not forced by a failure");
++  eq(hits("panel"), 0, "the supplier was not fetched at all");
++  eq(hits("hub"), 1, "the hub was fetched once");
++
++  const sub = await get(`/sub/${TOK}?profile=safe`);
++  eq(sub.r.status, 200, "/sub works too (auto-update URL)");
++  eq(sub.text, HUB_PROFILE, "…with the same document");
++  eq(hits("hub"), 1, "served from cache, because the key is token+kind+mode, not the path — /sub and /e/ are the same subscription");
++  eq(cacheState().entries, 1, "one cache entry for one customer+mode");
++}
++
++// ============================================================================
++sect("9. tokens, revocation, and the store being down");
++await freshStore();
++{
++  const unknown = await get(`/e/${"f".repeat(48)}.yaml`);
++  eq(unknown.r.status, 410, "an unknown token is 410 Gone");
++  ok(JSON.parse(unknown.text).error.includes("unknown or revoked link"), "and says which");
++  eq(hits("panel"), 0, "an unknown token never reaches the supplier");
++
++  const warm = await get(`/e/${TOK}.yaml`);
++  eq(warm.r.status, 200, "the same token works while it is active");
++  eq(hits("panel"), 1, "fetched once while active");
++  await store.updateRow(TOK, { revoked: 1 });
++  const revoked = await get(`/e/${TOK}.yaml`);
++  eq(revoked.r.status, 410, "revocation takes effect immediately, even with a warm 5-minute cache");
++  eq(hits("panel"), 1, "…and the cached file is NOT served to a revoked customer");
++  await store.updateRow(TOK, { revoked: 0 });
++  eq((await get(`/e/${TOK}.yaml`)).r.status, 200, "un-revoking works too (the row is re-read every request)");
++
++  // Store down, nothing cached yet: 503 that names OUR dependency.
++  const good = new store.MemoryBackend();
++  await good.put({ token: "a".repeat(48), supplier_url: SUPPLIER, label: "x", revoked: false, created_at: new Date().toISOString() });
++  store.setBackend(good);
++  await store.ensureInit();
++  resetCaches();
++  store.clearCache();
++  store.setBackend({
++    init: async () => { throw new Error("no such table"); },
++    get: async () => { throw new Error("no such table"); },
++    list: async () => { throw new Error("no such table"); },
++  });
++  const cold = await get(`/e/${"a".repeat(48)}.yaml`);
++  eq(cold.r.status, 503, "store unreachable + nothing cached = 503, not a lie about the supplier");
++  ok(JSON.parse(cold.text).error.includes("link store unreachable"), "and it names OUR dependency");
++  ok(!JSON.parse(cold.text).error.includes("supplier"), "the word 'supplier' is not in it");
++
++  // Store down AFTER a good fetch: the cached file keeps the customer connected.
++  store.setBackend(good);
++  resetCaches();
++  const okAgain = await get(`/e/${"a".repeat(48)}.yaml`);
++  eq(okAgain.r.status, 200, "healthy request first, so there is something to fall back on");
++  store.clearCache();
++  store.setBackend({
++    init: async () => { throw new Error("db timeout"); },
++    get: async () => { throw new Error("db timeout"); },
++    list: async () => { throw new Error("db timeout"); },
++  });
++  const stale = await get(`/e/${"a".repeat(48)}.yaml`);
++  eq(stale.r.status, 200, "store blip: the customer sees nothing");
++  eq(stale.r.headers.get("x-spvpn-stale"), "0s", "X-SPVPN-Stale is present even at 0s — a falsy-zero bug we nearly shipped");
++  eq(stale.r.headers.get("x-spvpn-fallback"), "token-store-unreachable", "…and the note explains why");
++  eq(Buffer.compare(Buffer.from(stale.bytes), YAML_BYTES), 0, "the stale body is the same byte-exact document, not a degraded one");
++  ok(cacheState().stale_served >= 1, "and the counter /healthz reports moved");
++}
++
++// ============================================================================
++sect("10. cache, single-flight, and a loop-back row");
++await freshStore();
++{
++  state.delayMs = 40;
++  const burst = await Promise.all(Array.from({ length: 12 }, () => get(`/e/${TOK}.yaml`, { ua: "mihomo" })));
++  eq(hits("panel"), 1, "12 simultaneous app refreshes are 1 supplier fetch");
++  ok(burst.every((b) => b.r.status === 200), "and all 12 get the file");
++  state.delayMs = 0;
++  await get(`/e/${TOK}.yaml`, { ua: "mihomo" });
++  eq(hits("panel"), 1, "a second wave inside the TTL is served from cache");
++
++  const loopTok = await store.mint(`${HUB}/all/SP VPN?t=${"a".repeat(48)}`, "reseller-loop");
++  resetCaches();
++  const loop = await get(`/e/${loopTok}.yaml`);
++  eq(loop.r.status, 422, "a row whose upstream is the hub itself is refused, not looped");
++  eq(JSON.parse(loop.text).self_referential, true, "with the flag the hub's dashboard also uses");
++  ok(JSON.parse(loop.text).error.includes("loop"), "and a sentence that says what to fix");
++  eq(hits("hub"), 0, "no request was made to the hub");
++
++  resetCaches();
++  state.panel = "list";
++  const q = await get(`/q/${TOK}`);
++  eq(q.r.status, 200, "/q/<token> answers");
++  ok(q.text.includes("Expires:2026-12-10"), "…with the supplier's own status line, unparsed");
++  ok(q.text.includes("mode exact"), "…and which mode served it");
++}
++
++// ============================================================================
++sect("11. /healthz — is this deployment alive, and is the fallback alive?");
++await freshStore();
++{
++  const { text } = await get(`/healthz?force=1`);
++  const j = JSON.parse(text);
++  eq(j.version, VERSION, "version " + VERSION);
++  eq(j.ok, true, "ok");
++  eq(j.level, "ok", "level ok while both hops answer");
++  eq(j.mode_default, "exact", "the default mode is stated");
++  eq(j.checks.store.ok, true, "store reachable");
++  eq(j.checks.supplier.mode, "exact", "the probe went through exact");
++  eq(j.checks.supplier.bytes, YAML_BYTES.length, "and got the supplier's full file: " + j.checks.supplier.bytes + " bytes");
++  eq(j.checks.hub.ok, true, "the fallback hop is reachable, so ?profile=safe can actually rescue someone");
++  ok(j.note.includes("never flows through"), "and the note says what this endpoint cannot prove about speed");
++
++  await freshStore();
++  state.hubHealth = "down";
++  const h2 = JSON.parse((await get(`/healthz?force=1`)).text);
++  eq(h2.level, "degraded", "hub unreachable = degraded, not ok: the rescue route is down");
++  eq(h2.ok, true, "customers are still served, so not 'down'");
++
++  await freshStore();
++  state.panel = "challenge"; state.hub = "down";
++  const h3 = JSON.parse((await get(`/healthz?force=1`)).text);
++  eq(h3.checks.supplier.ok, false, "both hops failing shows in the health report");
++  ok(h3.checks.supplier.error.includes("challenge") || h3.checks.supplier.error.includes("503"), "with the reason: " + h3.checks.supplier.error);
++}
++
++// ============================================================================
++sect("12. /diag — which document is an app getting, and from where");
++await freshStore();
++{
++  const j = JSON.parse((await get(`/diag?t=${TOK}`)).text);
++  eq(j.ok, true, "diag ok");
++  eq(j.served.mode, "exact", "served.mode");
++  eq(j.served.bytes, YAML_BYTES.length, "served.bytes is the panel's size exactly");
++  eq(j.served.lines, YAML_PROFILE.split(/\r?\n/).length, "line count matches the panel's file exactly — we added no header line");
++  ok(j.served.head[0].includes("mixed-port: 7890"), "head shows the panel's own first line, unedited");
++  ok(j.served.head.join("\n").includes("external-controller"), "the customer's file has the panel's keys, and diag proves it without us asserting them");
++  ok(j.served.rules > 0, "rules counted: " + j.served.rules);
++  ok(j.served.passthrough_headers.includes("subscription-userinfo"), "quota header was passed through");
++  eq(j.served.content_type, "application/yaml", "content type came from the panel");
++  eq(j.served.fallback, null, "no fallback happened");
++  eq(j.supplier.host, "panel.test", "supplier host reported");
++  eq(j.supplier.token, "[scrubbed]", "the panel token is never echoed");
++  ok(j.supplier.yaml_url_params.includes("type") && j.supplier.yaml_url_params.includes("flag"), "the YAML variant's params are listed by NAME");
++  eq(j.loopback, false, "not a loop");
++  ok(j.hub_fallback_path.startsWith("/all/"), "the fallback would be " + j.hub_fallback_path);
++  ok(!JSON.stringify(j).includes(PANEL_TOKEN), "and the whole report is free of the panel token");
++
++  await freshStore();
++  state.panel = "challenge";
++  const j2 = JSON.parse((await get(`/diag?t=${TOK}`)).text);
++  eq(j2.served.mode, "safe", "diag shows the fallback that happened");
++  eq(j2.exact_attempt[0].throttled, true, "…with the exact hop's classification: throttled");
++  ok(j2.served.fallback === "exact-throttled", "and the note");
++}
++
++// ============================================================================
++sect("13. /admin/verify — the proof, against production, byte by byte");
++await freshStore();
++{
++  const j = JSON.parse((await get(`/admin/verify?t=${TOK}&v=unit1`)).text);
++  eq(j.identical, true, "our public response is byte-identical to the panel's");
++  eq(j.bytes.served, j.bytes.supplier, "same length");
++  eq(j.bytes.delta, 0, "zero delta");
++  eq(j.first_diff_offset, -1, "no first difference exists");
++  eq(j.sha256.served, j.sha256.supplier, "same sha256");
++  eq(j.served_mode, "exact", "served in exact mode");
++  ok(j.verdict.includes("byte-identical"), "verdict: " + j.verdict.slice(0, 60));
++  ok(!JSON.stringify(j).includes(PANEL_TOKEN), "the proof does not leak the token either");
++
++  await freshStore();
++  state.self = "tamper";
++  const j2 = JSON.parse((await get(`/admin/verify?t=${TOK}&v=unit2`)).text);
++  eq(j2.identical, false, "and the same endpoint FAILS when the bytes differ");
++  ok(j2.first_diff_offset >= 0, "pointing at the offset: " + j2.first_diff_offset);
++  ok(j2.bytes.served !== j2.bytes.supplier && j2.bytes.delta !== 0, "and the lengths disagree: " + j2.bytes.served + " vs " + j2.bytes.supplier);
++  eq(j2.served_mode, "safe", "…and it can see why: the response says it was a fallback");
++  ok(j2.verdict.includes("safe-mode fallback"), "verdict explains it: " + j2.verdict.slice(0, 50));
++  ok(j2.around_first_diff && j2.around_first_diff.served.length > 0, "with a window around the difference");
++}
++
++// ============================================================================
++sect("14. the edges");
++await freshStore();
++{
++  const nf = await get("/nothing-here");
++  eq(nf.r.status, 404, "unknown path is 404");
++  const land = await get("/");
++  eq(land.r.status, 200, "the landing page answers");
++  ok(land.text.includes("exact") && land.text.includes(VERSION), "and names the mode + version");
++  ok(land.text.includes("/e/&lt;token&gt;"), "with the link format to give a customer");
++  const noTok = await get("/diag");
++  eq(noTok.r.status, 400, "/diag without a token explains its usage instead of 500ing");
++  const noTok2 = await get("/e/");
++  ok(noTok2.r.status === 404 || noTok2.r.status === 400, "a bare /e/ is a 404/400, not a crash: " + noTok2.r.status);
++
++  // The leak sweep: nothing this run served may carry the panel's credentials.
++  const leaked = bodies.filter((b) => b.text.includes(PANEL_TOKEN) && !b.path.includes("x.test"));
++  eq(leaked.length, 0, `no response body leaks the panel token (${bodies.length} responses swept)`);
++  const leakedUrl = bodies.filter((b) => b.text.includes(SUPPLIER));
++  eq(leakedUrl.length, 0, "no response body contains the supplier URL either");
++}
++
++console.log("\n" + "─".repeat(70));
++if (failures) {
++  console.log(`💥 ${failures} of ${checks} checks FAILED`);
++  process.exit(1);
++}
++console.log(`🎉 ALL ${checks} CHECKS PASSED`);
+diff --git a/token-store.js b/token-store.js
+new file mode 100644
+index 0000000..be788eb
+--- /dev/null
++++ b/token-store.js
+@@ -0,0 +1,462 @@
++// ============================================================================
++// TOKEN STORE — the supplier-leak fix + the customer registry.
++//
++// BEFORE: a customer's token was base64url(their supplier URL). Anyone holding
++//         the one-link could `atob()` it and read the supplier URL in plain
++//         text. Verified against the original worker: round-trip is exact.
++//
++// AFTER:  the token is 24 cryptographically-random bytes (48 hex chars) that
++//         encode NOTHING. The supplier URL lives only in this store, which is
++//         never exposed on any public route.
++//
++// Legacy base64 tokens keep resolving forever, so no existing student's VPN
++// breaks during migration. See README.md → "Migration".
++//
++// The table also carries the customer/billing fields the dashboard needs, so
++// the leak fix and the dashboard are the same database.
++// ============================================================================
++
++const TOKEN_BYTES = 24; // 24 bytes -> 48 hex chars
++
++// Columns added after the first release. Migrations are additive only: a
++// pre-existing `links` table gets these added, and every one is nullable or
++// defaulted so existing rows stay valid.
++export const ADDED_COLUMNS = [
++  ["customer", "TEXT"],
++  ["customer_type", "TEXT NOT NULL DEFAULT 'individual'"],
++  ["supplier_account", "TEXT"],
++  ["plan", "TEXT"],
++  ["price", "REAL"],
++  ["currency", "TEXT"],
++  ["billing_cycle", "TEXT"],
++  ["paid_until", "TEXT"],
++  ["notes", "TEXT"],
++  ["supplier_expires", "TEXT"],
++  ["total_gb", "REAL"],
++  ["used_gb", "REAL"],
++  ["checked_at", "TEXT"],
++  ["account_email", "TEXT"],
++  ["account_password", "TEXT"],
++  // Usage-change tracking (see renewal.js). Both nullable, both added by the
++  // additive migration below — existing Turso rows keep every value they have
++  // and simply start with NULL here, which reads as "no previous check to
++  // compare against yet".
++  //   prev_used_gb    used_gb as of the immediately previous SUCCESSFUL check
++  //   usage_delta_gb  used_gb - prev_used_gb  (>0 used more, <0 supplier reset)
++  ["prev_used_gb", "REAL"],
++  ["usage_delta_gb", "REAL"],
++];
++
++export const LINKS_DDL = `CREATE TABLE IF NOT EXISTS links (
++  token            TEXT PRIMARY KEY,
++  supplier_url     TEXT NOT NULL,
++  label            TEXT,
++  revoked          INTEGER NOT NULL DEFAULT 0,
++  created_at       TEXT NOT NULL,
++  customer         TEXT,
++  customer_type    TEXT NOT NULL DEFAULT 'individual',
++  supplier_account TEXT,
++  plan             TEXT,
++  price            REAL,
++  currency         TEXT,
++  billing_cycle    TEXT,
++  paid_until       TEXT,
++  notes            TEXT,
++  supplier_expires TEXT,
++  total_gb         REAL,
++  used_gb          REAL,
++  checked_at       TEXT,
++  account_email    TEXT,
++  account_password TEXT,
++  prev_used_gb     REAL,
++  usage_delta_gb   REAL
++)`;
++
++export const COLUMNS = [
++  "token", "supplier_url", "label", "revoked", "created_at",
++  "customer", "customer_type", "supplier_account", "plan", "price", "currency", "billing_cycle", "paid_until",
++  "notes", "supplier_expires", "total_gb", "used_gb", "checked_at",
++  "account_email", "account_password", "prev_used_gb", "usage_delta_gb",
++];
++const SELECT = `SELECT ${COLUMNS.join(", ")} FROM links`;
++
++// Reminder de-duplication state. One row per (token, kind, day) — this is what
++// lets an hourly cron run without re-sending the same "7 days left" message.
++export const REMINDERS_DDL = `CREATE TABLE IF NOT EXISTS reminders (
++  token    TEXT NOT NULL,
++  kind     TEXT NOT NULL,
++  date     TEXT NOT NULL,
++  sent_at  TEXT NOT NULL,
++  text     TEXT,
++  PRIMARY KEY (token, kind, date)
++)`;
++
++/** Add any missing columns. Safe to run on every boot. */
++async function migrate(db, kind) {
++  let existing = new Set();
++  try {
++    if (kind === "libsql") {
++      const r = await db.execute("PRAGMA table_info(links)");
++      existing = new Set(r.rows.map((x) => x.name));
++    } else {
++      const r = await db.prepare("PRAGMA table_info(links)").all();
++      existing = new Set((r.results || []).map((x) => x.name));
++    }
++  } catch (e) {
++    existing = new Set(); // unknown dialect: try anyway, ignore dupes below
++  }
++  for (const [name, type] of ADDED_COLUMNS) {
++    if (existing.has(name)) continue;
++    try {
++      if (kind === "libsql") await db.execute(`ALTER TABLE links ADD COLUMN ${name} ${type}`);
++      else await db.prepare(`ALTER TABLE links ADD COLUMN ${name} ${type}`).run();
++    } catch (e) {
++      if (!/duplicate column/i.test(String(e.message))) throw e;
++    }
++  }
++}
++
++const norm = (r) => (r ? { ...r, customer_type: r.customer_type || "individual", revoked: !!r.revoked } : null);
++
++// ---------------------------------------------------------------- cache ----
++// Sits in front of the backend so a database blip degrades to "serve slightly
++// stale data" instead of "every student's VPN stops working". This is the
++// single most important resilience property in the file: the DB is a NEW
++// failure point that the original stateless design did not have, and this is
++// what keeps it from being a customer-facing one.
++const CACHE_TTL_MS = 5 * 60 * 1000;
++const _cache = new Map();
++
++export function invalidate(token) {
++  _cache.delete(token);
++}
++export function clearCache() {
++  _cache.clear();
++}
++
++// ------------------------------------------------------------- backends ----
++// Every backend implements: init(), get(token), put(row), list(), update(), del()
++
++/** In-memory. Tests and local poking. Data is lost on restart. */
++export class MemoryBackend {
++  constructor() {
++    this.map = new Map();
++    this.reminders = new Set();
++    this.reminderRows = [];
++    this.name = "memory";
++  }
++  async init() {}
++  async hasBeenSent(token, kind, date) {
++    return this.reminders.has(`${token}|${kind}|${date}`);
++  }
++  async markSent(token, kind, date, text = null) {
++    this.reminders.add(`${token}|${kind}|${date}`);
++    this.reminderRows.push({ token, kind, date, sent_at: new Date().toISOString(), text });
++  }
++  async listReminders(limit = 100) {
++    return this.reminderRows.slice().reverse().slice(0, limit);
++  }
++  async get(token) {
++    return norm(this.map.get(token));
++  }
++  async put(row) {
++    this.map.set(row.token, { ...row });
++  }
++  async list() {
++    return [...this.map.values()].map(norm).sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
++  }
++  async update(token, patch) {
++    const r = this.map.get(token);
++    if (!r) return null;
++    Object.assign(r, patch);
++    return norm(r);
++  }
++  async del(token) {
++    return this.map.delete(token);
++  }
++}
++
++/**
++ * SQLite via @libsql/client.
++ *   - local file  (TOKEN_STORE_URL=file:tokens.db)  -> dev / single box
++ *   - Turso       (TOKEN_STORE_URL=libsql://x.turso.io + TOKEN_STORE_AUTH_TOKEN)
++ *                                                   -> Vercel / Netlify / anywhere
++ */
++export class LibsqlBackend {
++  constructor({ url, authToken }) {
++    this.url = url;
++    this.authToken = authToken;
++    this.name = url.startsWith("file:") ? "sqlite-file" : "turso";
++  }
++  async init() {
++    const { createClient } = await import("@libsql/client");
++    this.db = createClient({ url: this.url, authToken: this.authToken });
++    await this.db.execute(LINKS_DDL);
++    await migrate(this.db, "libsql");
++    await this.db.execute(REMINDERS_DDL);
++  }
++  async hasBeenSent(token, kind, date) {
++    const r = await this.db.execute({
++      sql: "SELECT 1 AS x FROM reminders WHERE token=? AND kind=? AND date=?",
++      args: [token, kind, date],
++    });
++    return r.rows.length > 0;
++  }
++  async markSent(token, kind, date, text = null) {
++    await this.db.execute({
++      sql: "INSERT OR IGNORE INTO reminders (token, kind, date, sent_at, text) VALUES (?,?,?,?,?)",
++      args: [token, kind, date, new Date().toISOString(), text],
++    });
++  }
++  async listReminders(limit = 100) {
++    const r = await this.db.execute({
++      sql: "SELECT token, kind, date, sent_at, text FROM reminders ORDER BY sent_at DESC LIMIT ?",
++      args: [Number(limit) || 100],
++    });
++    return r.rows;
++  }
++  async get(token) {
++    const r = await this.db.execute({ sql: `${SELECT} WHERE token = ?`, args: [token] });
++    return r.rows.length ? norm(r.rows[0]) : null;
++  }
++  async put(row) {
++    await this.db.execute({
++      sql: `INSERT INTO links (${COLUMNS.join(", ")})
++            VALUES (${COLUMNS.map(() => "?").join(", ")})
++            ON CONFLICT(token) DO UPDATE SET supplier_url=excluded.supplier_url`,
++      args: COLUMNS.map((c) => (c === "customer_type" ? row[c] || "individual" : row[c] ?? null)),
++    });
++  }
++  async list() {
++    const r = await this.db.execute(`${SELECT} ORDER BY created_at DESC`);
++    return r.rows.map(norm);
++  }
++  async update(token, patch) {
++    // Update only the requested fields. A quota refresh must not overwrite a
++    // payment (or a customer edit) that was saved while the refresh was running.
++    const cols = COLUMNS.filter((c) => c !== "token" && Object.hasOwn(patch, c));
++    if (cols.length) await this.db.execute({
++      sql: `UPDATE links SET ${cols.map((c) => `${c}=?`).join(", ")} WHERE token=?`,
++      args: [...cols.map((c) => patch[c] ?? null), token],
++    });
++    return this.get(token);
++  }
++  async del(token) {
++    const r = await this.db.execute({ sql: "DELETE FROM links WHERE token = ?", args: [token] });
++    return Number(r.rowsAffected) > 0;
++  }
++}
++
++/**
++ * Cloudflare D1. Pass the D1 binding in: `new D1Backend(env.DB)`.
++ * Only reachable from a Worker — `env` is empty on Vercel/Netlify.
++ */
++export class D1Backend {
++  constructor(binding) {
++    this.db = binding;
++    this.name = "d1";
++  }
++  async init() {
++    await this.db.prepare(LINKS_DDL).run();
++    await migrate(this.db, "d1");
++    await this.db.prepare(REMINDERS_DDL).run();
++  }
++  async hasBeenSent(token, kind, date) {
++    const row = await this.db
++      .prepare("SELECT 1 AS x FROM reminders WHERE token=? AND kind=? AND date=?")
++      .bind(token, kind, date).first();
++    return !!row;
++  }
++  async markSent(token, kind, date, text = null) {
++    await this.db
++      .prepare("INSERT OR IGNORE INTO reminders (token, kind, date, sent_at, text) VALUES (?,?,?,?,?)")
++      .bind(token, kind, date, new Date().toISOString(), text).run();
++  }
++  async listReminders(limit = 100) {
++    const { results } = await this.db
++      .prepare("SELECT token, kind, date, sent_at, text FROM reminders ORDER BY sent_at DESC LIMIT ?")
++      .bind(Number(limit) || 100).all();
++    return results || [];
++  }
++  async get(token) {
++    return norm(await this.db.prepare(`${SELECT} WHERE token = ?`).bind(token).first());
++  }
++  async put(row) {
++    await this.db
++      .prepare(`INSERT INTO links (${COLUMNS.join(", ")})
++                VALUES (${COLUMNS.map(() => "?").join(", ")})
++                ON CONFLICT(token) DO UPDATE SET supplier_url=excluded.supplier_url`)
++      .bind(...COLUMNS.map((c) => (c === "customer_type" ? row[c] || "individual" : row[c] ?? null)))
++      .run();
++  }
++  async list() {
++    const { results } = await this.db.prepare(`${SELECT} ORDER BY created_at DESC`).all();
++    return (results || []).map(norm);
++  }
++  async update(token, patch) {
++    const cols = COLUMNS.filter((c) => c !== "token" && Object.hasOwn(patch, c));
++    if (cols.length) await this.db
++      .prepare(`UPDATE links SET ${cols.map((c) => `${c}=?`).join(", ")} WHERE token=?`)
++      .bind(...cols.map((c) => patch[c] ?? null), token)
++      .run();
++    return this.get(token);
++  }
++  async del(token) {
++    const r = await this.db.prepare("DELETE FROM links WHERE token = ?").bind(token).run();
++    return Number(r.meta?.changes || 0) > 0;
++  }
++}
++
++/**
++ * Pick a backend.
++ * Explicit override: setBackend(). Otherwise: D1 binding if present, else
++ * TOKEN_STORE_URL, else in-memory (safe default — never silently writes to a
++ * half-configured database).
++ */
++let _backend = null;
++let _initPromise = null;
++
++export function setBackend(b) {
++  // No-op when already initialised: the Worker fetch handler calls this on
++  // every request, and re-creating the client each time would mean a new
++  // connection (and a fresh migration) per request.
++  if (b === null && _backend) return;
++  _backend = b;
++  _initPromise = null;
++}
++
++export function pickBackend(env = {}) {
++  if (env.DB && typeof env.DB.prepare === "function") return new D1Backend(env.DB);
++  const url = env.TOKEN_STORE_URL;
++  if (url) return new LibsqlBackend({ url, authToken: env.TOKEN_STORE_AUTH_TOKEN });
++  return new MemoryBackend();
++}
++
++export function backend(runtimeEnv = {}) {
++  if (!_backend) {
++    // D1 bindings arrive on the Worker request, not process.env. Node runtimes
++    // still use process.env; an explicit test/local backend remains untouched.
++    let env = {};
++    try { env = (typeof process !== "undefined" && process.env) || {}; } catch (e) { env = {}; }
++    _backend = pickBackend({ ...env, ...runtimeEnv });
++  }
++  return _backend;
++}
++
++export async function ensureInit(runtimeEnv) {
++  if (!_initPromise) _initPromise = backend(runtimeEnv).init();
++  return _initPromise;
++}
++
++/** Opaque token: 24 random bytes, hex. Encodes nothing about the supplier. */
++export function newToken() {
++  const bytes = new Uint8Array(TOKEN_BYTES);
++  crypto.getRandomValues(bytes);
++  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
++}
++
++export function isOpaque(token) {
++  return /^[0-9a-f]{48}$/.test(String(token || ""));
++}
++
++// ------------------------------------------------------- public interface --
++
++/**
++ * Store a supplier URL, return its opaque token.
++ * `fields` may carry any of the customer/billing columns (customer, plan,
++ * price, paid_until, …).
++ */
++export async function mint(supplierUrl, label = null, fields = {}) {
++  await ensureInit();
++  const token = newToken();
++  const row = {
++    token,
++    supplier_url: supplierUrl,
++    label,
++    revoked: false,
++    created_at: new Date().toISOString(),
++    ...fields,
++  };
++  await backend().put(row);
++  _cache.set(token, { t: Date.now(), v: row });
++  return token;
++}
++
++/**
++ * Resolve any token — opaque or legacy base64 — to its supplier URL.
++ * Returns null when the token is unknown or revoked.
++ *
++ * The legacy branch is why migration is safe: base64 tokens minted before this
++ * change carry their own URL and keep working forever.
++ */
++export async function resolve(token) {
++  await ensureInit();
++
++  let row = null;
++  try {
++    if (isOpaque(token)) {
++      // Deliberately NOT served from the local cache: revocation has to take
++      // effect immediately, and a cached pre-revocation row would keep the
++      // link alive for up to the whole TTL. The worker memoises the expensive
++      // supplier fetch separately, so this stays a cheap key lookup.
++      row = await backend().get(token);
++      if (row && row.revoked) row = null;
++    } else {
++      row = legacyResolve(token);
++    }
++  } catch (e) {
++    // Backend is down. Fall back to whatever the cache still holds even if it
++    // expired — a stale subscription is far better than a dead one.
++    const stale = _cache.get(token);
++    if (stale?.v) return stale.v.supplier_url;
++    throw e;
++  }
++  if (row) _cache.set(token, { t: Date.now(), v: row });
++  return row ? row.supplier_url : null;
++}
++
++/**
++ * Legacy base64url decode, kept byte-identical to the original worker's b64d
++ * so existing links resolve exactly as before.
++ */
++function legacyResolve(token) {
++  try {
++    const s = String(token).replace(/-/g, "+").replace(/_/g, "/") +
++      "=".repeat((4 - (String(token).length % 4)) % 4);
++    const decoded = decodeURIComponent(escape(atob(s)));
++    if (!decoded) return null;
++    return { token, supplier_url: decoded, label: "legacy", revoked: false, created_at: null };
++  } catch (e) {
++    return null;
++  }
++}
++
++export async function listAll() {
++  await ensureInit();
++  return backend().list();
++}
++export async function updateRow(token, patch) {
++  await ensureInit();
++  const r = await backend().update(token, patch);
++  if (r) _cache.set(token, { t: Date.now(), v: r });
++  return r;
++}
++/** Has this (token, kind) already been sent today? Powers cron idempotency. */
++export async function hasBeenSent(token, kind, date) {
++  await ensureInit();
++  return backend().hasBeenSent(token, kind, date);
++}
++export async function markSent(token, kind, date, text = null) {
++  await ensureInit();
++  return backend().markSent(token, kind, date, text);
++}
++export async function listReminders(limit = 100) {
++  await ensureInit();
++  return backend().listReminders(limit);
++}
++
++export async function removeRow(token) {
++  await ensureInit();
++  invalidate(token);
++  return backend().del(token);
++}
+-- 
+2.39.5
+
