@@ -185,6 +185,7 @@ export async function fetchSubscription(url, budgetMs = FETCH_BUDGET_MS) {
   const deadline = Date.now() + budgetMs;
   let last = "no response";
   let attempts = 0;
+  let throttled = false; // set when the panel answered with a bot challenge / limit
   for (const ua of uas) {
     // Whatever is left of the *total* budget — never a fresh 8s per attempt.
     const remaining = deadline - Date.now();
@@ -203,6 +204,11 @@ export async function fetchSubscription(url, budgetMs = FETCH_BUDGET_MS) {
       if (links.length) {
         return { status: lines.find((l) => l.startsWith("STATUS=")) || "", links };
       }
+      // A Cloudflare/panel "hold on a moment" page IS a response, and it is NOT
+      // the supplier being broken. Marked on the error so callers can say which
+      // of the two happened instead of reporting a supplier issue for both —
+      // that conflation is what this whole investigation was about.
+      if (isThrottleResponse(res.status, rawText)) throttled = true;
       last = "provider returned HTTP " + res.status + " with no nodes - content starts: " + rawText.slice(0, 100).replace(/\s+/g, " ");
     } catch (e) {
       const timedOut = e && (e.name === "TimeoutError" || e.name === "AbortError");
@@ -216,7 +222,20 @@ export async function fetchSubscription(url, budgetMs = FETCH_BUDGET_MS) {
     }
   }
   if (!attempts) last = "supplier fetch budget exhausted before any attempt";
-  throw new Error(last);
+  const err = new Error(last);
+  err.throttled = throttled;
+  throw err;
+}
+
+// What a rate-limit / bot-challenge looks like coming back from a subscription
+// panel: 403 or 429, or one of the interstitial page signatures. Matched on the
+// BODY as well as the status because panels behind Cloudflare answer 503 with an
+// HTML challenge and some CDN-only setups answer 200 with "Just a moment...".
+export function isThrottleResponse(status, body) {
+  if (status === 429 || status === 403) return true;
+  const t = String(body || "");
+  if (t.length > 4000) return false; // a real subscription payload is longer than the wall
+  return /just a moment|attention required|verify you are a human|cf-chl|challenge-platform|rate limit/i.test(t);
 }
 
 // ---------------- node parsing / building ----------------
@@ -1585,7 +1604,7 @@ export default {
           for (const r of active) {
             try { const h = new URL(r.supplier_url).host; if (!byHost.has(h)) byHost.set(h, r); } catch (e) {}
           }
-          report.checks.supplier = { ok: true, hosts: {} };
+          report.checks.supplier = { ok: true, hosts: {}, throttled: false };
           await Promise.all([...byHost.entries()].slice(0, 5).map(async ([h, r]) => {
             const t0 = Date.now();
             try {
@@ -1596,8 +1615,17 @@ export default {
                 quota_parsed: !!s, expires: s ? s.exp : null,
               };
             } catch (e) {
+              // `throttled` is the difference between "the supplier is down" and
+              // "we annoyed the supplier's CDN". Both made the pill say the first
+              // one, which sent the owner to wait on an outage that did not exist.
+              // It is still not `ok` — the pipeline genuinely cannot read data —
+              // but the pill and the row now say which of the two it is.
               report.checks.supplier.ok = false;
-              report.checks.supplier.hosts[h] = { ok: false, ms: Date.now() - t0, error: String(e.message || e) };
+              report.checks.supplier.throttled = true;
+              report.checks.supplier.hosts[h] = {
+                ok: false, ms: Date.now() - t0, throttled: !!e.throttled,
+                error: String(e.message || e),
+              };
             }
           }));
           // Converter end-to-end: fetch our own one-link exactly like a
@@ -1729,9 +1757,18 @@ export default {
         // the worst case is that somebody gets checked twice.
         const after = Math.min(nInt(url.searchParams.get("after"), 0), rows.length);
         const deadline = Date.now() + budget;
-        let updated = 0, failed = 0, cursor = after, batches = 0;
-        // Pushed per batch, and batches run one after another, so the report
-        // order still matches the table rather than who answered first.
+        let updated = 0, failed = 0, throttled = 0, cursor = after, batches = 0, backed_off = false;
+        // Shared packages are the norm here — several customers sit on ONE supplier
+        // subscription — so a per-ROW fetch asks the panel the same question up to
+        // CONC times at once. That is what draws the bot check. One live fetch per
+        // distinct URL for the lifetime of THIS request fixes it; each row still
+        // gets its own delta written, because that is computed from its own
+        // previous values, not from the response.
+        const fetchMemo = new Map();
+        // Pushed per batch. Batches run one after another, so pages arrive in
+        // table order; inside one batch the order is whoever answered first, which
+        // is why nothing here may depend on result positions (only `results[0]`
+        // style reads of the whole array would break — none do).
         const results = [];
         for (let i = after; i < rows.length; i += CONC) {
           const left = deadline - Date.now();
@@ -1745,13 +1782,24 @@ export default {
             // every customer it successfully checks. A customer whose supplier
             // fails keeps its previous values AND its previous delta.
             const out = await checkCustomerRow(r, {
-              fetchSubscription: (u) => fetchSubscription(u, Math.max(800, Math.min(FETCH_BUDGET_MS, left - 500))),
-              quotaSummary, updateRow: storeUpdate,
+              fetchSubscription: (u) => {
+                // supplierKey() — the same identity the shared-user scan uses — so
+                // "same subscription" means the same panel URL minus a cosmetic
+                // #fragment, never "same host, different customer".
+                const k = supplierKey(String(u));
+                if (!fetchMemo.has(k)) {
+                  const perRow = Math.max(800, Math.min(FETCH_BUDGET_MS, deadline - Date.now() - 500));
+                  fetchMemo.set(k, fetchSubscription(u, perRow));
+                }
+                return fetchMemo.get(k);
+              },
+              quotaSummary, updateRow: storeUpdate, selfHost: host,
             });
             const base = { token: r.token, customer: r.customer || r.label || null };
             if (!out.ok) {
               failed++;
-              results.push({ ...base, ok: false, error: out.error });
+              if (out.throttled) throttled++;
+              results.push({ ...base, ok: false, error: out.error, throttled: !!out.throttled, self_referential: !!out.self_referential });
               return;
             }
             updated++;
@@ -1770,6 +1818,11 @@ export default {
             });
           }));
           cursor += batch.length;
+          // Walking into the same wall 19 more times does not get you through it,
+          // and it is our own request volume that raised it. Stop, hand back the
+          // cursor, and let the owner resume in a minute — paging made that a
+          // first-class operation rather than "try again and hope".
+          if (throttled) { backed_off = true; break; }
         }
         const remaining = Math.max(rows.length - cursor, 0);
         return json({
@@ -1783,6 +1836,10 @@ export default {
           partial: remaining > 0,
           updated,
           failed,
+          // the two failure kinds the owner can actually act on
+          throttled,
+          backed_off,
+          self_referential: results.filter((x) => x.self_referential).length,
           renewed: results.filter((x) => x.ok && x.renewed).length,
           marked_paid: results.filter((x) => x.ok && x.marked_paid).length,
           results,
@@ -1803,11 +1860,18 @@ export default {
           const cur = rows.find((r) => r.token === t);
           if (!cur) return json({ ok: false, token: t, error: "unknown token" }, 404);
           const out = await checkCustomerRow(cur, {
-            fetchSubscription, quotaSummary, updateRow: storeUpdate,
+            fetchSubscription, quotaSummary, updateRow: storeUpdate, selfHost: host,
           });
           // A failed check writes nothing — the row keeps its previous expiry,
-          // quota and usage delta.
-          if (!out.ok) return json({ ok: false, token: t, error: out.error }, out.code);
+          // quota and usage delta. `throttled` / `self_referential` ride along so
+          // the dashboard can tell the owner WHICH fix applies instead of
+          // reporting every failure as "supplier issue".
+          if (!out.ok) {
+            return json({
+              ok: false, token: t, error: out.error,
+              throttled: !!out.throttled, self_referential: !!out.self_referential,
+            }, out.code);
+          }
           return json({
             ok: true,
             token: t,

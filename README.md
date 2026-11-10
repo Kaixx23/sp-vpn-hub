@@ -224,6 +224,44 @@ Tuning, if you ever need it: `?budget=<ms>` (default 8000, clamped to 25000) and
 the supplier's politeness — batches stay limited to 6 concurrent fetches either
 way.
 
+### What "58 of 96 failed" actually was
+
+Running the first paged sweep against production on 2026-11-10 (`/admin/refresh`,
+114 customers) came back `updated: 38, failed: 58` in 8 s. Reading `results[].error`
+rather than the headline, those 58 were **three different problems wearing one
+label**, and only one of them is the supplier's:
+
+| the error said | what it really was |
+|---|---|
+| `HTTP 403 … Just a moment...` | **Cloudflare's bot wall.** 114 fetches at 6-way concurrency from one IP is a burst, and the panel's CDN answers a burst with a challenge — for everyone, right or wrong |
+| `HTTP 200 with no nodes - content starts: # SP VPN — generated for your account` | **a loop-back link**: somebody saved one of OUR `/all/…` customer links into the "supplier link" field. It answers 200, with our own quota comment and no nodes, because it is asking us about ourselves |
+| `HTTP 502 … (provider returned HTTP 403 …)` | a supplier panel passing its own upstream 403 through, i.e. the wall again, one layer deeper |
+
+Three changes followed from that, all pinned by `test/renewal.test.mjs` [17]:
+
+* **One fetch per distinct subscription.** Six customers on one 512 GB pack used to
+  mean six simultaneous identical requests. `/admin/refresh` now memoises by
+  `supplierKey()` for the life of the request, so a shared package costs one fetch
+  and still writes each row's own usage delta. This alone cut the sweep's request
+  count roughly in half on the live book.
+* **A wall stops the sweep instead of drowning in it.** `isThrottleResponse()`
+  classifies 403/429/`Just a moment…`; a throttled batch sets `backed_off` and the
+  sweep ends there, cursor included. Walking into the wall 18 more times only
+  deepens the challenge — and every row left in `remaining` is *queued*, not lost.
+  The pill now reads **`● supplier throttling us — retry in a minute`** rather than
+  `supplier issue`, because "wait" and "escalate" are different actions.
+* **A loop-back link is refused by name, without fetching.** `422` +
+  `self_referential`, with the fix in the sentence ("paste the link the SUPPLIER
+  gave you"). It requires the host to be OURS: `https://panel.example/sub/…` is an
+  ordinary supplier URL, and a first version that matched only the path name
+  silently disabled the whole reminder pass — `customer-accounts.test.mjs` caught
+  it, which is why that case is now in the suite too.
+
+So the sentence the dashboard can finally tell you is which of the four it is:
+*cut off by the platform clock* → click again; *throttled* → wait a minute;
+*your own link saved upstream* → fix the row in Edit; *supplier refused* → only then
+is it the supplier.
+
 ### Usage change since the previous check
 
 Each successful check compares the new used-GB against the used-GB from the
@@ -846,7 +884,7 @@ curl -d "link=https://YOUR-SUPPLIER&customer=Ali&plan=200GB/3mo&price=15&currenc
 npm test
 ```
 
-`npm test` runs **14 suites**: 976 counted checks across the nine that report a
+`npm test` runs **14 suites**: 1001 counted checks across the nine that report a
 number, 21 `node:test` subtests in three more, and two suites that report a
 verdict rather than a count (`leak-proof`, `paid-status`). The counts below are
 what each suite prints today — they were all stale in this file once already,
@@ -866,7 +904,7 @@ which is its own small argument for reading them from the run, not the README.)
 - `test/customer-accounts.test.mjs` — shared account/credential inheritance, payment isolation across checks and reminders, additive migrations and concurrent SQL updates.
 - `test/dashboard-ui.test.mjs` — real client/worker interaction: original + shared customer creation, Pay/cancel/retry/Mark unpaid, safe account display and filtering.
 - `test/shared-users.test.mjs` — the read-only shared-link finder: complete-URL matching (including rows mislabeled Individual), same-host/different-token separation, nested/copied/legacy Hub-link resolution, revoked/rotated/generated record handling, missing/cyclic/too-deep chains, leak and no-write/no-network guarantees, HTTP status semantics, and the real dashboard dialog (filter independence, escaping, hidden-on-load, retry, stale replies, Escape and focus restore).
-- `test/renewal.test.mjs` — **188 checks**: per-customer Renew / Check (changed
+- `test/renewal.test.mjs` — **213 checks**: per-customer Renew / Check (changed
   vs unchanged expiry), usage increase / unchanged / reset, no delta on the
   first check, failed checks overwriting nothing, the global refresh still
   working and persisting deltas, revoked + unknown + direct-node customers

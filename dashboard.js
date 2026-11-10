@@ -243,7 +243,7 @@ export function dashboardPage(host = "") {
       <button id="healthpill" class="pillbtn" title="System health — click for details" aria-label="System health">● checking…</button>
       <span class="live-status"><i></i><span>Live workspace</span></span>
       <a href="/qr" class="btn btn-secondary" style="text-decoration:none" title="Open QR Code Maker">📱 QR Maker</a>
-      <button id="refresh" class="btn btn-secondary" aria-label="Refresh quota" title="Check supplier quota and expiry only; payments stay unchanged">
+      <button id="refresh" class="btn btn-secondary" aria-label="Refresh quota" title="Check supplier quota and expiry only; payments stay unchanged. Works through the customer book in pages, so a big list cannot be cut off — if it stops early, click again to resume.">
         <span class="btn-symbol" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="M16.7 8A7 7 0 0 0 4.2 5.5L3 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M3 3.5V7h3.5M3.3 12A7 7 0 0 0 15.8 14.5L17 13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 16.5V13h-3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>
         <span class="btn-label">Refresh data</span>
       </button>
@@ -776,6 +776,7 @@ $("#refresh").addEventListener("click", async (e) => {
   // could report was "Refresh failed" — indistinguishable from the supplier
   // being down, when in fact the supplier was answering fine.
   let after = 0, checked = 0, updated = 0, failed = 0, total = 0, why = null, pages = 0, cut = false;
+  let throttlePages = 0, selfRef = 0, backedOff = false;
   for (;;) {
     if (++pages > 80) { cut = true; break; } // ~13k customers; bail rather than spin
     let j;
@@ -792,6 +793,8 @@ $("#refresh").addEventListener("click", async (e) => {
     }
     total = j.total || total;
     checked += j.checked || 0; updated += j.updated || 0; failed += j.failed || 0;
+    throttlePages += j.throttled || 0; selfRef += j.self_referential || 0;
+    if (j.backed_off) { backedOff = true; }
     if (!why) { const bad = (j.results || []).find((x) => x && x.ok === false); if (bad) why = (bad.customer ? bad.customer + ": " : "") + bad.error; }
     if (!j.partial || !j.next) break;
     if (j.next <= after) { cut = true; break; } // no forward progress: never loop
@@ -801,8 +804,12 @@ $("#refresh").addEventListener("click", async (e) => {
   button.disabled = false;
   if (label) label.textContent = "Refresh data";
   const parts = ["Payments unchanged. Updated " + updated + " of " + checked + " checked"];
-  if (total > checked) parts.push(cut ? "sweep stopped early" : (total - checked) + " not checked");
-  if (failed) parts.push(failed + " with a supplier problem");
+  if (total > checked) parts.push(backedOff ? "resumed where it stopped next time" : (cut ? "sweep stopped early" : (total - checked) + " not checked"));
+  // "failed" means nothing on its own. The sweep now returns the reason class, so
+  // the owner is told what to DO: wait, fix a link, or contact the supplier.
+  if (throttlePages) parts.push("the supplier's panel is rate-limiting us after " + throttlePages + " row(s) — wait a minute, then click again to resume");
+  if (selfRef) parts.push(selfRef + " row(s) have one of our own links saved as the supplier link — fix in Edit");
+  if (failed) parts.push(failed + " could not be read");
   if (why) parts.push("first one: " + why);
   toast(parts.join(" · "));
   await load();
@@ -1097,7 +1104,12 @@ $("#rows").addEventListener("click", async (e) => {
         if (HEALTH && (HEALTH.level === "degraded" || HEALTH.level === "down")) await loadHealth(true);
         return;
       }
-      toast("Could not check " + name + ": " + (j.error || ("HTTP " + response.status)), 6000);
+      // Same three-way split for a single row. j.throttled / j.self_referential
+      // come from the API's check result; a bare "HTTP 502" taught the owner
+      // nothing about which of the two problems to fix.
+      toast((j.throttled ? name + " — the supplier's panel is rate-limiting us (bot check). Nothing changed; try again in a minute."
+        : j.self_referential ? name + " — " + (j.error || "this row's supplier link is one of our own links.")
+        : "Could not check " + name + ": " + (j.error || ("HTTP " + response.status))), 6000);
     } catch (err) {
       toast("Could not check " + name + ": " + err.message, 6000);
     }
@@ -1311,9 +1323,15 @@ async function loadHealth(force) {
     // build did not take, not that the supplier is unhappy, and the fix is
     // "redeploy" rather than "wait".
     const stale = ((HEALTH.checks || {}).profile || {}).ok === false;
+    // A rate limit and an outage need different sentences, because they have
+    // different fixes: wait, versus go shout at the supplier. Collapsing them into
+    // "supplier issue" is what this pill was wrong about.
+    const sup = (HEALTH.checks || {}).supplier || {};
+    const throttled = lvl === "degraded" && sup.throttled === true;
     pill.textContent = stale ? "● old build deployed — redeploy"
       : lvl === "ok" ? "● all systems healthy"
-      : lvl === "degraded" ? "● supplier issue — serving cached" : "● system down";
+      : lvl === "degraded" ? (throttled ? "● supplier throttling us — retry in a minute" : "● supplier issue — serving cached") : "● system down";
+    if (throttled) pill.title = "The supplier's panel answered with a bot check / rate limit, not an error. Data being served is from cache. Checking the whole customer book at once is what triggers it — check one row, or wait a minute.";
     if (stale) pill.title = ((HEALTH.checks.profile.problems || []).join(", ") || "profile guard failed") + " — the code on GitHub is newer than what is serving you";
     renderHealth();
   } catch (err) { pill.className = "pillbtn bad"; pill.textContent = "● health unknown"; }

@@ -54,6 +54,8 @@ globalThis.fetch = async (u) => {
   const p = PANEL[who];
   if (!p) return new Response("nope", { status: 500 });
   if (p.down === "DEAD") return new Response("upstream exploded", { status: 503 });
+  // A CDN/bot wall in front of the panel: an HTML interstitial, not an error page.
+  if (p.down === "CHALLENGE") return new Response("<html><title>Just a moment...</title></html>", { status: 403 });
   if (p.down === "NOSTATUS") return new Response(NODE); // nodes but no STATUS line
   return new Response(body(p));
 };
@@ -548,6 +550,94 @@ console.log("\n[16] /admin/refresh pages, so a big book cannot be cut off");
     const cc = r.headers.get("cache-control");
     ok(cc && cc.includes("no-store"), `${path.split("?")[0]} answers with Cache-Control: no-store (got ${JSON.stringify(cc)})`);
   }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[17] a rate limit is not an outage; a loop-back link is not a supplier; a shared pack is fetched once");
+{
+  // Live evidence from the 2026-11-10 investigation: of the 96 customers the sweep
+  // could reach, 58 failed — and those failures were THREE different problems,
+  // every one of them printed as "supplier issue". This section pins each apart.
+  //
+  // NB the store orders by created_at DESC (newest first), so everything minted
+  // here is at the FRONT of the book: rows[0..5] are the six wall customers and
+  // rows[6] is the one that should never be reached.
+  setPanel("afterwall", 1, 1, 100, day(21));
+  const survivor = await mint("afterwall", { customer: "AfterTheWall" });
+  setPanel("wall", 1, "CHALLENGE", 100, day(9));
+  const wallToks = [];
+  for (let n = 0; n < 6; n++) wallToks.push(await mint("wall", { customer: "Wall" + n }));
+  const total = (await jget("/admin/refresh?after=99999")).total;
+  ok(total >= 8, `the book holds ${total} customers, so a back-off has somewhere left to go`);
+
+  fetchLog = [];
+  const page = await jget("/admin/refresh?after=0");
+  ok(page.checked === 6, `the sweep did one batch and stopped (checked ${page.checked}, not ${total})`);
+  ok(page.throttled === 6 && page.failed === 6,
+    `all six are classified as throttling, not as broken data (${JSON.stringify({ t: page.throttled, f: page.failed })})`);
+  ok(page.backed_off === true, "the response admits it backed off, so the dashboard can say WAIT instead of FAILED");
+  ok(page.remaining === total - 6 && page.partial === true && page.next === 6,
+    `everyone else stays queued rather than being skipped (${JSON.stringify({ r: page.remaining, p: page.partial, n: page.next })})`);
+  // fetchSubscription tries up to 3 user agents per call, so ONE logical fetch of a
+  // shared subscription logs 3 entries. Un-deduped it would be 18: six customers on
+  // one 512 GB pack asking the panel the same question six times at once, which is
+  // exactly what pulls a CDN challenge down on the whole sweep.
+  const wallCalls = fetchLog.filter((w) => w === "wall").length;
+  ok(wallCalls > 0 && wallCalls <= 3, `six customers sharing one subscription cost ONE logical fetch (${wallCalls} UA attempts, not 18)`);
+  ok(new Set(fetchLog).size === 1, `only that subscription was touched (${JSON.stringify([...new Set(fetchLog)])})`);
+  ok((await rowOf(survivor)).checked_at == null, "the customer behind the wall was not touched");
+
+  const resume = await jget("/admin/refresh?after=" + page.next + "&batch=1");
+  ok(resume.checked === 6 && resume.results.some((x) => x.ok && x.customer === "AfterTheWall"),
+    "resuming from the returned cursor reaches the row the wall stopped us at");
+
+  // One row at a time gets the same honesty, with the status the fix deserves.
+  const r = await get("/admin/link/" + wallToks[0] + "?action=check");
+  const j = JSON.parse(await r.text());
+  ok(r.status === 503, `a challenged single-row check answers 503, not 502 (got ${r.status})`);
+  ok(j.ok === false && j.throttled === true, "and it carries the throttled flag the dashboard reads");
+  ok(/rate.?limit|bot check/i.test(j.error), `the sentence says what to do about it (${JSON.stringify(j.error)})`);
+  ok((await rowOf(wallToks[0])).checked_at == null, "a throttled check still writes nothing");
+
+  // ---- (b) the loop-back link: a customer link saved as if it were the supplier's
+  const loopTok = await mint("loop", { customer: "Loopy" });
+  setPanel("loop", 1, 1, 100, day(5));
+  await store.updateRow(loopTok, { supplier_url: HOST + "/all/SP VPN?t=" + loopTok });
+  let allFetches = 0;
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (u, i) => { allFetches++; return inner(u, i); };
+  const rl = await get("/admin/link/" + loopTok + "?action=check");
+  globalThis.fetch = inner;
+  const jl = JSON.parse(await rl.text());
+  ok(rl.status === 422 && jl.self_referential === true,
+    `a customer link saved as the supplier link is refused by name (${JSON.stringify({ s: rl.status, r: jl.self_referential })})`);
+  ok(/our own customer links/i.test(jl.error || ""), `…with the fix in the sentence (${JSON.stringify(jl.error)})`);
+  ok(allFetches === 0, `and it costs no fetch at all — it used to ask the panel, and the panel was us (${allFetches})`);
+  ok((await rowOf(loopTok)).supplier_expires == null, "nothing was written for the loop-back row");
+
+  // A supplier URL that merely LIVES under one of our route names, on a foreign
+  // host, is not ours — the host half of the test is what keeps this from being a
+  // false accusation against a real panel.
+  setPanel("dead", 1, "DEAD", 0, day(1));
+  await store.updateRow(loopTok, { supplier_url: "https://panel.example/sr/other-tenant?who=dead" });
+  const r2 = await get("/admin/link/" + loopTok + "?action=check");
+  const j2 = JSON.parse(await r2.text());
+  ok(j2.self_referential === false && j2.throttled === false && r2.status === 502,
+    `someone else's /sr/ path is still tried and reported as a real failure (${JSON.stringify({ s: r2.status, r: j2.self_referential, t: j2.throttled })})`);
+
+  // ---- (c) the classifier, unit-tested, because everything above rides on it
+  const { isThrottleResponse } = await import("../sp-vpn-worker.js");
+  const cases = [
+    [[403, ""], true, "403"],
+    [[429, "slow down"], true, "429"],
+    [[200, "<html>Just a moment...</html>"], true, "200 with a challenge page"],
+    [[503, "Attention Required! | Cloudflare"], true, "503 interstitial"],
+    [[200, "STATUS=↑:1GB,↓:2GB,TOT:512GB Expires:2026-12-01\nvless://a@b:443#x"], false, "a real payload"],
+    [[500, "upstream exploded"], false, "a plain server error"],
+    [[200, "x".repeat(5000)], false, "a long body cannot be a wall"],
+  ];
+  for (const [args, want, label] of cases)
+    ok(isThrottleResponse(...args) === want, `isThrottleResponse(${label}) → ${want}`);
 }
 
 console.log("\n" + "─".repeat(70));

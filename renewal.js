@@ -156,16 +156,56 @@ export async function checkCustomerRow(row, deps) {
     };
   }
 
+  // A link our OWN converter serves, saved as if it were the supplier's. It does
+  // answer — 200, with our quota comment at the top and zero node links below it —
+  // so the old behaviour was a baffling "supplier returned no nodes" for the
+  // owner, plus a wasted request that re-enters this same worker. Recognise the
+  // shape and say what to do about it. Paths are the worker's own routes; a real
+  // panel lives on /api/… or its own script names, so this cannot misfire on a
+  // supplier URL in practice.
+  const selfHost = (() => {
+    const h = deps.selfHost;
+    if (!h) return null;
+    try { return new URL(String(h), "http://_.invalid").host; }
+    catch (e) { return String(h).replace(/^[a-z]+:\/\//i, "").split("/")[0]; }
+  })();
+  try {
+    const u = new URL(supplierUrl);
+    // The host match is MANDATORY, not a refinement. Real subscription panels
+    // live under exactly these path names — `https://panel.example/sub/account-one`
+    // is an ordinary supplier URL, and a first cut of this guard that matched the
+    // path alone silenced the whole reminder pass on it (caught by
+    // test/customer-accounts.test.mjs). So: no selfHost from the caller, or a
+    // different host, means this is not our link and we fetch it like any other.
+    if (selfHost && u.host === selfHost && /^\/(all|sub|sr|share)\//i.test(u.pathname)) {
+      return {
+        ok: false,
+        code: 422,
+        self_referential: true,
+        error: "the saved supplier link is one of our own customer links (" + u.pathname +
+          ") — it points back at this converter, so there is nothing upstream to read. " +
+          "Edit this customer and paste the link the SUPPLIER gave you.",
+      };
+    }
+  } catch (e) { /* not an absolute URL — the direct-link branch above already handled that */ }
+
   let summary = null;
   try {
     const { status } = await fetchSubscription(supplierUrl);
     summary = quotaSummary(status);
   } catch (e) {
+    // A rate limit is the panel protecting itself from US, and it is the single
+    // most common reason a whole-book refresh used to look like an outage. It gets
+    // its own words, its own 503, and its own flag — the sweep backs off on it.
+    const throttled = !!(e && e.throttled);
     return {
       ok: false,
-      code: 502,
-      error: "could not check the supplier subscription: " +
-        scrubSupplier(e && e.message ? e.message : e, supplierUrl),
+      code: throttled ? 503 : 502,
+      throttled,
+      error: throttled
+        ? "the supplier's panel is shielding itself from us right now (bot check / rate limit) — nothing was changed. Wait a minute; check one customer at a time instead of the whole book."
+        : "could not check the supplier subscription: " +
+          scrubSupplier(e && e.message ? e.message : e, supplierUrl),
     };
   }
   if (!summary) {
