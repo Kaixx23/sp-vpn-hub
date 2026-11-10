@@ -21,34 +21,73 @@ function patch(label, from, to) {
 // Routes that need the POST body. They MUST live inside the POST branch,
 // because `data` is declared there — putting them in the GET section means
 // they are never reached.
-const POST_ADMIN = `        if (path === "/admin/mint") {
-          const link = (data.link || "").trim();
-          const label = (data.label || "").trim().slice(0, 200) || null;
-          if (!/^(https?:\\/\\/|[a-z0-9+.-]+:\\/\\/)/i.test(link)) {
-            return json({ error: "link must be a subscription URL or node link" }, 400);
+const POST_ADMIN = `        if (path === "/admin/shared-link") {
+          try {
+            const source = resolveCustomerLink(data.link, host, await storeList(), "shared");
+            return json({ account: source.account });
+          } catch (e) {
+            return json({ error: e.status ? e.message : "Could not look up the supplier account." }, e.status || 500);
           }
+        }
+        if (path === "/admin/mint") {
+          const type = data.customer_type || "individual";
+          if (!validCustomerType(type)) return json({ error: "customer_type must be individual or shared" }, 400);
+          if (data.paid_until) return json({ error: "Create the customer first, then use Pay to record their payment." }, 400);
+          const label = (data.label || "").trim().slice(0, 200) || null;
+          let source;
+          try { source = resolveCustomerLink(data.link, host, await storeList(), type); }
+          catch (e) { return json({ error: e.status ? e.message : "Could not look up the supplier account." }, e.status || 500); }
           const num = (v) => (v === "" || v === undefined || v === null ? null : Number(v));
-          const txt = (v) => (v ? String(v).trim().slice(0, 200) : null);
-          const token = await storeMint(link, label, {
+          const txt = (v) => (v ? String(v).trim().slice(0, 200) || null : null);
+          const token = await storeMint(source.supplierUrl, label, {
             customer: txt(data.customer),
+            customer_type: type,
+            supplier_account: type === "shared" ? source.account.name : txt(data.supplier_account) || source.account?.name || null,
             plan: txt(data.plan),
             price: num(data.price),
             currency: txt(data.currency),
             billing_cycle: txt(data.billing_cycle),
-            paid_until: txt(data.paid_until),
             notes: txt(data.notes),
           });
           return json({ token, oneLink: \`\${host}/all/\${encodeURIComponent(brand)}?t=\${token}\` });
         }
+        if ((m0 = path.match(/^\\/admin\\/link\\/([^/]+)$/)) && url.searchParams.get("action") === "pay") {
+          const t = m0[1];
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === t);
+          if (!cur) return json({ error: "unknown token" }, 404);
+          if (cur.revoked) return json({ error: "cannot record payment for a revoked customer" }, 400);
+          const paidUntil = (data.paid_until || "").trim();
+          if (!validPaidUntil(paidUntil)) return json({ error: "Choose a valid paid-until date (today or later)." }, 400);
+          // Deliberately update ONE customer by token, not everyone on the
+          // supplier URL. Do not fetch the supplier or infer that they paid.
+          const updated = await storeUpdate(t, { paid_until: paidUntil });
+          return updated ? json(redact(updated, supplierAccounts(rows))) : json({ error: "unknown token" }, 404);
+        }
         if (path === "/admin/customer") {
+          if (data.paid_until !== undefined) return json({ error: "Use Pay to record a customer's payment." }, 400);
+          if (data.customer_type !== undefined && !validCustomerType(data.customer_type)) {
+            return json({ error: "customer_type must be individual or shared" }, 400);
+          }
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === data.token);
+          if (!cur) return json({ error: "unknown token" }, 404);
           const patchObj = {};
-          for (const k of ["customer", "plan", "currency", "billing_cycle", "paid_until", "notes", "label"]) {
+          for (const k of ["customer", "customer_type", "plan", "currency", "billing_cycle", "notes", "label"]) {
             if (data[k] !== undefined) patchObj[k] = data[k] ? String(data[k]).trim().slice(0, 200) : null;
           }
           if (data.price !== undefined) patchObj.price = data.price === "" ? null : Number(data.price);
           if (data.revoked !== undefined) patchObj.revoked = data.revoked === "1";
-          const updated = await storeUpdate(data.token || "", patchObj);
-          return updated ? json(redact(updated)) : json({ error: "unknown token" }, 404);
+          // An account name belongs to the supplier link. Renaming it on the
+          // original customer also updates its shared customers, not billing.
+          if (data.supplier_account !== undefined && (data.customer_type || customerType(cur)) === "individual") {
+            const name = String(data.supplier_account).trim().slice(0, 200) || null;
+            for (const row of rows.filter((r) => supplierKey(r.supplier_url) === supplierKey(cur.supplier_url))) {
+              await storeUpdate(row.token, { supplier_account: name });
+            }
+          }
+          const updated = await storeUpdate(cur.token, patchObj);
+          return updated ? json(redact(updated, supplierAccounts(await storeList()))) : json({ error: "unknown token" }, 404);
         }
 `;
 
@@ -61,10 +100,13 @@ const GET_ADMIN = `      // ---- dashboard ----
       }
       if (path === "/admin/dashboard.json") {
         const rows = await storeList();
-        return json({ generated: new Date().toISOString(), stats: summarise(rows), customers: rows.map(redact) });
+        const accounts = supplierAccounts(rows);
+        return json({ generated: new Date().toISOString(), stats: summarise(rows), customers: rows.map((r) => redact(r, accounts)) });
       }
       if (path === "/admin/refresh") {
-        const rows = (await storeList()).filter((r) => !r.revoked);
+        const all = await storeList();
+        const rows = all.filter((r) => !r.revoked);
+        const accounts = supplierAccounts(all);
         // Bounded parallelism: the supplier panel must not see a burst of 50
         // concurrent fetches just because you opened the dashboard.
         const CONC = 6;
@@ -73,15 +115,7 @@ const GET_ADMIN = `      // ---- dashboard ----
           const batch = rows.slice(i, i + CONC);
           await Promise.all(batch.map(async (r) => {
             try {
-              const { status } = await fetchSubscription(r.supplier_url);
-              const s = quotaSummary(status);
-              if (!s) { failed++; return; }
-              await storeUpdate(r.token, {
-                supplier_expires: s.exp,
-                total_gb: s.tot,
-                used_gb: Math.round((s.up + s.down) * 100) / 100,
-                checked_at: new Date().toISOString(),
-              });
+              await refreshCustomer(r, accounts);
               updated++;
             } catch (e) {
               failed++;
@@ -95,13 +129,25 @@ const GET_ADMIN = `      // ---- dashboard ----
       if ((m0 = path.match(/^\\/admin\\/link\\/([^/]+)$/))) {
         const t = m0[1];
         const action = url.searchParams.get("action");
+        if (action === "pay") return json({ error: "Use POST to record a payment." }, 405, { Allow: "POST" });
+        if (action === "check" || action === "renew") {
+          const rows = await storeList();
+          const cur = rows.find((r) => r.token === t);
+          if (!cur) return json({ error: "unknown token" }, 404);
+          if (cur.revoked) return json({ error: "cannot check a revoked customer" }, 400);
+          try {
+            return json(await refreshCustomer(cur, supplierAccounts(rows)));
+          } catch (e) {
+            return json({ error: e.message || "supplier check failed" }, 502);
+          }
+        }
         if (action === "rotate") {
           const cur = (await storeList()).find((r) => r.token === t);
           if (!cur) return json({ error: "unknown token" }, 404);
           // Carry the customer's details onto the new link, but never its
           // identity: token / created_at / revoked belong to the new row.
           const carry = {};
-          for (const k of ["customer", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "checked_at"]) {
+          for (const k of ["customer", "customer_type", "supplier_account", "plan", "price", "currency", "billing_cycle", "paid_until", "notes", "supplier_expires", "total_gb", "used_gb", "usage_delta_gb", "checked_at"]) {
             if (cur[k] != null) carry[k] = cur[k];
           }
           const fresh = await storeMint(cur.supplier_url, cur.label, carry);
@@ -116,12 +162,14 @@ const GET_ADMIN = `      // ---- dashboard ----
           const gone = await storeRemove(t);
           return gone ? json({ token: t, deleted: true }) : json({ error: "unknown token" }, 404);
         }
-        return json({ error: "action must be rotate | revoke | delete" }, 400);
+        return json({ error: "action must be check | pay (POST) | renew | rotate | revoke | delete" }, 400);
       }
       if (path === "/admin/links") {
         const rows = await storeList();
-        return json({ count: rows.length, links: rows.map(redact) });
+        const accounts = supplierAccounts(rows);
+        return json({ count: rows.length, links: rows.map((r) => redact(r, accounts)) });
       }
+
 `;
 
 // 1 --------------------------------------------------------------- import --
@@ -141,8 +189,10 @@ import {
   removeRow as storeRemove,
   ensureInit as storeInit,
   setBackend as storeSetBackend,
+  backend as storeBackend,
 } from "./token-store.js";
 import { dashboardPage, summarise } from "./dashboard.js";
+import { customerType, validCustomerType, supplierKey, supplierAccounts, resolveCustomerLink, validPaidUntil } from "./customer-accounts.js";
 import { runRemindersFromEnv } from "./reminders.js";
 import {
   hasBeenSent as storeHasBeenSent,
@@ -173,7 +223,7 @@ patch(
 
 // 4 ------------------------------- POST admin routes (need the POST body) --
 patch(
-  "POST /admin/mint + /admin/customer",
+  "POST customer creation, shared-account lookup, payment and editing",
   `        if (path === "/") {
           const link = (data.link || "").trim();`,
   `${POST_ADMIN}        if (path === "/") {
@@ -219,7 +269,7 @@ patch(
   `export default {
   async fetch(request, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
-    await storeInit().catch(() => {}); // a backend hiccup must not 500 every route
+    await storeInit(env).catch(() => {}); // a backend hiccup must not 500 every route
     // m0 is declared here rather than down with the route variables: the admin
     // routes use it, and a let-declaration further down would be hoisted into
     // a temporal dead zone.
@@ -230,17 +280,49 @@ patch(
 patch(
   "json() + redact() helpers",
   `function subHeaders(status, pageUrl) {`,
-  `const json = (obj, code = 200) =>
+  `const json = (obj, code = 200, headers = {}) =>
   new Response(JSON.stringify(obj, null, 2) + "\\n", {
     status: code,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: { "Content-Type": "application/json; charset=utf-8", ...headers },
   });
 // The admin output must never hand back a supplier URL in full — that is the
 // exact secret this whole change exists to protect. Host only.
-const redact = (r) => ({
+// Recheck one saved supplier subscription and persist its latest renewal and
+// quota state ONLY. Supplier renewal is never proof of a customer payment,
+// especially when several customers share the same supplier account.
+// The delta compares this check with the immediately previous check.
+async function refreshCustomer(row, accounts) {
+  const previousExpiry = row.supplier_expires || null;
+  const previousUsed = row.used_gb == null ? null : Number(row.used_gb);
+  const { status } = await fetchSubscription(row.supplier_url);
+  const s = quotaSummary(status);
+  if (!s) throw new Error("supplier did not return quota or expiry information");
+  const used = Math.round((s.up + s.down) * 100) / 100;
+  const usageDelta = previousUsed == null ? null : Math.round((used - previousUsed) * 100) / 100;
+  const updated = await storeUpdate(row.token, {
+    supplier_expires: s.exp,
+    total_gb: s.tot,
+    used_gb: used,
+    usage_delta_gb: usageDelta,
+    checked_at: new Date().toISOString(),
+  });
+  return {
+    customer: redact(updated, accounts),
+    previousExpiry,
+    expiry: s.exp,
+    expiryChanged: previousExpiry !== null && previousExpiry !== s.exp,
+    previousUsedGb: previousUsed,
+    usedGb: used,
+    usageDeltaGb: usageDelta,
+  };
+}
+
+const redact = (r, accounts = supplierAccounts([r])) => ({
   token: r.token,
   label: r.label,
   customer: r.customer || null,
+  customer_type: customerType(r),
+  supplier_account: accounts.get(supplierKey(r.supplier_url)) || null,
   plan: r.plan || null,
   price: r.price ?? null,
   currency: r.currency || null,
@@ -250,6 +332,7 @@ const redact = (r) => ({
   supplier_expires: r.supplier_expires || null,
   total_gb: r.total_gb ?? null,
   used_gb: r.used_gb ?? null,
+  usage_delta_gb: r.usage_delta_gb ?? null,
   checked_at: r.checked_at || null,
   revoked: !!r.revoked,
   created_at: r.created_at,
@@ -329,7 +412,7 @@ patch(
   // see README → Scheduling.
   async scheduled(event, env, ctx) {
     if (env && (env.DB || env.TOKEN_STORE_URL)) storeSetBackend(null);
-    await storeInit().catch(() => {});
+    await storeInit(env).catch(() => {});
     await runRemindersFromEnv(env || {}, {
       listAll: storeList, updateRow: storeUpdate,
       hasBeenSent: storeHasBeenSent, markSent: storeMarkSent,
