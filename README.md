@@ -319,11 +319,16 @@ we simply did not ship — that gap was real, and is now closed:
 | `dns.fallback-filter` | `{geoip: true, geosite: [gfw], …}` | `geoip: CN` on `?cn=1` only, none globally | deliberate: both need geodata the app would have to download at import — see the geo-free section in *No latency numbers*. |
 | `fake-ip-filter` | absent | present | superset, harmless. |
 | the two quota lines | two extra vless nodes aimed at the same server | a comment, kept out of test groups | deliberate: they are duplicate nodes, and an info row inside a test group reads as a dead node. |
-| groups / names | `吹雪云` select, `自动选择` url-test 86400, `故障转移` fallback 7200 | `🚀 SP VPN` + `⚡ Auto Speed` + `🔁 Failover` + carrier lines + `🇨🇳 Direct` | the product. Probe policy is the panel's own numbers (gstatic 204, 86400/7200, no `lazy`, no `tolerance`, no `expected-status`), pinned by 92 checks in `test/profile-guard.test.mjs`. |
+| groups | **three**: `吹雪云` select (no `url`, so no latency on the top group), `自动选择` url-test 86400, `故障转移` fallback 7200 | **six**: `🚀 SP VPN` + `⚡ Auto Speed` + `🔁 Failover` + `📱 移动专线` + `📡 电信专线` + `🇨🇳 Direct` | the product. Probe policy is the panel's own numbers (gstatic 204, 86400/7200, no `lazy`, no `tolerance`, no `expected-status`), pinned by 92 checks in `test/profile-guard.test.mjs`. We add the `url` the panel's top group lacks — that missing `url` is the "no latency numbers" complaint. |
+| quota rows inside test groups | yes: `剩余流量`/`套餐到期` are the **first two members** of `自动选择` and `故障转移`, so mihomo's initial pick before the first probe round is an info row | kept out of every test group (they stay listed under `🚀 SP VPN`, like the panel lists them) | deliberate — same "info row looks like a dead node" guard as `info-in-test`. Consequence worth knowing: on the panel's own file the auto group can *start* on the quota node. |
+| `rules:` | ~250 hand-curated lines: Google DNS + Telegram ranges → the tunnel, Apple/CDN/`mzstatic`/`aaplimg` → DIRECT, the usual Chinese-site DIRECT block (bilibili/qq/163/taobao/`microsoft.com`/`office.com`/`speedtest.net`…), then `DOMAIN-SUFFIX,cn` + `DOMAIN-KEYWORD,-cn` + `GEOIP,CN,DIRECT`, `MATCH,吹雪云` | global: private/LAN only, then `MATCH,🚀 SP VPN`. `&cn=1`: `GEOIP,PRIVATE` + `DOMAIN-SUFFIX,cn` + `GEOIP,CN,DIRECT`, then `MATCH` | the biggest real behavioural difference, and it is the geo-free design: no curated lists to maintain, nothing that needs geodata before the profile works. Everything non-private goes through the tunnel on the global profile; a customer in China who wants CN sites direct uses `&cn=1`. Their `smartdns吹雪云.com` line — a template-substitution artifact in *their* file — is a good illustration of what maintaining that list costs. |
+| `rule-providers` / ad-blocking | **none** in the subscription (their `proxy-groups:` is followed straight by `rules:`) | none | parity. Neither file blocks ads; anyone telling a customer this link blocks ads is describing a different template. |
 
-So: **no difference that changes which server a customer reaches or how that
-connection is negotiated**, and the wrapper now differs only where we have written
-down why. `X-SPVPN-Profile` ends in `;v6-parity` so `curl -i` on the link settles
+So: **which server a customer reaches, and how that connection is negotiated, is
+identical** — same node dicts, same probe policy, same DNS shape. What genuinely
+differs is (a) the routing rules, because we refuse to ship a curated list, and
+(b) the extra groups/brand names the hub exists to provide. Both are written down
+above rather than discovered by a customer later. `X-SPVPN-Profile` ends in `;v6-parity` so `curl -i` on the link settles
 it per response without opening the file; `test/profile-guard.test.mjs` pins all
 five lines.
 
