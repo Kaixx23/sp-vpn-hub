@@ -3,10 +3,10 @@
 > **Business source of truth**
 >
 > Live business repository: `Kaixx23/sp-vpn-hub`
-> Live business branch: `arena/01a0e3a9-sp-vpn-hub`
+> Live business branch: **`arena/e009e699-sp-vpn-hub`** — confirmed by the owner on 2026-11-10, and this is the branch Netlify builds.
 > Live site: `https://sp-vpn.netlify.app/`
 >
-> Future AI/coding sessions should read [`BUSINESS_SOURCE_OF_TRUTH.md`](./BUSINESS_SOURCE_OF_TRUTH.md) before making changes. The live business code is on `arena/01a0e3a9-sp-vpn-hub`, not necessarily `main`.
+> Future AI/coding sessions should read [`BUSINESS_SOURCE_OF_TRUTH.md`](./BUSINESS_SOURCE_OF_TRUTH.md) before making changes. The live business code is NOT on `main`, and `arena/01a0e3a9-sp-vpn-hub` (which that file used to name) is now behind: its content is fully merged into the live branch, while its own tip still carries the pre-PR-#11 Clash profile.
 
 Drop-in replacement for `sp-global` that fixes the supplier-link leak and adds a
 token registry (the database your dashboard will sit on).
